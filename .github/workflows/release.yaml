@@ -1,0 +1,219 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  binary: banana-monkey-incremental
+  add_binaries_to_github_release: true
+  itch_target: knockbox/banana-monkey-incremental
+  use_git_lfs: false
+
+jobs:
+  preflight:
+    name: Release preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxkbcommon-dev
+      - name: Run Rust checks
+        run: |
+          cargo test --locked
+          cargo clippy --locked -- -D warnings
+          cargo fmt --all -- --check
+      - name: Run economy contract tests
+        run: python3 docs/economy/test_banana.py
+      - name: Verify release tag and itch credentials
+        env:
+          BUTLER_CREDENTIALS: ${{ secrets.BUTLER_CREDENTIALS }}
+        run: |
+          [[ "${{ github.ref_name }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test -n "$BUTLER_CREDENTIALS"
+
+  release-wasm:
+    runs-on: ubuntu-latest
+    needs: preflight
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: ${{ env.use_git_lfs }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-bindgen CLI
+        run: |
+          version=$(cargo metadata --locked --format-version 1 | jq --raw-output '.packages[] | select(.name=="wasm-bindgen") | .version')
+          cargo install -f wasm-bindgen-cli --locked --version "$version"
+      - name: Build
+        run: cargo build --locked --release --target wasm32-unknown-unknown
+      - name: Prepare package
+        run: |
+          wasm-bindgen --no-typescript --out-name bevy_game --out-dir wasm --target web target/wasm32-unknown-unknown/release/${{ env.binary }}.wasm
+          cp -r assets wasm/
+      - name: Validate web package
+        run: test -f wasm/index.html && test -d wasm/assets && test -f wasm/bevy_game.js
+      - name: Package
+        working-directory: wasm
+        run: zip --recurse-paths ../${{ env.binary }}.zip .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          path: ${{ env.binary }}.zip
+          name: wasm
+          retention-days: 1
+      - name: Upload to GitHub release
+        if: ${{ env.add_binaries_to_github_release == 'true' }}
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ env.binary }}.zip
+          asset_name: ${{ env.binary }}-wasm-${{ github.ref_name }}.zip
+          tag: ${{ github.ref }}
+          overwrite: true
+
+  release-linux:
+    runs-on: ubuntu-latest
+    needs: preflight
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: ${{ env.use_git_lfs }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends pkg-config libx11-dev libasound2-dev libudev-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libwayland-dev libxcursor-dev libxi-dev libxrandr-dev libxkbcommon-dev
+      - name: Build
+        run: cargo build --locked --release --target x86_64-unknown-linux-gnu
+      - name: Prepare package
+        run: |
+          mkdir linux
+          cp target/x86_64-unknown-linux-gnu/release/${{ env.binary }} linux/
+          cp -r assets linux/
+      - name: Validate package
+        run: test -x linux/${{ env.binary }} && test -f linux/assets/Banana/Banana.png
+      - name: Package
+        working-directory: linux
+        run: zip --recurse-paths ../${{ env.binary }}.zip .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          path: ${{ env.binary }}.zip
+          name: linux
+          retention-days: 1
+      - name: Upload to GitHub release
+        if: ${{ env.add_binaries_to_github_release == 'true' }}
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ env.binary }}.zip
+          asset_name: ${{ env.binary }}-linux-${{ github.ref_name }}.zip
+          tag: ${{ github.ref }}
+          overwrite: true
+
+  release-windows:
+    runs-on: windows-latest
+    needs: preflight
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: ${{ env.use_git_lfs }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Build
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+      - name: Prepare package
+        shell: bash
+        run: |
+          mkdir windows
+          cp target/x86_64-pc-windows-msvc/release/${{ env.binary }}.exe windows/
+          cp -r assets windows/
+      - name: Validate package
+        shell: bash
+        run: test -f windows/${{ env.binary }}.exe && test -f windows/assets/Banana/Banana.png
+      - name: Package
+        run: Compress-Archive -Path windows/* -DestinationPath ${{ env.binary }}.zip
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          path: ${{ env.binary }}.zip
+          name: windows
+          retention-days: 1
+      - name: Upload to GitHub release
+        if: ${{ env.add_binaries_to_github_release == 'true' }}
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ env.binary }}.zip
+          asset_name: ${{ env.binary }}-windows-${{ github.ref_name }}.zip
+          tag: ${{ github.ref }}
+          overwrite: true
+
+  release-macos:
+    runs-on: macos-latest
+    needs: preflight
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: ${{ env.use_git_lfs }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Build
+        run: cargo build --locked --release --target aarch64-apple-darwin
+      - name: Prepare package
+        run: |
+          mkdir -p "${{ env.binary }}.app/Contents/MacOS"
+          cp target/aarch64-apple-darwin/release/${{ env.binary }} "${{ env.binary }}.app/Contents/MacOS/"
+          cp -r assets "${{ env.binary }}.app/Contents/MacOS/"
+          hdiutil create -fs HFS+ -volname "${{ env.binary }}" -srcfolder "${{ env.binary }}.app" "${{ env.binary }}-macOS.dmg"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          path: ${{ env.binary }}-macOS.dmg
+          name: macos
+          retention-days: 1
+      - name: Upload to GitHub release
+        if: ${{ env.add_binaries_to_github_release == 'true' }}
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ env.binary }}-macOS.dmg
+          asset_name: ${{ env.binary }}-macOS-${{ github.ref_name }}.dmg
+          tag: ${{ github.ref }}
+          overwrite: true
+
+  upload-to-itch:
+    runs-on: ubuntu-latest
+    needs: [release-wasm, release-linux, release-windows, release-macos]
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./builds
+      - name: Install butler
+        run: |
+          curl -L -o butler.zip https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default
+          unzip butler.zip
+          chmod +x butler
+          ./butler -V
+      - name: Upload to itch.io
+        env:
+          BUTLER_API_KEY: ${{ secrets.BUTLER_CREDENTIALS }}
+        run: |
+          for channel in $(ls builds); do
+            archive=$(find "builds/$channel" -maxdepth 1 -type f -print -quit)
+            ./butler push --fix-permissions --userversion="${{ github.ref_name }}" "$archive" "${{ env.itch_target }}:$channel"
+          done
