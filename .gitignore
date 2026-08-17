@@ -1,3 +1,8 @@
 __pycache__/
 *.py[cod]
 *:Zone.Identifier
+
+
+# Added by cargo
+
+/target

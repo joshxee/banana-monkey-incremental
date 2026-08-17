@@ -2,6 +2,10 @@
 
 This is a Rust and Bevy incremental game. Favor a small, deterministic core and a distinctive, playful player experience.
 
+## Build environment
+
+Bevy programs can be compiled and run inside this Nix shell with `nix-shell --run "cargo run"`.
+
 ## Specialist gates
 
 - The main agent owns planning, implementation, synthesis, and final decisions.
