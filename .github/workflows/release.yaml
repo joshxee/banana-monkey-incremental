@@ -130,8 +130,6 @@ jobs:
         with:
           lfs: ${{ env.use_git_lfs }}
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
       - name: Build
         run: cargo build --locked --release --target x86_64-pc-windows-msvc
       - name: Prepare package
