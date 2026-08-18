@@ -29,11 +29,17 @@
             buildInputs =
               [
                 # Rust dependencies
-                (rust-bin.stable.latest.default.override { extensions = [ "rust-src" ]; })
+                (rust-bin.stable.latest.default.override {
+                  extensions = [ "rust-src" ];
+                  targets = [ "wasm32-unknown-unknown" ];
+                })
+                lld
                 pkg-config
+                trunk
               ]
               ++ lib.optionals (lib.strings.hasInfix "linux" system) [
                 # for Linux
+                chromium
                 # Audio (Linux only)
                 alsa-lib
                 # Cross Platform 3D Graphics API
@@ -58,6 +64,9 @@
               libxkbcommon
               wayland
             ];
+            shellHook = lib.optionalString (lib.strings.hasInfix "linux" system) ''
+              export PLAYWRIGHT_CHROMIUM_PATH=${chromium}/bin/chromium
+            '';
           };
       }
     );

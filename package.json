@@ -1,0 +1,10 @@
+{
+  "name": "banana-monkey-incremental-e2e",
+  "private": true,
+  "scripts": {
+    "test:e2e": "nix-shell --run 'env -u NO_COLOR playwright test'"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}
