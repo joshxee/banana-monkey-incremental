@@ -1,6 +1,0 @@
-https://workbox.taild41183.ts.net (tailnet only)
-|-- / proxy http://127.0.0.1:8787
-
-https://workbox.taild41183.ts.net:8443 (tailnet only)
-|-- / proxy http://127.0.0.1:5173
-
