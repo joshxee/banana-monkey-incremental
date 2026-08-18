@@ -121,7 +121,9 @@ impl Plugin for HarvestGamePlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    (apply_restart, apply_purchases).chain().in_set(Sim::Purchase),
+                    (apply_restart, apply_purchases)
+                        .chain()
+                        .in_set(Sim::Purchase),
                     worker::spawn_missing_workers.in_set(Sim::Spawn),
                     advance_cycles.in_set(Sim::Advance),
                     settle.in_set(Sim::Settle),
@@ -1840,7 +1842,11 @@ mod tests {
 
     #[test]
     fn the_worker_route_runs_between_the_two_zones_at_every_viewport() {
-        for viewport in [Vec2::new(320.0, 568.0), Vec2::new(390.0, 844.0), Vec2::new(1920.0, 1080.0)] {
+        for viewport in [
+            Vec2::new(320.0, 568.0),
+            Vec2::new(390.0, 844.0),
+            Vec2::new(1920.0, 1080.0),
+        ] {
             let layout = SceneLayout::for_viewport(viewport);
 
             assert!(layout.grove_stand < layout.stall_stand);

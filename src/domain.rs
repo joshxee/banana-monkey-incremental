@@ -490,9 +490,7 @@ const JITTER_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
 impl Default for Jitter {
     fn default() -> Self {
-        Self {
-            state: JITTER_SEED,
-        }
+        Self { state: JITTER_SEED }
     }
 }
 
@@ -798,14 +796,22 @@ mod tests {
     #[test]
     fn a_saved_worker_count_must_be_within_reach() {
         assert_eq!(Workforce::from_saved(7).map(Workforce::count), Some(7));
-        assert_eq!(Workforce::from_saved(MAX_WORKERS).map(Workforce::count), Some(MAX_WORKERS));
+        assert_eq!(
+            Workforce::from_saved(MAX_WORKERS).map(Workforce::count),
+            Some(MAX_WORKERS)
+        );
         // A tampered save would otherwise spawn four billion entities in one
         // tick, and the cost ladder's `powi` would overflow to infinity.
         assert_eq!(Workforce::from_saved(MAX_WORKERS + 1), None);
         assert_eq!(Workforce::from_saved(u32::MAX), None);
         // The cap has to keep the geometric ladder finite - `1.15^100_000` is
         // infinity - and has to sit above anything a player can reach.
-        assert!(Workforce::from_saved(MAX_WORKERS).unwrap().next_cost().is_finite());
+        assert!(
+            Workforce::from_saved(MAX_WORKERS)
+                .unwrap()
+                .next_cost()
+                .is_finite()
+        );
         let last_affordable = (0..MAX_WORKERS)
             .take_while(|n| Workforce::from_saved(*n).unwrap().next_cost() <= MAX_SAFE_BANANAS)
             .count() as u32;
@@ -913,7 +919,10 @@ mod tests {
         assert!((snapshot.gross_per_sec - 0.105_263_157_894_736_84).abs() < 1e-15);
         assert!((snapshot.wages_per_sec - 0.03).abs() < 1e-15);
         assert!((snapshot.net_per_sec - 0.075_263_157_894_736_84).abs() < 1e-15);
-        assert_eq!(EconomySnapshot::project(0, base()), EconomySnapshot::default());
+        assert_eq!(
+            EconomySnapshot::project(0, base()),
+            EconomySnapshot::default()
+        );
     }
 
     // ─────────────────────────────────────────── the settled trajectory

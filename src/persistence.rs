@@ -202,10 +202,7 @@ mod tests {
 
     #[test]
     fn version_1_saves_migrate_to_a_workerless_run() {
-        assert_eq!(
-            decode(r#"{"version":1,"bananas":42}"#),
-            Some(run(42.0, 0))
-        );
+        assert_eq!(decode(r#"{"version":1,"bananas":42}"#), Some(run(42.0, 0)));
     }
 
     #[test]

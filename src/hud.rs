@@ -579,7 +579,11 @@ fn set_if_changed<T: PartialEq>(slot: &mut T, value: T) {
 }
 
 fn bar_padding(viewport_width: f32) -> f32 {
-    if viewport_width < NARROW_WIDTH { 8.0 } else { 16.0 }
+    if viewport_width < NARROW_WIDTH {
+        8.0
+    } else {
+        16.0
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -697,10 +701,7 @@ pub fn sync_shop(
             Without<HirePriceText>,
         ),
     >,
-    mut button: Single<
-        (&Interaction, &mut BackgroundColor, &mut BorderColor),
-        With<HireButton>,
-    >,
+    mut button: Single<(&Interaction, &mut BackgroundColor, &mut BorderColor), With<HireButton>>,
 ) {
     let plan = plan_hire(*workforce, *treasury, *multipliers);
 
@@ -743,7 +744,11 @@ pub fn style_buttons(
             &mut BackgroundColor,
             &mut BorderColor,
         ),
-        (With<ButtonAction>, Without<HireButton>, Changed<Interaction>),
+        (
+            With<ButtonAction>,
+            Without<HireButton>,
+            Changed<Interaction>,
+        ),
     >,
 ) {
     for (interaction, tone, mut background, mut border) in &mut buttons {
@@ -782,7 +787,9 @@ mod tests {
         // "BANANAS" over a value, plus padding and border, needs about this.
         const READOUT_MIN_WIDTH: f32 = 106.0;
 
-        for width in [320.0, 390.0, 599.0, 600.0, 699.0, 700.0, 844.0, 1280.0, 1920.0] {
+        for width in [
+            320.0, 390.0, 599.0, 600.0, 699.0, 700.0, 844.0, 1280.0, 1920.0,
+        ] {
             let side = side_cell_width(width);
             let pad = bar_padding(width);
             let gap = if width < NARROW_WIDTH {
