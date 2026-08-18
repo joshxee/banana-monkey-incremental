@@ -14,8 +14,7 @@ use bevy::prelude::*;
 
 use crate::{
     domain::{
-        HarvestCycle, Jitter, Multipliers, Payload, Segment, WORKER_PAYLOAD, WORKER_WAGE, Wage,
-        Workforce,
+        HarvestCycle, Multipliers, Payload, Segment, WORKER_PAYLOAD, WORKER_WAGE, Wage, Workforce,
     },
     game::SceneLayout,
 };
@@ -47,7 +46,7 @@ const LANE_STEP_TEXELS: f32 = 3.0;
 pub struct Worker;
 
 /// Which depth row this worker walks in. Assigned round-robin at spawn, so it
-/// does not consume jitter and stays stable across a reload.
+/// stays stable across a reload.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Lane(u32);
 
@@ -59,12 +58,11 @@ pub struct CarriedBanana;
 
 /// A brief highlight on a freshly hired worker.
 ///
-/// Phase jitter spans the whole cycle (see `Jitter::spawn_phase` for why it has
-/// to), so a hire can appear anywhere on the route rather than stepping out of
-/// the stall. Without a cue the click has no visible consequence at the point
-/// of the click; with one, the eye is pulled straight to the new monkey.
-/// A colour flash rather than a scale pop, so the sprite stays on the texel
-/// grid the rest of the scene is drawn on.
+/// Every hire now walks out of the stall, which is the purchase's own visible
+/// consequence, but the stall is also where every other worker is unloading and
+/// eating. The flash separates the new one from that traffic. A colour flash
+/// rather than a scale pop, so the sprite stays on the texel grid the rest of
+/// the scene is drawn on.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct JustHired {
     remaining: f32,
@@ -110,18 +108,16 @@ impl WorkerArt {
 ///
 /// Growth only. Nothing shrinks the workforce except a restart, which despawns
 /// every worker outright; if a unit ever becomes sellable, the excess has to be
-/// despawned here or the stale avatars keep drawing wages and delivering.
+/// despawned here or the stale avatars keep delivering and eating.
 ///
-/// Jitter is drawn here, exactly once per entity, in command order. Query
-/// iteration order is not stable across archetype moves, so drawing it while
-/// iterating would make the "deterministic" claim false the first time an
-/// entity is despawned.
+/// Every worker starts at the stall, at cycle phase zero. There is no spawn
+/// jitter: the geometric cost ladder staggers hires on its own, and a monkey
+/// that materialises mid-route reads as a spawn bug. Jitter existed to bound a
+/// treasury dip that post-paid meals removed outright.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_missing_workers(
     mut commands: Commands,
     workforce: Res<Workforce>,
-    multipliers: Res<Multipliers>,
-    mut jitter: ResMut<Jitter>,
     art: Option<Res<WorkerArt>>,
     asset_server: Res<AssetServer>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
@@ -174,10 +170,9 @@ pub fn spawn_missing_workers(
     };
 
     for index in current..target {
-        let phase = jitter.spawn_phase(*multipliers);
         commands.spawn((
             Worker,
-            HarvestCycle::at_phase(phase, *multipliers),
+            HarvestCycle::default(),
             Payload(WORKER_PAYLOAD),
             Wage(WORKER_WAGE),
             Lane(index as u32 % LANES),
@@ -220,6 +215,7 @@ pub fn position_workers(
     time: Res<Time>,
     mut commands: Commands,
     layout: Res<SceneLayout>,
+    multipliers: Res<Multipliers>,
     mut workers: Query<
         (
             Entity,
@@ -233,7 +229,7 @@ pub fn position_workers(
     >,
 ) {
     for (entity, cycle, lane, hired, mut transform, mut sprite) in &mut workers {
-        let progress = cycle.segment_fraction() as f32;
+        let progress = cycle.segment_fraction(*multipliers) as f32;
         let (x, facing_right) = match cycle.segment() {
             Segment::ToGrove => (
                 layout.stall_stand + (layout.grove_stand - layout.stall_stand) * progress,
@@ -244,7 +240,9 @@ pub fn position_workers(
                 layout.grove_stand + (layout.stall_stand - layout.grove_stand) * progress,
                 true,
             ),
-            Segment::Unload => (layout.stall_stand, true),
+            // Unloading and then eating both happen at the stall, so the
+            // monkey stays put and keeps facing it.
+            Segment::Unload | Segment::Snack => (layout.stall_stand, true),
         };
 
         // Depth: lane 0 is the back row, standing a few pixels higher up the
@@ -278,6 +276,13 @@ pub fn position_workers(
         // Depth cue: rows further back sit slightly in shade.
         let shade = 1.0 - 0.09 * back;
         let mut tint = Vec3::splat(shade);
+        // A worker stuck waiting for a banana to eat has stopped producing, and
+        // the player has to be able to see why the rate died. Idling at the
+        // stall alone is ambiguous - unloading looks the same - so drain the
+        // colour out of it.
+        if cycle.is_hungry() {
+            tint = tint * 0.62 + Vec3::new(0.10, 0.10, 0.14);
+        }
         if let Some(mut hired) = hired {
             hired.remaining -= time.delta_secs();
             if hired.remaining <= 0.0 {
@@ -300,6 +305,7 @@ pub fn position_workers(
 pub fn animate_workers(
     time: Res<Time>,
     art: Option<Res<WorkerArt>>,
+    multipliers: Res<Multipliers>,
     mut workers: Query<(&HarvestCycle, &mut Pose, &mut Sprite, &Children), With<Worker>>,
     mut carried: Query<&mut Visibility, With<CarriedBanana>>,
 ) {
@@ -312,11 +318,11 @@ pub fn animate_workers(
 
     for (cycle, mut pose, mut sprite, children) in &mut workers {
         let segment = cycle.segment();
-        let walking = matches!(segment, Segment::ToGrove | Segment::ToDepot);
+        let walking = segment.is_walking();
         let next_pose = if walking { Pose::Run } else { Pose::Idle };
 
         let index = if walking {
-            (cycle.segment_fraction() as f32 * RUN_FRAMES_PER_LEG) as usize % RUN_FRAMES
+            (cycle.segment_fraction(*multipliers) as f32 * RUN_FRAMES_PER_LEG) as usize % RUN_FRAMES
         } else {
             (elapsed * IDLE_FPS as f64) as usize % IDLE_FRAMES
         };
@@ -335,7 +341,10 @@ pub fn animate_workers(
 
         for child in children.iter() {
             if let Ok(mut visibility) = carried.get_mut(child) {
-                let wanted = if segment.is_carrying() {
+                // Held through the snack too: that banana is the meal, and
+                // seeing it in hand is what connects the counter's dip to the
+                // monkey that caused it.
+                let wanted = if segment.holds_banana() {
                     Visibility::Inherited
                 } else {
                     Visibility::Hidden

@@ -10,8 +10,8 @@ use bevy::{
 
 use crate::{
     domain::{
-        BANANAS_PER_HARVEST, EconomySnapshot, HarvestCycle, Jitter, Multipliers, Payload, SIM_HZ,
-        Treasury, Wage, Workforce, plan_hire, restart_run,
+        BANANAS_PER_HARVEST, CycleTerms, EconomySnapshot, HarvestCycle, Multipliers, Payload,
+        SIM_HZ, Treasury, Wage, Workforce, plan_hire, restart_run,
     },
     hud, persistence,
     worker::{self, Worker},
@@ -89,7 +89,6 @@ impl Plugin for HarvestGamePlugin {
             .init_resource::<DeliveryQueue>()
             .init_resource::<HireRequests>()
             .init_resource::<RestartRequest>()
-            .init_resource::<Jitter>()
             .init_resource::<PersistenceDirty>()
             .init_resource::<Feedback>()
             .init_resource::<MenuState>()
@@ -389,9 +388,9 @@ enum SettlementSource {
 #[derive(Resource, Debug, Default)]
 struct PendingSettlement(Option<SettlementSource>);
 
-/// Every banana that enters the treasury arrives through here, whether the
-/// player dragged it or a worker carried it. One queue, one settlement path,
-/// one place the economy can be wrong.
+/// Every banana that moves the treasury arrives through here, whether the player
+/// dragged it, a worker carried it, or a worker ate it. One queue, one
+/// settlement path, one place the economy can be wrong.
 #[derive(Resource, Debug, Default)]
 struct DeliveryQueue {
     entries: Vec<Delivery>,
@@ -399,8 +398,25 @@ struct DeliveryQueue {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Delivery {
+    /// Always positive. [`DeliveryKind::Snack`] is the one that subtracts.
     amount: f64,
-    by_worker: bool,
+    kind: DeliveryKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryKind {
+    /// The player dragged a banana to the stall.
+    Manual,
+    /// A worker unloaded its payload.
+    Worker,
+    /// A worker ate its wage, out of the delivery it just made.
+    Snack,
+}
+
+impl DeliveryKind {
+    fn is_income(self) -> bool {
+        !matches!(self, DeliveryKind::Snack)
+    }
 }
 
 /// Counted rather than a flag, so clicking twice between two fixed ticks does
@@ -703,7 +719,6 @@ fn apply_restart(
     mut commands: Commands,
     mut treasury: ResMut<Treasury>,
     mut workforce: ResMut<Workforce>,
-    mut jitter: ResMut<Jitter>,
     mut queue: ResMut<DeliveryQueue>,
     mut requests: ResMut<HireRequests>,
     mut dirty: ResMut<PersistenceDirty>,
@@ -715,7 +730,6 @@ fn apply_restart(
     }
 
     restart_run(&mut treasury, &mut workforce);
-    jitter.restart();
     queue.entries.clear();
     requests.0 = 0;
     for entity in &workers {
@@ -730,70 +744,97 @@ fn apply_restart(
 }
 
 /// Stage 5. The only writer of [`HarvestCycle`] once a worker is in flight.
+///
+/// The larder is the running balance a worker is allowed to eat from: the
+/// treasury as it stood at the top of the tick, plus whatever has already been
+/// delivered during it. Threading it through every worker in turn is what makes
+/// the treasury structurally non-negative - a worker that cannot afford its meal
+/// stalls instead of overdrawing - and it is why the shop can quote a bare
+/// signing fee with no wage reserve bolted on.
 fn advance_cycles(
     time: Res<Time<Fixed>>,
     multipliers: Res<Multipliers>,
+    treasury: Res<Treasury>,
     mut queue: ResMut<DeliveryQueue>,
-    mut workers: Query<(&mut HarvestCycle, &Payload)>,
+    mut workers: Query<(&mut HarvestCycle, &Payload, &Wage)>,
 ) {
     // f64 from the fixed clock. `delta_secs()` is f32, which would make the
     // economy's determinism depend on f32 rounding; 50 ms is exactly
     // representable as a `Duration`, so this is reproducible across platforms.
     let dt = time.delta().as_secs_f64();
+    // Anything already queued is income the player earned last frame and that
+    // `settle` will credit ahead of any meal charged below, so it is edible.
+    // Leaving it out would stall a worker over a banana the player has in hand.
+    let pending: f64 = queue
+        .entries
+        .iter()
+        .filter(|delivery| delivery.kind.is_income())
+        .map(|delivery| delivery.amount)
+        .sum();
+    let mut larder = treasury.bananas() + pending;
 
-    for (mut cycle, payload) in &mut workers {
-        let completed = cycle.advance(dt, *multipliers);
-        if completed > 0 {
+    for (mut cycle, payload, wage) in &mut workers {
+        // D2: what a unit earns and what it eats both come off its own
+        // components, never off a count times a constant.
+        let terms = CycleTerms::for_worker(payload.0, wage.0, *multipliers);
+        let output = cycle.advance(dt, *multipliers, terms, &mut larder);
+
+        if output.delivered > 0.0 {
             queue.entries.push(Delivery {
-                amount: completed as f64 * payload.0,
-                by_worker: true,
+                amount: output.delivered,
+                kind: DeliveryKind::Worker,
+            });
+        }
+        if output.eaten > 0.0 {
+            queue.entries.push(Delivery {
+                amount: output.eaten,
+                kind: DeliveryKind::Snack,
             });
         }
     }
 }
 
-/// Stage 6. Deliveries are credited *before* wages are charged; the other
-/// order shifts every reading by one tick's worth of wages.
-#[allow(clippy::too_many_arguments)]
+/// Stage 6. The queue is settled strictly in the order it was filled, which is
+/// what keeps the treasury non-negative: a worker's meal is always queued behind
+/// the delivery that funds it.
 fn settle(
-    time: Res<Time<Fixed>>,
     mut treasury: ResMut<Treasury>,
     mut queue: ResMut<DeliveryQueue>,
     mut dirty: ResMut<PersistenceDirty>,
     mut feedback: ResMut<Feedback>,
     mut commands: Commands,
     layout: Res<SceneLayout>,
-    wages: Query<&Wage>,
 ) {
     for delivery in queue.entries.drain(..) {
-        treasury.credit(delivery.amount);
-        if delivery.by_worker {
-            // Not immediate: these arrive `W / 47.5` times a second, so the
-            // immediate path would put the save write rate back on the
-            // treadmill the throttle exists to stop, and would reset the retry
-            // backoff every time.
-            dirty.mark_pending();
-        } else {
-            dirty.mark_immediate();
+        match delivery.kind {
+            DeliveryKind::Manual => {
+                treasury.credit(delivery.amount);
+                dirty.mark_immediate();
+            }
+            DeliveryKind::Worker => {
+                treasury.credit(delivery.amount);
+                // Not immediate: these arrive `W / 50` times a second, so the
+                // immediate path would put the save write rate back on the
+                // treadmill the throttle exists to stop, and would reset the
+                // retry backoff every time.
+                dirty.mark_pending();
+            }
+            DeliveryKind::Snack => {
+                treasury.charge(delivery.amount);
+                dirty.mark_pending();
+            }
         }
-        feedback.success = Some(Timer::new(
-            Duration::from_secs_f32(if delivery.by_worker {
-                DELIVERY_PULSE_SECONDS
-            } else {
-                SUCCESS_PULSE_SECONDS
-            }),
-            TimerMode::Once,
-        ));
-        spawn_floater(&mut commands, &layout, delivery);
-    }
 
-    // D2: the wage bill is the sum of what each unit costs, never a count times
-    // a constant, so a future unit cannot be silently left out of it.
-    let wages_per_sec: f64 = wages.iter().map(|wage| wage.0).sum();
-    if wages_per_sec > 0.0 {
-        treasury.charge(wages_per_sec * time.delta().as_secs_f64());
-        // Deliberately not immediate: this runs twenty times a second.
-        dirty.mark_pending();
+        if delivery.kind.is_income() {
+            feedback.success = Some(Timer::new(
+                Duration::from_secs_f32(match delivery.kind {
+                    DeliveryKind::Worker => DELIVERY_PULSE_SECONDS,
+                    _ => SUCCESS_PULSE_SECONDS,
+                }),
+                TimerMode::Once,
+            ));
+        }
+        spawn_floater(&mut commands, &layout, delivery);
     }
 }
 
@@ -805,12 +846,20 @@ fn snapshot_economy(
     *snapshot = EconomySnapshot::project(workforce.count(), *multipliers);
 }
 
+/// Three sources, three sizes, three colours - readable without reading. The
+/// snack is the smallest and the dimmest on purpose: it is the cost of doing
+/// business, not an event the player has to act on.
 fn spawn_floater(commands: &mut Commands, layout: &SceneLayout, delivery: Delivery) {
     let origin = layout.stall_glow_anchor();
+    let (label, size, colour) = match delivery.kind {
+        DeliveryKind::Worker => (format!("+{:.0}", delivery.amount), 34.0, GOLD),
+        DeliveryKind::Manual => (format!("+{:.0}", delivery.amount), 26.0, CREAM),
+        DeliveryKind::Snack => (format!("-{:.1}", delivery.amount), 22.0, MUTED),
+    };
     commands.spawn((
-        Text2d::new(format!("+{:.0}", delivery.amount)),
-        TextFont::from_font_size(if delivery.by_worker { 34.0 } else { 26.0 }),
-        TextColor(if delivery.by_worker { GOLD } else { CREAM }),
+        Text2d::new(label),
+        TextFont::from_font_size(size),
+        TextColor(colour),
         Transform::from_translation(origin.extend(5.0)),
         Floater {
             elapsed: 0.0,
@@ -1316,7 +1365,7 @@ fn queue_manual_settlement(
     if matched {
         queue.entries.push(Delivery {
             amount: BANANAS_PER_HARVEST,
-            by_worker: false,
+            kind: DeliveryKind::Manual,
         });
         controller.interaction = HarvestInteraction::Idle;
         banana.translation = layout.banana_home.extend(3.0);
@@ -1580,6 +1629,7 @@ struct TestWorker {
     y: f32,
     segment: &'static str,
     carrying: bool,
+    hungry: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1606,7 +1656,7 @@ struct TestState {
     bananas: f64,
     workers: u32,
     next_cost: f64,
-    hire_required: f64,
+    meal: f64,
     can_hire: bool,
     gross_per_sec: f64,
     wages_per_sec: f64,
@@ -1675,7 +1725,7 @@ fn sync_web_test_state(
         bananas: treasury.bananas(),
         workers: workforce.count(),
         next_cost: plan.cost,
-        hire_required: plan.required,
+        meal: plan.meal,
         can_hire: plan.affordable,
         gross_per_sec: snapshot.gross_per_sec,
         wages_per_sec: snapshot.wages_per_sec,
@@ -1723,8 +1773,10 @@ fn sync_web_test_state(
                         Segment::Pick => "pick",
                         Segment::ToDepot => "to-depot",
                         Segment::Unload => "unload",
+                        Segment::Snack => "snack",
                     },
-                    carrying: cycle.segment().is_carrying(),
+                    carrying: cycle.segment().holds_banana(),
+                    hungry: cycle.is_hungry(),
                 }
             })
             .collect(),

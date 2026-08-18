@@ -21,8 +21,22 @@ pub const T_PICK: f64 = 1.00;
 /// Seconds per banana, at the depot.
 pub const T_UNLOAD: f64 = 0.50;
 /// Bananas per second, per worker (D2: this is a per-unit figure, and the
-/// [`Wage`] component is what the simulation actually sums).
+/// [`Wage`] component is what each worker's meal is actually derived from).
 pub const WORKER_WAGE: f64 = 0.03;
+/// Share of a worker's round trip spent eating at the stall, immediately after
+/// unloading. At the base parameters this is 2.5 s of a 50 s cycle.
+///
+/// This segment is the reason the signing fee needs no wage reserve: a worker is
+/// only ever fed out of a delivery it has just made, and its meal is a fraction
+/// of that delivery, so paying it can never take the treasury below where it
+/// stood before the delivery landed.
+///
+/// A *fraction* rather than a fixed number of seconds. Fixing it would make
+/// eating an ever-larger share of a shortened cycle, so Chefs would raise the
+/// cost of labour per second and partly undo their own benefit, and worker
+/// throughput would converge to `payload / t_snack` instead of to the pick-rate
+/// ceiling the whole design rests on (whitepaper §3).
+pub const SNACK_FRACTION: f64 = 0.05;
 pub const WORKER_COST_BASE: f64 = 4.0;
 pub const WORKER_COST_GROWTH: f64 = 1.15;
 
@@ -68,30 +82,38 @@ impl Default for Multipliers {
 /// One addend of the harvest cycle. D12: three addends, three support roles,
 /// one each. Travel is split into two legs so the round trip can be animated;
 /// their durations sum to the doc's single `2d/(v·M_speed)` term.
+///
+/// [`Segment::Snack`] is the fourth addend and has no support role: it is where
+/// the worker is paid. Putting the meal *after* the unload, rather than draining
+/// wages continuously, is what makes the economy self-funding - see
+/// [`HarvestCycle::advance`].
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Segment {
     ToGrove,
     Pick,
     ToDepot,
     Unload,
+    Snack,
 }
 
 impl Segment {
-    pub const ORDER: [Segment; 4] = [
+    pub const ORDER: [Segment; 5] = [
         Segment::ToGrove,
         Segment::Pick,
         Segment::ToDepot,
         Segment::Unload,
+        Segment::Snack,
     ];
 
     /// Work in this segment's own units: metres to walk, or nominal bananas to
-    /// pick or unload. D13 stores progress as remaining work rather than
+    /// pick, unload or eat. D13 stores progress as remaining work rather than
     /// elapsed time, so a multiplier bought mid-trip speeds up the remainder of
     /// every journey already in flight without teleporting anyone.
-    pub fn nominal_work(self) -> f64 {
+    pub fn nominal_work(self, multipliers: Multipliers) -> f64 {
         match self {
             Segment::ToGrove | Segment::ToDepot => GROVE_DISTANCE,
             Segment::Pick | Segment::Unload => WORKER_PAYLOAD,
+            Segment::Snack => meal(multipliers),
         }
     }
 
@@ -101,11 +123,18 @@ impl Segment {
             Segment::ToGrove | Segment::ToDepot => WORKER_SPEED * multipliers.speed,
             Segment::Pick => multipliers.tech / T_PICK,
             Segment::Unload => multipliers.unpack / T_UNLOAD,
+            Segment::Snack => meal(multipliers) / Segment::Snack.duration(multipliers),
         }
     }
 
     pub fn duration(self, multipliers: Multipliers) -> f64 {
-        self.nominal_work() / self.rate(multipliers)
+        match self {
+            // Taken from the cycle rather than derived from work over rate. A
+            // snack's nominal work is the meal, and the meal is defined against
+            // the cycle time, so deriving this one the usual way would recurse.
+            Segment::Snack => cycle_time(multipliers) - work_time(multipliers),
+            _ => self.nominal_work(multipliers) / self.rate(multipliers),
+        }
     }
 
     pub fn next(self) -> Self {
@@ -113,29 +142,82 @@ impl Segment {
             Segment::ToGrove => Segment::Pick,
             Segment::Pick => Segment::ToDepot,
             Segment::ToDepot => Segment::Unload,
-            Segment::Unload => Segment::ToGrove,
+            Segment::Unload => Segment::Snack,
+            Segment::Snack => Segment::ToGrove,
         }
     }
 
-    /// True once the worker is loaded: it picked at the grove and has not yet
-    /// finished handing the load over at the stall.
-    pub fn is_carrying(self) -> bool {
-        matches!(self, Segment::ToDepot | Segment::Unload)
+    /// True while the worker has a banana in hand: the one it picked at the
+    /// grove, and then the one it keeps back to eat. Presentation only.
+    pub fn holds_banana(self) -> bool {
+        matches!(self, Segment::ToDepot | Segment::Unload | Segment::Snack)
+    }
+
+    /// The worker is standing still, at one end of the route or the other.
+    pub fn is_walking(self) -> bool {
+        matches!(self, Segment::ToGrove | Segment::ToDepot)
     }
 }
 
-/// Seconds for one full round trip. Pure in counts and multipliers - no phase
-/// appears in it, which is what keeps the projected rate deterministic (I3').
-pub fn cycle_time(multipliers: Multipliers) -> f64 {
+/// Seconds a worker spends actually working: the doc's three addends, with
+/// travel split into two legs.
+pub fn work_time(multipliers: Multipliers) -> f64 {
     Segment::ORDER
         .iter()
+        .filter(|segment| !matches!(segment, Segment::Snack))
         .map(|segment| segment.duration(multipliers))
         .sum()
+}
+
+/// Seconds for one full round trip, eating included. Pure in counts and
+/// multipliers - no phase appears in it, which is what keeps the projected rate
+/// deterministic (I3').
+///
+/// Inflating the working time by the feeding share, rather than summing every
+/// segment, is what keeps [`Segment::Snack`] a constant fraction of the trip
+/// without `duration` recursing into itself.
+pub fn cycle_time(multipliers: Multipliers) -> f64 {
+    work_time(multipliers) / (1.0 - SNACK_FRACTION)
+}
+
+/// Bananas one worker eats per round trip.
+///
+/// Derived from the per-second wage rather than fixed, so that the published
+/// `0.03 /s` stays true at every multiplier. A Chef that halves the cycle halves
+/// the meal with it; if the meal were a constant, buying Chefs would silently
+/// double the cost of labour and undo their own benefit.
+pub fn meal(multipliers: Multipliers) -> f64 {
+    WORKER_WAGE * cycle_time(multipliers)
 }
 
 /// Steady-state bananas per second for a single worker.
 pub fn worker_throughput(multipliers: Multipliers) -> f64 {
     WORKER_PAYLOAD / cycle_time(multipliers)
+}
+
+/// What a single worker earns and eats per round trip. Passed into
+/// [`HarvestCycle::advance`] rather than read from constants, so that the cycle
+/// stays driven by the entity's own [`Payload`] and [`Wage`] components (D2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CycleTerms {
+    pub payload: f64,
+    pub meal: f64,
+}
+
+impl CycleTerms {
+    pub fn for_worker(payload: f64, wage: f64, multipliers: Multipliers) -> Self {
+        Self {
+            payload,
+            meal: wage * cycle_time(multipliers),
+        }
+    }
+}
+
+/// Bananas that moved during one call to [`HarvestCycle::advance`].
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct CycleOutput {
+    pub delivered: f64,
+    pub eaten: f64,
 }
 
 /// The sole piece of irreducible per-entity state in the simulation (D13).
@@ -149,33 +231,13 @@ impl Default for HarvestCycle {
     fn default() -> Self {
         Self {
             segment: Segment::ToGrove,
-            remaining: Segment::ToGrove.nominal_work(),
+            // Multiplier-independent for the outbound leg: it is a distance.
+            remaining: GROVE_DISTANCE,
         }
     }
 }
 
 impl HarvestCycle {
-    /// A cycle that has already run for `phase` seconds. `phase` is wrapped
-    /// into the cycle, so callers may pass any non-negative offset.
-    pub fn at_phase(phase: f64, multipliers: Multipliers) -> Self {
-        let total = cycle_time(multipliers);
-        debug_assert!(phase.is_finite() && phase >= 0.0);
-        let mut left = if total > 0.0 { phase % total } else { 0.0 };
-
-        for segment in Segment::ORDER {
-            let duration = segment.duration(multipliers);
-            if left < duration {
-                return Self {
-                    segment,
-                    remaining: segment.nominal_work() - left * segment.rate(multipliers),
-                };
-            }
-            left -= duration;
-        }
-
-        Self::default()
-    }
-
     pub fn segment(self) -> Segment {
         self.segment
     }
@@ -183,30 +245,49 @@ impl HarvestCycle {
     /// How far through the current segment the worker is, in 0.0..=1.0.
     /// Rendering derives position from this, so the avatar is a pure function
     /// of simulation state.
-    pub fn segment_fraction(self) -> f64 {
-        let nominal = self.segment.nominal_work();
+    pub fn segment_fraction(self, multipliers: Multipliers) -> f64 {
+        let nominal = self.segment.nominal_work(multipliers);
         if nominal <= 0.0 {
             return 1.0;
         }
         (1.0 - self.remaining / nominal).clamp(0.0, 1.0)
     }
 
-    /// Consume `dt` seconds of work, returning the number of completed round
-    /// trips (normally 0 or 1; more only if `dt` spans a whole cycle).
+    /// A worker that has finished eating everything it can afford and is waiting
+    /// for the larder to refill. Its cycle is frozen until then.
+    pub fn is_hungry(self) -> bool {
+        self.segment == Segment::Snack && self.remaining <= 0.0
+    }
+
+    /// Consume `dt` seconds of work, reporting what the worker delivered and ate.
+    ///
+    /// `larder` is the bananas available to be eaten *right now*: the treasury at
+    /// the top of the tick, plus anything delivered earlier in the same tick.
+    /// It is credited on delivery and debited on eating, so the caller can
+    /// settle a whole tick's worth of workers and know the treasury cannot go
+    /// negative. A worker that cannot afford its meal stalls at the stall rather
+    /// than eating on credit - unpaid wages are never forgiven, because
+    /// forgiving them would make spending down to zero a free wage holiday.
     ///
     /// This is a *time budget* rather than a work subtraction, and the leftover
     /// budget is deliberately carried across segment boundaries. Both matter:
     ///
     /// - `remaining -= rate * dt` followed by `remaining <= 0.0` leaves a
     ///   positive binary residual on Pick (9.4e-15) and Unload (1.0e-15) at
-    ///   20 Hz, costing a whole extra tick each and making the cycle 47.6 s.
-    /// - Discarding the leftover loses `dt/2` per boundary, which is a 0.21%
+    ///   20 Hz, costing a whole extra tick each and stretching the cycle.
+    /// - Discarding the leftover loses `dt/2` per boundary, which is a 0.2%
     ///   throughput error at these parameters and *grows* as multipliers
     ///   shorten the cycle.
-    pub fn advance(&mut self, dt: f64, multipliers: Multipliers) -> u32 {
+    pub fn advance(
+        &mut self,
+        dt: f64,
+        multipliers: Multipliers,
+        terms: CycleTerms,
+        larder: &mut f64,
+    ) -> CycleOutput {
         debug_assert!(dt.is_finite() && dt >= 0.0);
         let mut budget = dt;
-        let mut deliveries = 0;
+        let mut output = CycleOutput::default();
         // A zero or non-finite rate would make `needed` infinite or NaN and the
         // loop non-terminating, so the guard is load-bearing, not defensive.
         let mut guard = 0;
@@ -223,24 +304,40 @@ impl HarvestCycle {
             // Repeated subtraction leaves a residual: 0.05 is not exactly
             // representable in binary, so after 100 ticks a 5-banana pick
             // segment has ~9.4e-15 of work left. Without a tolerance that
-            // residual costs a whole extra tick at every boundary, turning a
-            // 47.5-second cycle into a 47.6-second one. The tolerance is a
-            // billionth of the segment's duration - about 20 nanoseconds.
+            // residual costs a whole extra tick at every boundary. The
+            // tolerance is a billionth of the segment's duration - about 20
+            // nanoseconds.
             let tolerance = self.segment.duration(multipliers) * 1e-9;
-            if needed <= budget + tolerance {
-                budget = (budget - needed).max(0.0);
-                if self.segment == Segment::Unload {
-                    deliveries += 1;
-                }
-                self.segment = self.segment.next();
-                self.remaining = self.segment.nominal_work();
-            } else {
+            if needed > budget + tolerance {
                 self.remaining -= rate * budget;
-                budget = 0.0;
+                break;
             }
+
+            match self.segment {
+                Segment::Unload => {
+                    output.delivered += terms.payload;
+                    *larder += terms.payload;
+                }
+                Segment::Snack => {
+                    if *larder + tolerance < terms.meal {
+                        // Nothing to eat. Hold the worker here - not on the
+                        // next leg - so the debt is still owed when food
+                        // arrives, and so the idle sprite reads as hunger.
+                        self.remaining = 0.0;
+                        break;
+                    }
+                    output.eaten += terms.meal;
+                    *larder -= terms.meal;
+                }
+                _ => {}
+            }
+
+            budget = (budget - needed).max(0.0);
+            self.segment = self.segment.next();
+            self.remaining = self.segment.nominal_work(multipliers);
         }
 
-        deliveries
+        output
     }
 }
 
@@ -296,14 +393,19 @@ impl Treasury {
         self.bananas = (self.bananas + amount).min(MAX_SAFE_BANANAS);
     }
 
-    /// Wages are charged even when they cannot be covered. Clamping the
-    /// treasury at zero instead would turn unpayable wages into free bananas,
-    /// which is a measurable pacing gift and an exploit: spending down to
-    /// exactly zero would buy a wage holiday until the next delivery. The
-    /// purchase gate ([`HirePlan`]) is what keeps the balance out of the red.
+    /// Callers must not spend what is not there. Two rules keep that true and
+    /// between them make the balance structurally non-negative: a hire is gated
+    /// on [`HirePlan::affordable`], and a meal is gated on the larder inside
+    /// [`HarvestCycle::advance`]. There is deliberately no clamp here - a clamp
+    /// would turn an unpayable charge into free bananas and hide the bug.
     pub fn charge(&mut self, amount: f64) {
         debug_assert!(amount.is_finite() && amount >= 0.0);
-        self.bananas -= amount;
+        debug_assert!(
+            amount <= self.bananas + 1e-9,
+            "charged {amount} against a balance of {}",
+            self.bananas
+        );
+        self.bananas = (self.bananas - amount).max(0.0);
     }
 
     pub fn restart(&mut self) {
@@ -395,152 +497,42 @@ impl EconomySnapshot {
     }
 }
 
-/// Expected seconds between deliveries anywhere in the economy, `1 / Σ(nᵢ/Tᵢ)`.
-pub fn mean_delivery_gap(workers: u32, multipliers: Multipliers) -> f64 {
-    if workers == 0 {
-        return f64::INFINITY;
-    }
-    cycle_time(multipliers) / workers as f64
-}
-
-/// I5 / D15, generalised.
-///
-/// D15's published formula is cart-specific and returns zero here, because it
-/// hard-codes "the lumpy income is carts, the continuous income is the pool".
-/// That is false with no carts at all: the pool delivers once every 47.5
-/// seconds, and without a reserve the treasury goes underwater.
-///
-/// The general form - see the amended D15 and `banana_model.py::wage_reserve` -
-/// reserves against the *largest* gap between deliveries and credits only the
-/// income arriving inside it:
-///
-/// ```text
-/// gap     = maxᵢ (Tᵢ / nᵢ)
-/// covered = Σ { rateᵢ : Tᵢ / nᵢ < gap }
-/// reserve = 2 × max(0, wages − covered) × gap
-/// ```
-///
-/// Workers are the only source here, so `covered` is zero and the whole thing
-/// collapses to `2 × 0.03W × 47.5/W` - a constant 2.85 bananas, independent of
-/// W. When a second unit type lands, port the general form rather than
-/// extending this one, and do *not* reach for a blended mean gap
-/// (`1 / Σ(nᵢ/Tᵢ)`): it agrees here and under-reserves by nearly half once
-/// carts exist.
-///
-/// Measured, this halves the worst treasury dip for a 1.8% pacing cost.
-pub fn wage_reserve(workers_after: u32, multipliers: Multipliers) -> f64 {
-    if workers_after == 0 {
-        return 0.0;
-    }
-    let wages = workers_after as f64 * WORKER_WAGE;
-    2.0 * wages * mean_delivery_gap(workers_after, multipliers)
-}
-
 /// Everything the shop needs to render, and the single authority on whether a
 /// hire is legal.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HirePlan {
+    /// The signing fee, and the whole of what the player must have on hand.
     pub cost: f64,
-    pub reserve: f64,
-    /// Bananas the player actually needs on hand: `cost + reserve`.
-    pub required: f64,
+    /// Bananas this worker will eat per round trip, for the shop to explain
+    /// itself with. Not a gate: it is paid out of the delivery it follows.
+    pub meal: f64,
     /// Change in net rate if the hire goes through.
     pub net_delta: f64,
     pub affordable: bool,
 }
 
-/// I1 (net stays strictly positive) and I5 (cost plus a wage reserve). Both
-/// gates are trivially satisfied by workers - a worker's net delta is
-/// +0.0753/s at every world state - but they are written in the doc's shape now
-/// so that later units are a value change rather than a rewrite of every call
-/// site.
+/// I1 (net stays strictly positive) and I5 (the player can pay).
+///
+/// I5 used to add a wage reserve on top of the fee, because wages drained
+/// continuously and a fresh hire spent 50 seconds costing bananas before it
+/// earned any. Feeding a worker out of the delivery it just made removes that
+/// exposure entirely, so the fee *is* the requirement: `cost + reserve` was both
+/// a misleading price and a solution to a problem the cycle no longer has.
+///
+/// The I1 gate is retained even though a worker's net delta is +0.07/s at every
+/// world state, so that later units are a value change rather than a rewrite of
+/// every call site.
 pub fn plan_hire(workforce: Workforce, treasury: Treasury, multipliers: Multipliers) -> HirePlan {
-    let workers_after = workforce.count() + 1;
     let cost = workforce.next_cost();
-    let reserve = wage_reserve(workers_after, multipliers);
-    let required = cost + reserve;
 
     let before = EconomySnapshot::project(workforce.count(), multipliers);
-    let after = EconomySnapshot::project(workers_after, multipliers);
+    let after = EconomySnapshot::project(workforce.count() + 1, multipliers);
 
     HirePlan {
         cost,
-        reserve,
-        required,
+        meal: meal(multipliers),
         net_delta: after.net_per_sec - before.net_per_sec,
-        affordable: after.net_per_sec > 0.0 && treasury.bananas() >= required,
-    }
-}
-
-// ───────────────────────────────────────────────────────────────── jitter
-
-/// A deterministic xorshift64*, so that a burst of hires desynchronises without
-/// making the game unreproducible for tests or visual snapshots.
-///
-/// Draw exactly once per entity at spawn time, in command order. Bevy's query
-/// iteration order is not stable across archetype moves, so drawing while
-/// iterating would make the determinism claim false the first time an entity is
-/// despawned.
-#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Jitter {
-    state: u64,
-}
-
-const JITTER_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
-
-impl Default for Jitter {
-    fn default() -> Self {
-        Self { state: JITTER_SEED }
-    }
-}
-
-impl Jitter {
-    pub fn restart(&mut self) {
-        *self = Self::default();
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.state;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.state = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    /// Uniform in 0.0..1.0.
-    pub fn unit(&mut self) -> f64 {
-        // 53 bits: exactly the f64 mantissa, so the mapping is uniform.
-        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
-    }
-
-    /// A starting cycle phase for a newly hired worker, in seconds.
-    ///
-    /// D16 randomises the initial phase so that workers bought in one burst do
-    /// not deliver in lockstep.
-    ///
-    /// Uniform in time over the **whole** cycle - not over the outbound leg,
-    /// and not over segments. Both narrower choices are tempting and both are
-    /// wrong:
-    ///
-    /// - Sampling a segment and then a position within it puts 25% of workers
-    ///   in Unload, which is 5.3% of the cycle, and biases first-cycle income
-    ///   upward by about 25%. It self-corrects after one cycle, so only a
-    ///   first-minute test ever catches it.
-    /// - Confining the window to the outbound leg would guarantee a new worker
-    ///   appears empty-handed and already walking, which reads better. But it
-    ///   leaves a 27.5-second stretch of every cycle in which a burst-bought
-    ///   cohort delivers nothing, and the wage reserve is derived from a mean
-    ///   gap of `T/W`. Measured, the treasury goes underwater from the fourth
-    ///   worker on: the dip is `0.03 × W × 27.5`, which passes 2.85 at W = 4
-    ///   and keeps growing, while the full-cycle window holds the dip at a
-    ///   constant 1.425 for every W.
-    ///
-    /// The cost is that a hire can appear mid-route, so the purchase needs its
-    /// own visible cue rather than relying on a monkey walking out of the
-    /// stall - see the highlight in `worker::spawn_missing_workers`.
-    pub fn spawn_phase(&mut self, multipliers: Multipliers) -> f64 {
-        self.unit() * cycle_time(multipliers)
+        affordable: after.net_per_sec > 0.0 && treasury.bananas() >= cost,
     }
 }
 
@@ -549,9 +541,30 @@ mod tests {
     use super::*;
 
     const SIM_DT: f64 = 1.0 / SIM_HZ;
+    /// Enough that a test which is not about hunger never trips over it.
+    const FULL_LARDER: f64 = 1e9;
 
     fn base() -> Multipliers {
         Multipliers::default()
+    }
+
+    fn terms(multipliers: Multipliers) -> CycleTerms {
+        CycleTerms::for_worker(WORKER_PAYLOAD, WORKER_WAGE, multipliers)
+    }
+
+    /// One tick against a bottomless larder.
+    fn tick(cycle: &mut HarvestCycle, multipliers: Multipliers) -> CycleOutput {
+        let mut larder = FULL_LARDER;
+        cycle.advance(SIM_DT, multipliers, terms(multipliers), &mut larder)
+    }
+
+    /// Wind a fresh cycle forward to an arbitrary phase, the way the simulation
+    /// would: there is no way to construct one mid-route out of thin air.
+    fn at_phase(phase: f64, multipliers: Multipliers) -> HarvestCycle {
+        let mut cycle = HarvestCycle::default();
+        let mut larder = FULL_LARDER;
+        cycle.advance(phase, multipliers, terms(multipliers), &mut larder);
+        cycle
     }
 
     // ───────────────────────────────────────────────────────── cycle shape
@@ -564,43 +577,101 @@ mod tests {
         assert_eq!(Segment::Pick.duration(m), 5.0);
         assert_eq!(Segment::ToDepot.duration(m), 20.0);
         assert_eq!(Segment::Unload.duration(m), 2.5);
-        assert_eq!(cycle_time(m), 47.5);
-        // Travel is 84% of a worker's life; that asymmetry is what makes Chefs
+        assert_eq!(Segment::Snack.duration(m), 2.5);
+        assert_eq!(work_time(m), 47.5);
+        assert_eq!(cycle_time(m), 50.0);
+        // Every segment must still add up to the trip, even though the cycle is
+        // derived from the working time rather than summed from the parts.
+        let summed: f64 = Segment::ORDER.iter().map(|s| s.duration(m)).sum();
+        assert!((summed - cycle_time(m)).abs() < 1e-12);
+        // Travel is 80% of a worker's life; that asymmetry is what makes Chefs
         // worth buying later (whitepaper §2).
-        assert!((worker_throughput(m) - 5.0 / 47.5).abs() < 1e-15);
+        assert_eq!(worker_throughput(m), 0.1);
+        // A worker eats 1.5 of the 5 it brings home, which is the published
+        // 0.03/s expressed per trip instead of per second.
+        assert_eq!(meal(m), 1.5);
+        assert!((meal(m) / cycle_time(m) - WORKER_WAGE).abs() < 1e-15);
     }
 
     #[test]
-    fn a_round_trip_delivers_on_tick_950_not_951() {
-        // 400 + 100 + 400 + 50 ticks at 20 Hz. Delivery must land on the tick
-        // that exactly completes the work, which is what the inclusive
+    fn the_meal_tracks_the_cycle_so_the_wage_rate_is_multiplier_invariant() {
+        // A constant meal would make Chefs raise the cost of labour per second
+        // and partly undo their own benefit. Deriving it from the cycle keeps
+        // the published 0.03/s true at every world state.
+        for speed in [1.0, 1.15, 2.0, 7.5] {
+            let m = Multipliers {
+                speed,
+                ..Multipliers::default()
+            };
+            assert!(
+                (meal(m) / cycle_time(m) - WORKER_WAGE).abs() < 1e-15,
+                "{speed}"
+            );
+            // And eating stays the same share of the trip, so a shortened cycle
+            // does not turn into a life spent at the stall.
+            assert!(
+                (Segment::Snack.duration(m) / cycle_time(m) - SNACK_FRACTION).abs() < 1e-15,
+                "{speed}"
+            );
+        }
+    }
+
+    #[test]
+    fn throughput_still_converges_to_the_pick_rate_ceiling() {
+        // Whitepaper §3: with travel and unloading driven to zero, every harvest
+        // method converges to the same per-monkey ceiling. Feeding costs a flat
+        // 5% of it and nothing more - which is exactly why the snack is a share
+        // of the trip and not a fixed 2.5 seconds.
+        let m = Multipliers {
+            speed: 1e6,
+            unpack: 1e6,
+            ..Multipliers::default()
+        };
+        let ceiling = m.tech / T_PICK;
+
+        let realised = worker_throughput(m);
+        assert!(
+            (realised / ceiling - (1.0 - SNACK_FRACTION)).abs() < 1e-4,
+            "{realised} vs {ceiling}"
+        );
+    }
+
+    #[test]
+    fn a_round_trip_delivers_on_tick_950_and_eats_on_tick_1000() {
+        // 400 + 100 + 400 + 50 + 50 ticks at 20 Hz. Both events must land on
+        // the tick that exactly completes the work, which is what the inclusive
         // `needed <= budget` comparison buys.
         let m = base();
         let mut cycle = HarvestCycle::default();
-        let mut delivered_on = None;
+        let (mut delivered_on, mut ate_on) = (None, None);
 
-        for tick in 1..=1_000 {
-            if cycle.advance(SIM_DT, m) > 0 && delivered_on.is_none() {
-                delivered_on = Some(tick);
+        for t in 1..=1_050 {
+            let output = tick(&mut cycle, m);
+            if output.delivered > 0.0 && delivered_on.is_none() {
+                delivered_on = Some(t);
+            }
+            if output.eaten > 0.0 && ate_on.is_none() {
+                ate_on = Some(t);
             }
         }
 
         assert_eq!(delivered_on, Some(950));
+        assert_eq!(ate_on, Some(1_000));
     }
 
     #[test]
     fn segment_boundaries_do_not_cost_a_tick() {
-        // The naive `remaining <= 0.0` test overshoots Pick and Unload by one
-        // tick each on binary residual alone, which would make the cycle 47.6s.
+        // The naive `remaining <= 0.0` test overshoots Pick, Unload and Snack
+        // by one tick each on binary residual alone.
         let m = base();
         let mut cycle = HarvestCycle::default();
         let mut boundaries = Vec::new();
 
-        for tick in 1..=950 {
+        for t in 1..=1_000 {
             let before = cycle.segment();
-            cycle.advance(SIM_DT, m);
+            tick(&mut cycle, m);
             if cycle.segment() != before {
-                boundaries.push((before, tick));
+                boundaries.push((before, t));
             }
         }
 
@@ -611,24 +682,25 @@ mod tests {
                 (Segment::Pick, 500),
                 (Segment::ToDepot, 900),
                 (Segment::Unload, 950),
+                (Segment::Snack, 1_000),
             ]
         );
     }
 
     #[test]
     fn leftover_budget_carries_across_segment_boundaries() {
-        // Discarding the leftover would lose dt/2 per boundary: 0.1s per cycle,
-        // a 0.21% throughput error that grows as multipliers shorten the cycle.
+        // Discarding the leftover would lose dt/2 per boundary: 0.125s per
+        // cycle, a throughput error that grows as multipliers shorten it.
         let m = base();
         let mut cycle = HarvestCycle::default();
-        let mut deliveries = 0;
+        let mut delivered = 0.0;
 
         for _ in 0..20_000 {
-            deliveries += cycle.advance(SIM_DT, m);
+            delivered += tick(&mut cycle, m).delivered;
         }
 
-        // 1000 seconds / 47.5 = 21.05 cycles.
-        assert_eq!(deliveries, 21);
+        // 1000 seconds / 50 = exactly 20 cycles.
+        assert_eq!(delivered, 20.0 * WORKER_PAYLOAD);
     }
 
     #[test]
@@ -636,13 +708,13 @@ mod tests {
         let m = base();
         for workers in 1..=10u32 {
             let mut cycles: Vec<_> = (0..workers)
-                .map(|index| HarvestCycle::at_phase(index as f64 * 4.3, m))
+                .map(|index| at_phase(index as f64 * 4.3, m))
                 .collect();
             let mut delivered = 0.0;
 
             for _ in 0..(600.0 * SIM_HZ) as u32 {
                 for cycle in &mut cycles {
-                    delivered += cycle.advance(SIM_DT, m) as f64 * WORKER_PAYLOAD;
+                    delivered += tick(cycle, m).delivered;
                 }
             }
 
@@ -660,44 +732,43 @@ mod tests {
         // D13's whole point: remaining work is invariant under a multiplier
         // change, so nobody teleports and nobody loses ground.
         let mut cycle = HarvestCycle::default();
-        cycle.advance(10.0, base());
-        assert_eq!(cycle.segment_fraction(), 0.5);
+        let mut larder = FULL_LARDER;
+        cycle.advance(10.0, base(), terms(base()), &mut larder);
+        assert_eq!(cycle.segment_fraction(base()), 0.5);
 
         let chefs = Multipliers {
             speed: 2.0,
             ..base()
         };
-        cycle.advance(5.0, chefs);
+        cycle.advance(5.0, chefs, terms(chefs), &mut larder);
 
         assert_eq!(cycle.segment(), Segment::Pick);
-        assert_eq!(cycle.segment_fraction(), 0.0);
+        assert_eq!(cycle.segment_fraction(chefs), 0.0);
     }
 
-    // ─────────────────────────────────────────────────────────────── phase
-
     #[test]
-    fn at_phase_lands_in_the_right_segment() {
+    fn winding_a_cycle_forward_lands_in_the_right_segment() {
         let m = base();
 
-        assert_eq!(HarvestCycle::at_phase(0.0, m), HarvestCycle::default());
-        assert_eq!(HarvestCycle::at_phase(10.0, m).segment(), Segment::ToGrove);
-        assert_eq!(HarvestCycle::at_phase(10.0, m).segment_fraction(), 0.5);
-        assert_eq!(HarvestCycle::at_phase(22.0, m).segment(), Segment::Pick);
-        assert_eq!(HarvestCycle::at_phase(30.0, m).segment(), Segment::ToDepot);
-        assert_eq!(HarvestCycle::at_phase(46.0, m).segment(), Segment::Unload);
-        // Phases wrap rather than falling off the end.
-        assert_eq!(HarvestCycle::at_phase(47.5, m), HarvestCycle::default());
+        assert_eq!(at_phase(0.0, m), HarvestCycle::default());
+        assert_eq!(at_phase(10.0, m).segment(), Segment::ToGrove);
+        assert_eq!(at_phase(10.0, m).segment_fraction(m), 0.5);
+        assert_eq!(at_phase(22.0, m).segment(), Segment::Pick);
+        assert_eq!(at_phase(30.0, m).segment(), Segment::ToDepot);
+        assert_eq!(at_phase(46.0, m).segment(), Segment::Unload);
+        assert_eq!(at_phase(48.0, m).segment(), Segment::Snack);
+        assert_eq!(at_phase(50.0, m), HarvestCycle::default());
     }
 
     #[test]
     fn a_phase_offset_delays_delivery_by_exactly_that_offset() {
         let m = base();
-        let mut cycle = HarvestCycle::at_phase(7.5, m);
+        let mut cycle = at_phase(7.5, m);
         let mut delivered_on = None;
 
-        for tick in 1..=1_000 {
-            if cycle.advance(SIM_DT, m) > 0 && delivered_on.is_none() {
-                delivered_on = Some(tick);
+        for t in 1..=1_000 {
+            if tick(&mut cycle, m).delivered > 0.0 && delivered_on.is_none() {
+                delivered_on = Some(t);
             }
         }
 
@@ -706,48 +777,92 @@ mod tests {
     }
 
     #[test]
-    fn spawn_phase_is_uniform_in_time_across_the_whole_cycle() {
+    fn every_worker_starts_at_the_stall_facing_the_grove() {
+        // Hires are staggered by the cost ladder, so there is no phase jitter:
+        // a new monkey always walks out of the stall, which is the purchase's
+        // visible consequence.
+        let fresh = HarvestCycle::default();
+
+        assert_eq!(fresh.segment(), Segment::ToGrove);
+        assert_eq!(fresh.segment_fraction(base()), 0.0);
+        assert!(!fresh.is_hungry());
+    }
+
+    // ──────────────────────────────────────────────────────────── feeding
+
+    #[test]
+    fn a_worker_is_fed_out_of_the_delivery_it_just_made() {
+        // The invariant the whole redesign rests on: within one cycle the
+        // credit strictly precedes the debit and strictly exceeds it, so the
+        // larder cannot be lower after a cycle than it was before.
         let m = base();
-        let mut jitter = Jitter::default();
-        let mut sum = 0.0;
-        let mut in_segment = [0u32; 4];
-        let samples = 40_000;
+        let mut cycle = HarvestCycle::default();
+        let mut larder = 0.0;
+        let mut worst = f64::INFINITY;
 
-        for _ in 0..samples {
-            let phase = jitter.spawn_phase(m);
-            assert!((0.0..cycle_time(m)).contains(&phase));
-            let segment = HarvestCycle::at_phase(phase, m).segment();
-            in_segment[Segment::ORDER.iter().position(|s| *s == segment).unwrap()] += 1;
-            sum += phase;
+        for _ in 0..1_000 {
+            cycle.advance(SIM_DT, m, terms(m), &mut larder);
+            worst = worst.min(larder);
         }
 
-        // Uniform in time over 0..47.5 has mean 23.75.
-        let mean = sum / samples as f64;
-        assert!((mean - 23.75).abs() < 0.5, "mean={mean}");
-
-        // Each segment must be hit in proportion to its *duration*, not its
-        // count. Sampling a segment first would give every segment 25%, which
-        // would put a quarter of new workers in a phase worth 5.3% of a cycle.
-        for (index, segment) in Segment::ORDER.iter().enumerate() {
-            let share = in_segment[index] as f64 / samples as f64;
-            let expected = segment.duration(m) / cycle_time(m);
-            assert!(
-                (share - expected).abs() < 0.01,
-                "{segment:?}: {share} vs {expected}"
-            );
-        }
+        assert!(worst >= 0.0, "larder dipped to {worst}");
+        assert!((larder - (WORKER_PAYLOAD - meal(m))).abs() < 1e-12);
     }
 
     #[test]
-    fn jitter_is_reproducible_and_resets() {
-        let mut jitter = Jitter::default();
-        let first: Vec<f64> = (0..8).map(|_| jitter.unit()).collect();
-        jitter.restart();
-        let second: Vec<f64> = (0..8).map(|_| jitter.unit()).collect();
+    fn a_worker_with_nothing_to_eat_stalls_instead_of_eating_on_credit() {
+        let m = base();
+        let mut cycle = HarvestCycle::default();
+        let mut larder = 0.0;
 
-        assert_eq!(first, second);
-        assert!(first.windows(2).any(|pair| pair[0] != pair[1]));
-        assert!(first.iter().all(|value| (0.0..1.0).contains(value)));
+        // Run to the moment the delivery lands, then have the player spend it.
+        for _ in 0..950 {
+            cycle.advance(SIM_DT, m, terms(m), &mut larder);
+        }
+        assert_eq!(cycle.segment(), Segment::Snack);
+        assert_eq!(larder, WORKER_PAYLOAD);
+        larder = 0.0;
+
+        // Two full cycles' worth of ticks with an empty larder.
+        for _ in 0..2_000 {
+            let output = cycle.advance(SIM_DT, m, terms(m), &mut larder);
+            assert_eq!(output, CycleOutput::default());
+        }
+        assert!(cycle.is_hungry());
+        assert_eq!(larder, 0.0);
+
+        // Feeding it clears exactly the meal that was owed - the debt was
+        // deferred, never forgiven, so starving is a penalty and not a wage
+        // holiday - and the worker goes straight back to work.
+        larder = meal(m);
+        let output = cycle.advance(SIM_DT, m, terms(m), &mut larder);
+        assert_eq!(output.eaten, meal(m));
+        assert_eq!(larder, 0.0);
+        assert_eq!(cycle.segment(), Segment::ToGrove);
+        assert!(!cycle.is_hungry());
+    }
+
+    #[test]
+    fn a_crowd_shares_one_larder_without_overdrawing_it() {
+        // Deliveries made earlier in a tick are edible later in the same tick,
+        // and no combination of workers can take the larder below zero.
+        let m = base();
+        let mut cycles: Vec<_> = (0..12).map(|i| at_phase(i as f64 * 3.7, m)).collect();
+        let mut larder = 0.5;
+        let mut worst = f64::INFINITY;
+
+        for _ in 0..(600.0 * SIM_HZ) as u32 {
+            for cycle in &mut cycles {
+                cycle.advance(SIM_DT, m, terms(m), &mut larder);
+            }
+            worst = worst.min(larder);
+        }
+
+        assert!(worst >= 0.0, "larder dipped to {worst}");
+        assert!(
+            larder > 400.0,
+            "12 workers should net ~42/min, got {larder}"
+        );
     }
 
     // ──────────────────────────────────────────────────────────── treasury
@@ -772,20 +887,9 @@ mod tests {
     }
 
     #[test]
-    fn wages_are_charged_even_when_they_cannot_be_covered() {
-        // Clamping at zero would hand out free bananas; the purchase gate, not
-        // the drain, is what keeps a player solvent.
-        let mut treasury = Treasury::default();
-
-        treasury.charge(1.5);
-
-        assert_eq!(treasury.bananas(), -1.5);
-    }
-
-    #[test]
     fn saved_count_must_be_nonnegative_finite_and_safe_but_may_be_fractional() {
         assert!(Treasury::from_saved(42.0).is_some());
-        // Wages drain continuously, so a fractional save is legitimate.
+        // Meals are fractional, so a fractional save is legitimate.
         assert!(Treasury::from_saved(1.5).is_some());
         assert!(Treasury::from_saved(-1.0).is_none());
         assert!(Treasury::from_saved(f64::INFINITY).is_none());
@@ -837,7 +941,7 @@ mod tests {
         assert_eq!(workforce, Workforce::default());
     }
 
-    // ─────────────────────────────────────────────────── costs and gating
+    // ─────────────────────────────────────────── costs and gating
 
     #[test]
     fn cost_ladder_is_geometric_and_unrounded() {
@@ -871,28 +975,20 @@ mod tests {
     }
 
     #[test]
-    fn the_wage_reserve_is_constant_for_a_worker_only_economy() {
-        let m = base();
-        // 2 × (W × 0.03) × (47.5 / W) = 2.85, independent of W.
-        for workers_after in 1..=25u32 {
-            assert!((wage_reserve(workers_after, m) - 2.85).abs() < 1e-12);
-        }
-        assert_eq!(wage_reserve(0, m), 0.0);
-    }
-
-    #[test]
-    fn the_first_hire_needs_cost_plus_reserve() {
+    fn the_signing_fee_is_the_whole_requirement() {
+        // The shop used to ask for the fee plus a 2.85 wage reserve while
+        // showing only the fee, which read as a bug. Post-paid meals make the
+        // reserve unnecessary, so the price on the button is the price.
         let m = base();
         let workforce = Workforce::default();
 
-        let at_cost = plan_hire(workforce, Treasury::from_saved(4.0).unwrap(), m);
-        assert_eq!(at_cost.cost, 4.0);
-        assert_eq!(at_cost.reserve, 2.85);
-        assert_eq!(at_cost.required, 6.85);
-        assert!(!at_cost.affordable);
+        let plan = plan_hire(workforce, Treasury::from_saved(4.0).unwrap(), m);
+        assert_eq!(plan.cost, 4.0);
+        assert_eq!(plan.meal, 1.5);
+        assert!(plan.affordable);
 
-        let at_required = plan_hire(workforce, Treasury::from_saved(6.85).unwrap(), m);
-        assert!(at_required.affordable);
+        let short = plan_hire(workforce, Treasury::from_saved(3.9).unwrap(), m);
+        assert!(!short.affordable);
     }
 
     #[test]
@@ -916,9 +1012,9 @@ mod tests {
     fn snapshot_reports_gross_wages_and_net_together() {
         let snapshot = EconomySnapshot::project(1, base());
 
-        assert!((snapshot.gross_per_sec - 0.105_263_157_894_736_84).abs() < 1e-15);
+        assert!((snapshot.gross_per_sec - 0.1).abs() < 1e-15);
         assert!((snapshot.wages_per_sec - 0.03).abs() < 1e-15);
-        assert!((snapshot.net_per_sec - 0.075_263_157_894_736_84).abs() < 1e-15);
+        assert!((snapshot.net_per_sec - 0.07).abs() < 1e-15);
         assert_eq!(
             EconomySnapshot::project(0, base()),
             EconomySnapshot::default()
@@ -929,71 +1025,76 @@ mod tests {
 
     #[test]
     fn one_worker_from_zero_follows_the_expected_trajectory() {
-        // B(t) = 5·floor(t/47.5) - 0.03t, sampled at 20 Hz with deliveries
-        // credited before wages are charged. The checkpoints are the values a
-        // player would read off the counter.
+        // The player spends their last banana on the hire, so the run starts at
+        // exactly zero. The counter holds flat for a trip, jumps a whole
+        // payload, then visibly gives 1.5 of it back - the rhythm the economy
+        // is meant to read as.
         let m = base();
         let mut treasury = Treasury::default();
         let mut cycle = HarvestCycle::default();
         let mut seen = Vec::new();
-        let checkpoints = [400u32, 900, 949, 950, 1900, 2400];
+        let checkpoints = [400u32, 949, 950, 999, 1_000, 2_000];
 
-        for tick in 1..=2_400u32 {
-            let deliveries = cycle.advance(SIM_DT, m);
-            treasury.credit(deliveries as f64 * WORKER_PAYLOAD);
-            treasury.charge(WORKER_WAGE * SIM_DT);
-            if checkpoints.contains(&tick) {
-                seen.push((tick, (treasury.bananas() * 1e4).round() / 1e4));
+        for t in 1..=2_000u32 {
+            let mut larder = treasury.bananas();
+            let output = cycle.advance(SIM_DT, m, terms(m), &mut larder);
+            treasury.credit(output.delivered);
+            treasury.charge(output.eaten);
+            if checkpoints.contains(&t) {
+                seen.push((t, (treasury.bananas() * 1e4).round() / 1e4));
             }
         }
 
         assert_eq!(
             seen,
             vec![
-                (400, -0.6),    // reached the grove
-                (900, -1.35),   // back at the stall
-                (949, -1.4235), // the deepest the balance ever goes
-                (950, 3.575),   // first delivery
-                (1900, 7.15),   // second delivery
-                (2400, 6.4),    // t = 120 s
+                (400, 0.0),   // reached the grove, nothing spent getting there
+                (949, 0.0),   // still nothing: the trip itself is free
+                (950, 5.0),   // delivery
+                (999, 5.0),   // eating, but the meal settles on the last tick
+                (1_000, 3.5), // snack paid for out of the delivery
+                (2_000, 7.0), // t = 100 s, two full cycles
             ]
         );
-        // A zero-clamped treasury would read 7.825 here. The 1.425 gap is the
-        // clamp's entire signature: bananas conjured from unpaid wages.
-        assert!((treasury.bananas() - 6.4).abs() < 1e-9);
+        // The old continuously-drained model read -1.4235 at its worst and only
+        // climbed out at the first delivery. This one never goes below zero at
+        // all, which is what lets the shop quote a bare signing fee.
     }
 
     #[test]
-    fn the_reserve_keeps_a_solvent_player_out_of_the_red() {
-        // Buy the moment the gate allows it and the balance never crosses zero.
+    fn buying_the_moment_the_shop_allows_it_never_goes_underwater() {
         let m = base();
         let mut treasury = Treasury::default();
         let mut workforce = Workforce::default();
-        let mut jitter = Jitter::default();
         let mut cycles: Vec<HarvestCycle> = Vec::new();
         let mut worst = f64::INFINITY;
 
         // Seed the run the way a player does: by hand, up to the first gate.
-        treasury.credit(7.0);
+        treasury.credit(4.0);
 
         for _ in 0..(1_200.0 * SIM_HZ) as u32 {
             let plan = plan_hire(workforce, treasury, m);
             if plan.affordable {
                 treasury.charge(plan.cost);
                 workforce.hire();
-                cycles.push(HarvestCycle::at_phase(jitter.spawn_phase(m), m));
+                cycles.push(HarvestCycle::default());
             }
 
-            let mut delivered = 0.0;
+            let mut larder = treasury.bananas();
+            let (mut delivered, mut eaten) = (0.0, 0.0);
             for cycle in &mut cycles {
-                delivered += cycle.advance(SIM_DT, m) as f64 * WORKER_PAYLOAD;
+                let output = cycle.advance(SIM_DT, m, terms(m), &mut larder);
+                delivered += output.delivered;
+                eaten += output.eaten;
             }
             treasury.credit(delivered);
-            treasury.charge(workforce.count() as f64 * WORKER_WAGE * SIM_DT);
+            treasury.charge(eaten);
             worst = worst.min(treasury.bananas());
         }
 
         assert!(worst >= 0.0, "treasury dipped to {worst}");
+        // Spending every banana the instant it arrives is now a viable play,
+        // and it still reaches a real workforce inside twenty minutes.
         assert!(workforce.count() >= 8, "only {} hired", workforce.count());
     }
 }

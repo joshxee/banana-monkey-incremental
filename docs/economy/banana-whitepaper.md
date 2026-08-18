@@ -247,6 +247,11 @@ A cart delivers 200 bananas every ~135 seconds. Wages drain continuously. The
 treasury therefore dips between deliveries even when net rate is comfortably
 positive.
 
+> **Superseded for workers, §6.1.** Harvesters are now fed out of the delivery
+> they have just made, so a worker contributes no dip at all and needs no
+> reserve. The analysis below still governs every unit whose wage is drained
+> continuously, which today is the support staff and the cart crews.
+
 Measured worst dips over twenty minutes from a zero start: −27 at three carts,
 −36 at five, −38 at six. The dip does not grow with the economy, because wages
 rise while cart cycles shorten and the two roughly cancel.
@@ -275,6 +280,59 @@ mix.
 Residual exposure is a few tens of bananas. This is by design: debt is possible,
 rare, and small.
 
+### 6.1 Post-paid meals, and the death of the worker reserve
+
+The reserve above is a hedge against a timing mismatch: wages fall due
+continuously while income arrives in lumps. For workers the mismatch was total.
+A fresh hire spent a full cycle costing bananas before earning any, so I5 had to
+demand a 2.85-banana reserve on top of a 4.0 signing fee — a shop that quoted one
+price and enforced another, which reads as a bug however it is explained.
+
+**Removing the mismatch is strictly better than reserving against it.** A worker
+now spends the last 5% of its trip eating at the stall, immediately after
+unloading, and that meal *is* its wage:
+
+$$\text{meal} \;=\; w_{\text{salary}} \cdot T_{\text{worker}} \;=\; 1.5 \ \text{bananas of the } 5 \text{ it just delivered}$$
+
+Three properties follow, and between them they replace the reserve entirely:
+
+1. **Solvency is structural.** Within a cycle the credit strictly precedes the
+   debit and strictly exceeds it, so a worker cannot take the treasury below
+   where it stood before its delivery landed. Measured worst dip over twenty
+   minutes: **0.000 at W = 1, 4, 10 and 25**, against −1.42 under the drained
+   model. The signing fee can therefore be the whole requirement.
+2. **The wage rate is unchanged.** Both the meal and the eating time are defined
+   against the cycle, so $w_{\text{salary}}$ stays exactly 0.03/s at every
+   multiplier. Nothing downstream — payback ranking, chef viability, §5.1 —
+   moves.
+3. **The counter reads as arithmetic.** +5 on delivery, −1.5 two seconds later,
+   flat in between. The drained model instead ticked imperceptibly downward for
+   47 seconds and then jumped; players read the first half as a freeze and the
+   second as a glitch.
+
+The cost is 5% of throughput, taken as a *share* of the trip rather than a fixed
+2.5 seconds. That distinction is load-bearing. A fixed snack would become an
+ever-larger slice of a shortened cycle, so chefs would raise the cost of labour
+per second and partly cancel themselves, and worker throughput would converge to
+$q/t_{\text{snack}}$ instead of to the pick-rate ceiling of §3 — the bound the
+whole game rests on. As a share it costs a flat 5% of that ceiling and nothing
+more, and the theorem survives with a constant factor:
+
+$$\lim \text{throughput} \;=\; (1 - f_{\text{snack}}) \cdot \frac{M_{\text{tech}}}{t_{\text{pick}}}$$
+
+**Owed, never forgiven.** A worker that cannot afford its meal stalls at the
+stall rather than eating on credit, and resumes the instant food arrives. This
+matters: clamping the treasury at zero instead would turn unpayable wages into
+free bananas and make spending down to zero a wage holiday. Stalling is a
+penalty, it is visible — the sprite greys out and production stops — and it is
+the only place in the economy where overspending has a consequence the player
+can see.
+
+**Carts owe the same treatment.** Their crews still drain continuously, so
+`wage_reserve` still fires for them and §6's analysis still governs. Until the
+cart increment adopts a snack, workers converge 5% under the §3 ceiling and
+carts converge on it, which is the one asymmetry this change introduces.
+
 ---
 
 ## 7. Determinism and the two rates
@@ -301,14 +359,17 @@ delivery.
 
 | Unit | payload | speed | wage | cost base | cost growth | augment |
 |---|---|---|---|---|---|---|
-| Worker Monkey | 5 | 5 m/s | 0.03 | 4 | 1.15 | — |
+| Worker Monkey | 5 | 5 m/s | 0.03 (post-paid, §6.1) | 4 | 1.15 | — |
 | Net Cart | 200 (crew 3) | 15 m/s | 0.20 | 70 | 1.70 | — |
 | Chef | — | — | 0.10 | 25 | 1.30 | travel +0.15 |
 | Unpacker | — | — | 0.10 | 30 | 1.30 | unload +0.20 |
 | Technologist | — | — | 0.20 | 40 | 1.35 | pick +0.10/level |
 
 Grove distance 100 m. $t_{\text{pick}} = 1.00$ s/banana,
-$t_{\text{unload}} = 0.50$ s/banana. Research level $n$ costs $60 \times 2.2^n$;
+$t_{\text{unload}} = 0.50$ s/banana. A worker spends a further
+$f_{\text{snack}} = 5\%$ of each trip eating at the stall (§6.1), which makes
+the round trip 50.0 s: 40 travel, 5 picking, 2.5 unloading, 2.5 eating. Gross
+0.100/s per worker, wages 0.030/s, net **0.070/s**. Research level $n$ costs $60 \times 2.2^n$;
 one Technologist yields 1.0 research/sec, scaled by $M_{\text{speed}}$ — chefs
 feed the researchers too. Net Cart requires tech level 1. Seed: one free worker.
 
@@ -324,23 +385,28 @@ workers *owned*, so the ladder is unshifted: the oracle's first *purchase* is
 its second worker at $4 \times 1.15^1$, and the game's first purchase is its
 first worker at $4 \times 1.15^0$. Every subsequent price agrees. The whole
 downstream session is the oracle's, displaced by the time it takes to hand-pick
-the opening 6.85 bananas.
+the opening 4.0 bananas.
 
 Two consequences worth stating so they are not rediscovered as bugs:
 
-**The first delivery can be up to 47.5 seconds after the first purchase**, mean
-23.75 with phase jitter. The seed worker exists in the model partly because it
-hides this; without it, the wait is the price of making the purchase the
-tutorial. The implementation answers it with presentation — a gold flash on the
-new hire, a visible walk, a carried banana on the return leg, and a loud arrival
-— rather than by changing a parameter. Every numeric lever here is expensive:
+**The first delivery is 47.5 seconds after the first purchase**, every time. The
+seed worker exists in the model partly because it hides this; without it, the
+wait is the price of making the purchase the tutorial. The implementation answers
+it with presentation — the monkey walks out of the stall on the click, carries a
+banana home, and arrives loudly — rather than by changing a parameter.
+
+There is deliberately **no spawn phase jitter**. It existed to bound a treasury
+dip that §6.1 removed at the source, and it cost the purchase its most legible
+consequence: a hire drawn mid-route materialised in the middle of the field,
+which reads as a spawn bug. The geometric cost ladder staggers hires on its own,
+so lockstep needs several purchases inside one tick to occur at all. Every numeric lever here is expensive:
 halving the grove distance invalidates D17's measured 230–280% cart advantage,
 doubling worker speed cuts the Chef effect from +102% to +52% and undermines
 §5.1, and $t_{\text{pick}}$ sets the ceiling in §3 outright.
 
 **Manual clicking dominates the automated economy for roughly the first dozen
 purchases.** At one drag per second the player earns 1.0/s against a worker's
-net 0.0753/s. That is ordinary for the genre, but it means the first monkey is
+net 0.070/s. That is ordinary for the genre, but it means the first monkey is
 sold on "it works while you are not clicking", not on rate.
 
 Prices are charged exactly as $b\,g^{\,n}$ and displayed to one decimal.

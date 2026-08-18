@@ -9,7 +9,7 @@
 use bevy::prelude::*;
 
 use crate::{
-    domain::{EconomySnapshot, Multipliers, Treasury, Workforce, plan_hire},
+    domain::{EconomySnapshot, Multipliers, Treasury, WORKER_PAYLOAD, Workforce, plan_hire},
     game::{
         BROWN, BROWN_LIGHT, ButtonAction, CREAM, Feedback, GOLD, INK, MUTED, MenuState, SceneLayout,
     },
@@ -318,9 +318,11 @@ fn spawn_shop_card(cell: &mut ChildSpawnerCommands) {
         ));
 
         card.spawn((
-            // A greyed button showing "4.0" to a player holding 4 bananas is
-            // indistinguishable from a bug, so the real requirement is spelled
-            // out whenever the reserve is what blocks the purchase.
+            // The one thing about the economy a player cannot infer from
+            // watching: the counter dips a couple of seconds after every
+            // delivery, and this is why. Stated as a fact about the worker
+            // rather than as a requirement, because it is not one - a monkey is
+            // fed out of the load it just brought in, never out of the fee.
             Text::new(""),
             TextFont::from_font_size(13.0),
             TextColor(MUTED),
@@ -709,14 +711,7 @@ pub fn sync_shop(
     set_if_changed(&mut price.0, format!("{:.1}", plan.cost));
     set_if_changed(
         &mut requirement.0,
-        if plan.affordable {
-            String::new()
-        } else {
-            format!(
-                "needs {:.1} ({:.1} + {:.1} feed)",
-                plan.required, plan.cost, plan.reserve
-            )
-        },
+        format!("eats {:.1} of every {:.0}", plan.meal, WORKER_PAYLOAD),
     );
 
     let (interaction, background, border) = &mut *button;

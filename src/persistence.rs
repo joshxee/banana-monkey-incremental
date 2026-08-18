@@ -11,10 +11,11 @@ const SAVE_FILE_NAME: &str = "save-v1.json";
 #[cfg(target_arch = "wasm32")]
 const WEB_STORAGE_KEY: &str = "banana-monkey-incremental.save-v1";
 
-/// What the game restores on launch. Cycle phase is deliberately absent:
-/// workers re-jitter on load, which is tolerable only because a worker cycle is
-/// 47.5 seconds. A longer-cycle unit (the Net Cart) will have to persist phase,
-/// or reloading becomes both a save-scum surface and an invisible punishment.
+/// What the game restores on launch. Cycle phase is deliberately absent: every
+/// worker restarts its trip from the stall, which is tolerable only because a
+/// worker cycle is 50 seconds. A longer-cycle unit (the Net Cart) will have to
+/// persist phase, or reloading becomes both a save-scum surface and an invisible
+/// punishment - and it costs the player at most one trip either way.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct SavedRun {
     pub treasury: Treasury,

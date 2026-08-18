@@ -33,7 +33,7 @@ current bottleneck and pay to remove it, then find the next one.
 | I2 | No harvester is *offered* unless its projected net delta is positive. |
 | I3′ | Production **rate** is derived from world state every tick and never cached. Harvest **progress** is per-entity state, stored as remaining work. The treasury is credited on delivery. |
 | I4 | The player can always see gross rate, wage rate, and net rate simultaneously. |
-| I5 | A purchase requires the treasury to cover its cost *plus* a wage reserve sized to the gap between cart deliveries. |
+| I5 | A purchase requires the treasury to cover its cost, plus a wage reserve for any unit whose wage is *drained continuously* rather than paid out of a delivery. |
 
 I3′ is the load-bearing one, and it is weaker than v1's I3 by necessity. A
 monkey halfway to the grove is *somewhere*, and that position is not derivable
@@ -45,7 +45,8 @@ I1 is stronger than v1's. Non-producing units draw wages, so "not negative" is
 not enough — a purchase that drives net to zero strands the run.
 
 I5 is new and exists because cart income is lumpy while wages are continuous.
-See D15.
+See D15 — and D18, which removes the reserve for workers entirely by removing
+the mismatch that made it necessary.
 
 ---
 
@@ -126,8 +127,8 @@ The naive form fails twice, and both failures are silent:
 
 - `1/20` is not exactly representable in binary, so repeated subtraction leaves
   a *positive* residual — 9.4e-15 on a 5-banana pick segment, 1.0e-15 on
-  unload. Each residual costs a whole extra tick, turning the 47.5-second
-  worker cycle into a 47.6-second one.
+  unload. Each residual costs a whole extra tick, stretching the worker cycle
+  past its nominal 50.0 seconds.
 - Discarding the budget left over at a segment boundary loses `dt/2` per
   boundary, a 0.21% throughput error at these parameters. Because the loss is
   absolute, it grows as a *fraction* when multipliers shorten the cycle: 0.28%
@@ -152,6 +153,10 @@ reserve = 2 × max(0, wages − pool_income) × cart_cycle / cart_count
 ```
 Only the wages that carts are covering are at risk, and only for one delivery
 gap. Costs 0.3 minutes across a 24-minute session.
+
+*Superseded for harvesters by D18 (2026-08-18); the amendment below still
+governs every continuously-drained unit, which is today the support staff and
+the cart crews.*
 
 *Amended (Worker Monkey, 2026-08-18) — the formula returns zero for a cart-free
 economy, and that is wrong.* It hard-codes "the lumpy source is carts, the
@@ -197,24 +202,75 @@ treasury dip from −38 to −255 in the same economy. One line; prevents a
 punishment the player cannot see or diagnose. A new cart remains pending until
 assignment completes, then samples its crew fraction and initial phase together.
 
-*Extended to workers (Worker Monkey, 2026-08-18), and the window is not
-negotiable.* The phase must be uniform in **time across the whole cycle**. Two
-narrower windows are tempting and both are wrong:
+*Not extended to workers (Worker Monkey, 2026-08-18).* Jitter was applied to
+workers first and then withdrawn. Its entire justification for that unit was
+bounding the treasury dip, and D18 removes the dip at its source: with post-paid
+meals the measured worst dip is 0.000 at every worker count, jittered or not.
 
-- Sampling a segment and then a position inside it puts 25% of new workers in
-  Unload, which is 5.3% of the cycle, biasing first-cycle income upward by ~25%.
-  It self-corrects after one cycle, so only a first-minute test catches it.
-- Confining the window to the outbound leg — attractive because a worker would
-  then always appear empty-handed and walking, rather than materialising
-  mid-route — leaves 27.5 seconds of every cycle in which a burst-bought cohort
-  delivers nothing. D15's amended reserve is derived from a mean gap of `T/W`,
-  so the dip becomes `0.03 × W × 27.5`, which passes the 2.85 reserve at `W = 4`
-  and grows without bound. The full-cycle window holds the dip at 1.425 for
-  every `W`.
+What jitter cost, by contrast, was real. A phase drawn over the whole cycle puts
+a new hire anywhere on the route, so a purchase can produce a monkey
+materialising in the middle of the field — which reads as a spawn bug, and had
+to be papered over with a gold flash. Every worker now starts at the stall at
+phase zero and walks out on the click, which *is* the purchase's consequence.
+The geometric cost ladder staggers hires on its own, so lockstep requires
+several purchases inside one tick.
 
-The presentation cost is real and is paid elsewhere: because a hire can appear
-anywhere on the route, the purchase needs its own visible cue. The
-implementation flashes the new worker gold for 0.6 s.
+Carts keep their jitter: their wages are still drained continuously, so D15
+still binds and the −38 → −255 measurement still stands.
+
+**D18 — Harvesters are paid out of the delivery they have just made.**
+*(Worker Monkey, 2026-08-18. Supersedes D15 for workers.)*
+
+A worker's cycle gains a fourth addend: a **snack**, taken at the stall
+immediately after unloading, costing a fixed share `f = 5%` of the trip.
+
+```
+T       = (travel/M_speed + pick/M_tech + unload/M_unpack) / (1 − f)
+meal    = w_salary × T           = 1.5 bananas of the 5 just delivered
+```
+
+The reserve existed to hedge a timing mismatch — wages fall due continuously,
+income arrives in lumps — and for workers the mismatch was total: a fresh hire
+spent a whole cycle costing bananas before earning any. Removing the mismatch
+beats reserving against it on every axis:
+
+- **Solvency becomes structural.** The credit strictly precedes the debit within
+  a cycle and strictly exceeds it, so the treasury cannot fall below where it
+  stood before the delivery. Measured worst dip over 20 minutes: **0.000** at
+  `W` = 1, 4, 10 and 25, against −1.42 drained. I5 therefore reduces to
+  `bananas ≥ cost` for workers.
+- **The price stops lying.** The shop quoted 4.0 and enforced 6.85. That is the
+  single piece of player-reported confusion this change came from.
+- **The counter reads as arithmetic**: +5, then −1.5 two seconds later, flat in
+  between — instead of an imperceptible 47-second drain punctuated by a jump.
+- **Nothing downstream moves.** Both the meal and the eating time are defined
+  against the cycle, so `w_salary` stays exactly 0.03/s at every multiplier.
+
+**The share is load-bearing; a fixed 2.5 s is not the same decision.** Fixed, the
+snack becomes an ever-larger slice of a shortened cycle: chefs would raise the
+cost of labour per second and partly cancel themselves, and worker throughput
+would converge to `q / t_snack` rather than to the §3 pick-rate ceiling that
+bounds the entire game. Held as a share it costs a flat 5% of that ceiling, and
+the ceiling theorem survives as `(1 − f) × M_tech / t_pick`. The contract suite
+caught this: `CEIL worker throughput converges` failed against a fixed snack.
+
+**A meal is deferred, never forgiven.** A worker that cannot afford its meal
+stalls at the stall and resumes when food arrives; the debt survives. Clamping
+the treasury at zero instead would turn unpayable wages into free bananas — a
+12.5% pacing gift and an exploit with no on-screen tell, since spending to
+exactly zero would buy a wage holiday. Stalling is a penalty, and it is the only
+place in the economy where overspending has a visible consequence: the sprite
+greys out and production stops.
+
+Implementation-wise the settlement loop threads a **larder** — the treasury at
+the top of the tick, plus everything delivered so far during it — through every
+worker in turn. A worker eats only what the larder holds. That single value is
+what makes the treasury non-negative by construction rather than by gate.
+
+**Owed by the cart increment.** Cart crews still drain continuously, so D15 and
+D16 still bind for them, and until they adopt a snack workers converge 5% under
+the §3 ceiling while carts converge on it. That asymmetry is this decision's one
+outstanding cost.
 
 **D17 — Assignment is auto-pull.**
 Cart slots beat the pool by 230–280% at every reachable world state, so the

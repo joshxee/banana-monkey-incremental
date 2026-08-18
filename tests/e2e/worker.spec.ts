@@ -4,24 +4,27 @@ import { installDevicePixelContentBoxFix } from "./device-pixel-content-box";
 
 const SAVE_KEY = "banana-monkey-incremental.save-v1";
 
-/// A worker delivers every 47.5 s, and its starting phase is jittered across the
-/// whole cycle, so the wait for a first delivery is bounded by one cycle plus
-/// the hand-harvesting that pays for the hire.
-const CYCLE_SECONDS = 47.5;
+/// Every worker starts at the stall at phase zero - there is no spawn jitter -
+/// so a hire delivers 47.5 s later and eats 2.5 s after that, every time.
+const CYCLE_SECONDS = 50;
+const DELIVERY_AT_SECONDS = 47.5;
+const PAYLOAD = 5;
+const MEAL = 1.5;
 
 type Point = { x: number; y: number };
 type Monkey = {
   x: number;
   y: number;
-  segment: "to-grove" | "pick" | "to-depot" | "unload";
+  segment: "to-grove" | "pick" | "to-depot" | "unload" | "snack";
   carrying: boolean;
+  hungry: boolean;
 };
 type GameState = {
   ready: boolean;
   bananas: number;
   workers: number;
   nextCost: number;
-  hireRequired: number;
+  meal: number;
   canHire: boolean;
   grossPerSec: number;
   wagesPerSec: number;
@@ -64,6 +67,11 @@ async function touchTap(page: Page, point: Point): Promise<void> {
   await client.detach();
 }
 
+async function savedBananas(page: Page): Promise<number | null> {
+  const raw = await page.evaluate((key) => localStorage.getItem(key), SAVE_KEY);
+  return raw === null ? null : (JSON.parse(raw).bananas as number);
+}
+
 async function state(page: Page): Promise<GameState> {
   return page.evaluate(() => {
     const raw = (window as typeof window & {
@@ -98,8 +106,9 @@ async function openFreshGame(page: Page): Promise<void> {
   await page.locator("#banana-monkey-canvas").focus();
 }
 
-/// Hand-harvest until the shop reports the hire is affordable. The gate is
-/// cost + wage reserve, not cost alone.
+/// Hand-harvest until the shop reports the hire is affordable. The gate is the
+/// signing fee and nothing else: a worker is fed out of its own deliveries, so
+/// there is no wage reserve stacked on top of the quoted price.
 async function harvestUntilAffordable(page: Page): Promise<void> {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     if ((await state(page)).canHire) {
@@ -124,61 +133,72 @@ test.describe("worker monkey", () => {
     const start = await state(page);
     expect(start.workers).toBe(0);
     expect(start.monkeys).toHaveLength(0);
-    // The first hire costs 4 but needs 6.85: cost plus a 2.85 wage reserve, so
-    // the treasury cannot be spent to exactly zero.
+    // The price on the button is the whole requirement. It used to quote 4.0
+    // and enforce 6.85, which is the confusion this cycle was redesigned around.
     expect(start.nextCost).toBeCloseTo(4, 6);
-    expect(start.hireRequired).toBeCloseTo(6.85, 6);
+    expect(start.meal).toBeCloseTo(MEAL, 6);
     expect(start.canHire).toBe(false);
 
     await harvestUntilAffordable(page);
     const beforeHire = await state(page);
-    expect(beforeHire.bananas).toBeGreaterThanOrEqual(beforeHire.hireRequired);
+    expect(beforeHire.bananas).toBeGreaterThanOrEqual(beforeHire.nextCost);
 
     await page.keyboard.press("b");
 
-    // The monkey exists, and the treasury paid exactly the quoted price.
+    // The monkey exists, and the treasury paid exactly the quoted price -
+    // exactly, because nothing drains between the hire and the first delivery.
     await expect.poll(async () => (await state(page)).workers).toBe(1);
     await expect.poll(async () => (await state(page)).monkeys.length).toBe(1);
     const afterHire = await state(page);
-    const debited = beforeHire.bananas - beforeHire.nextCost;
-    // Not exact: wages start draining the moment the worker exists, so the
-    // balance is the debit less a little feeding.
-    expect(afterHire.bananas).toBeLessThanOrEqual(debited);
-    expect(afterHire.bananas).toBeGreaterThan(debited - 0.5);
-    // The reserve is what keeps this above zero rather than in the red.
-    expect(afterHire.bananas).toBeGreaterThan(0);
+    expect(afterHire.bananas).toBeCloseTo(
+      beforeHire.bananas - beforeHire.nextCost,
+      6,
+    );
 
     // Invariant I1: the hire raises net, and the readout can show all three.
-    expect(afterHire.grossPerSec).toBeCloseTo(5 / CYCLE_SECONDS, 6);
+    expect(afterHire.grossPerSec).toBeCloseTo(PAYLOAD / CYCLE_SECONDS, 6);
     expect(afterHire.wagesPerSec).toBeCloseTo(0.03, 6);
     expect(afterHire.netPerSec).toBeGreaterThan(0);
 
-    // It is on the route between the two zones, standing on the ground.
+    // It starts at the stall and heads out empty-handed, which is what makes
+    // the purchase legible: the click produces a monkey walking out of the shop.
     const monkey = afterHire.monkeys[0];
+    expect(monkey.segment).toBe("to-grove");
+    expect(monkey.carrying).toBe(false);
     expect(monkey.x).toBeGreaterThan(afterHire.harvest.x);
     expect(monkey.x).toBeLessThan(afterHire.deposit.x);
+    expect(afterHire.deposit.x - monkey.x).toBeLessThan(
+      (afterHire.deposit.x - afterHire.harvest.x) / 2,
+    );
 
-    // It moves without any further input.
+    // It walks towards the grove without any further input.
     const startX = monkey.x;
     await expect
-      .poll(async () => Math.abs((await state(page)).monkeys[0].x - startX), {
-        timeout: 20_000,
-      })
-      .toBeGreaterThan(4);
+      .poll(async () => (await state(page)).monkeys[0].x, { timeout: 20_000 })
+      .toBeLessThan(startX - 4);
 
-    // And it eventually hands over a full payload of 5 at the stall.
+    // A full payload lands at the stall, and the treasury never dipped on the
+    // way there: the trip itself costs nothing.
     const beforeDelivery = (await state(page)).bananas;
     await expect
       .poll(async () => (await state(page)).bananas, {
-        timeout: (CYCLE_SECONDS + 12) * 1000,
-        intervals: [500],
+        timeout: (DELIVERY_AT_SECONDS + 15) * 1000,
+        intervals: [250],
       })
-      .toBeGreaterThan(beforeDelivery + 3);
+      .toBeCloseTo(beforeDelivery + PAYLOAD, 6);
 
-    // Between deliveries the pile shrinks: the monkey is being fed.
-    const settled = (await state(page)).bananas;
-    await page.waitForTimeout(3_000);
-    expect((await state(page)).bananas).toBeLessThan(settled);
+    // Then, a couple of seconds later, it eats its wage out of what it just
+    // delivered - the visible dip that replaced a continuous invisible drain.
+    await expect
+      .poll(async () => (await state(page)).bananas, {
+        timeout: 15_000,
+        intervals: [250],
+      })
+      .toBeCloseTo(beforeDelivery + PAYLOAD - MEAL, 6);
+
+    // Net of one full trip is strictly positive and the balance never went
+    // below where the hire left it.
+    expect((await state(page)).bananas).toBeGreaterThan(beforeDelivery);
   });
 
   test("a monkey only carries a banana on the way back", async ({ page }) => {
@@ -195,14 +215,24 @@ test.describe("worker monkey", () => {
     while (Date.now() < deadline) {
       const monkey = (await state(page)).monkeys[0];
       seen.add(monkey.segment);
-      const shouldCarry =
-        monkey.segment === "to-depot" || monkey.segment === "unload";
+      // Held through the snack too: that banana is the meal, and seeing it in
+      // hand is what connects the counter's dip to the monkey that caused it.
+      const shouldCarry = ["to-depot", "unload", "snack"].includes(
+        monkey.segment,
+      );
       expect(monkey.carrying).toBe(shouldCarry);
+      expect(monkey.hungry).toBe(false);
       await page.waitForTimeout(250);
     }
 
-    // A full round trip visits all four segments.
-    expect([...seen].sort()).toEqual(["pick", "to-depot", "to-grove", "unload"]);
+    // A full round trip visits all five segments.
+    expect([...seen].sort()).toEqual([
+      "pick",
+      "snack",
+      "to-depot",
+      "to-grove",
+      "unload",
+    ]);
   });
 
   test("tapping the shop card hires exactly one worker", async ({
@@ -239,14 +269,15 @@ test.describe("worker monkey", () => {
   }, testInfo) => {
     test.setTimeout(120_000);
 
-    // 4 bananas covers the 4.0 price but not the 2.85 wage reserve.
-    for (let i = 0; i < 4; i += 1) {
+    // Three bananas is genuinely short of the 4.0 price - the button is greyed
+    // because the player cannot pay, not because of a hidden second charge.
+    for (let i = 0; i < 3; i += 1) {
       const before = (await state(page)).bananas;
       await page.keyboard.press("h");
       await expect.poll(async () => (await state(page)).bananas).toBe(before + 1);
     }
     const blocked = await state(page);
-    expect(blocked.bananas).toBeGreaterThanOrEqual(blocked.nextCost);
+    expect(blocked.bananas).toBeLessThan(blocked.nextCost);
     expect(blocked.canHire).toBe(false);
 
     if (testInfo.project.name.startsWith("mobile")) {
@@ -270,11 +301,23 @@ test.describe("worker monkey", () => {
     await page.keyboard.press("b");
     await expect.poll(async () => (await state(page)).workers).toBe(1);
 
-    // Let wages make the treasury fractional, which the old integer save
-    // format would have silently truncated on the way out.
-    await page.waitForTimeout(2_000);
+    // Wait out a full trip so the monkey's meal makes the treasury fractional,
+    // which the old integer save format would have silently truncated, and then
+    // wait again for the throttled save to carry that fraction to disk.
+    await expect
+      .poll(async () => (await state(page)).bananas % 1, {
+        timeout: (CYCLE_SECONDS + 15) * 1000,
+        intervals: [250],
+      })
+      .not.toBe(0);
+    await expect
+      .poll(async () => (await savedBananas(page))! % 1, {
+        timeout: 15_000,
+        intervals: [250],
+      })
+      .not.toBe(0);
+    const saved = await savedBananas(page);
     const before = await state(page);
-    expect(before.bananas % 1).not.toBe(0);
 
     await page.reload();
     await page.waitForFunction(
@@ -286,10 +329,16 @@ test.describe("worker monkey", () => {
 
     await expect.poll(async () => (await state(page)).workers).toBe(1);
     await expect.poll(async () => (await state(page)).monkeys.length).toBe(1);
-    // Within a banana: the save is throttled to a 5 s cadence, so the last
-    // fraction of a second of wages may not have reached storage.
+
+    // Compared against what was actually on disk, not against the live balance.
+    // Saves are throttled to a 5 s cadence and the economy now moves in lumps,
+    // so a delivery or a meal landing inside that window legitimately leaves the
+    // two up to a payload apart. What must be exact is the round trip itself:
+    // an f64 treasury has to come back bit for bit, which the old integer save
+    // format could not do.
     const after = await state(page);
-    expect(Math.abs(after.bananas - before.bananas)).toBeLessThan(1);
+    expect(after.bananas).toBe(saved);
+    expect(Math.abs(after.bananas - before.bananas)).toBeLessThanOrEqual(PAYLOAD);
   });
 
   test("restart dismisses every worker, and the scrim covers the shop", async ({

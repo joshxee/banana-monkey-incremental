@@ -6,7 +6,7 @@ Every design decision from the review is baked in here:
   * production is payload / cycle_time, not count x rate
   * one speed multiplier applies to ALL travel, carts included (D6 deleted)
   * technologists produce no bananas and are never ranked against harvesters
-  * purchases are gated on net > 0 AND on a wage reserve
+  * harvesters are paid out of the delivery they just made, not continuously
   * assignment is auto-pull: cart slots are always filled first
 
 The `simulate` function models an OPTIMAL PLAYER. Its technologist policy is a
@@ -25,6 +25,7 @@ class Params:
     w_speed: float = 5.0
     w_payload: float = 5.0
     w_salary: float = 0.03
+    w_snack: float = 0.05          # share of the trip spent eating at the stall
     w_cost_b: float = 4.0
     w_cost_r: float = 1.15
 
@@ -111,9 +112,26 @@ def research_rate(s, p):
 # ───────────────────────────────────────────────────────────── cycle times
 
 def worker_cycle(s, p):
-    return (2 * p.dist / (p.w_speed * m_speed(s, p)),
+    """Four addends. The fourth is the snack: the worker stops at the stall and
+    eats its wage out of the load it has just handed over.
+
+    A constant SHARE of the trip, not a fixed number of seconds. Fixing it would
+    make eating an ever-larger slice of a shortened cycle, so chefs would raise
+    the cost of labour per second and partly cancel themselves, and worker
+    throughput would converge to payload/t_snack instead of to the pick-rate
+    ceiling of §3. As a share it costs a flat 5% of that ceiling and nothing
+    more, and `worker_meal` is defined against the whole cycle, so the published
+    w_salary stays exactly 0.03/sec at every multiplier.
+    """
+    work = (2 * p.dist / (p.w_speed * m_speed(s, p)),
             p.w_payload * p.t_pick / m_tech(s, p),
             p.w_payload * p.t_unload / m_unpack(s, p))
+    return work + (sum(work) * p.w_snack / (1.0 - p.w_snack),)
+
+
+def worker_meal(s, p):
+    """Bananas one worker eats per round trip."""
+    return p.w_salary * sum(worker_cycle(s, p))
 
 
 def cart_cycle(s, p):
@@ -195,19 +213,32 @@ def _income_sources(s, p):
     return out
 
 
-def wage_reserve(s, p):
-    """Wages falling due across the longest gap between deliveries, less the
-    income that keeps arriving during it.
+def continuous_salary(s, p):
+    """The part of the wage bill that is NOT funded by a delivery.
 
-    Reserve against the LUMPIEST source and credit only sources that deliver
-    more often than it. The earlier form hard-coded "lumpiest = carts, frequent
-    = pool", so it returned 0 for a cart-free economy - but a lone worker
-    delivers every 47.5s, which is not continuous by any reading, and the
-    treasury goes underwater without a reserve. Picking the lumpiest source by
-    measurement rather than by name reduces to the published cart form when
-    carts exist, and to a constant 2 x 0.03 x 47.5 = 2.85 for a pure-worker
-    economy, independent of W.
+    A pool worker snacks at the stall immediately after unloading, so its meal
+    is paid for out of a delivery that has already landed and is a fraction of
+    it: that salary can never take the treasury below where it stood before the
+    delivery. Everyone else - support staff, and cart crews until the cart
+    increment adopts the same rule - is still on a continuous drain.
     """
+    return salary(s, p) - (s.W - s.A) * p.w_salary
+
+
+def wage_reserve(s, p):
+    """Continuously-drained wages falling due across the longest gap between
+    deliveries, less the income that keeps arriving during it.
+
+    This used to reserve against the whole wage bill, which for a cart-free
+    economy came to a flat 2.85 bananas on top of a 4.0 signing fee - a shop
+    that quoted one price and demanded another. Post-paid harvester meals remove
+    the exposure at its source rather than padding the price to cover it, so
+    only `continuous_salary` needs reserving and a pure-worker economy needs
+    nothing at all.
+    """
+    drained = continuous_salary(s, p)
+    if drained <= 0.0:
+        return 0.0
     sources = _income_sources(s, p)
     if not sources:
         return 0.0
@@ -215,7 +246,7 @@ def wage_reserve(s, p):
     covered = sum(rate for g, rate in sources if g < gap)
     # x2 safety factor: the gap between deliveries is a random variable, and
     # the mean under-covers roughly half the time.
-    return 2.0 * max(0.0, salary(s, p) - covered) * gap
+    return 2.0 * max(0.0, drained - covered) * gap
 
 
 def affordable(kind, bananas, s, p):
@@ -347,15 +378,22 @@ def discrete_run(s, p, duration=1200.0, dt=0.05, start=0.0,
     kph = [rng.uniform(0, Tk) if jitter else 0.0 for _ in cart_payloads]
 
     bananas, lo, t, delivered = start, start, 0.0, 0.0
-    drain = salary(s, p)
+    # Only the units that are not fed by a delivery drain continuously.
+    drain = continuous_salary(s, p)
+    # A worker unloads at Tw - w_snack and eats at Tw, so the two events are
+    # separated on the clock even though they belong to the same trip.
+    unload_at, w_meal = Tw - worker_cycle(s, p)[3], worker_meal(s, p)
     while t < duration:
         bananas -= drain * dt
         for i in range(pool):
+            was = wph[i]
             wph[i] += dt
-            if wph[i] >= Tw:
-                wph[i] -= Tw
+            if was < unload_at <= wph[i]:
                 bananas += p.w_payload
                 delivered += p.w_payload
+            if wph[i] >= Tw:
+                wph[i] -= Tw
+                bananas -= w_meal
         for i, payload in enumerate(cart_payloads):
             kph[i] += dt
             if kph[i] >= Tk:

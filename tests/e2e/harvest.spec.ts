@@ -11,7 +11,7 @@ type GameState = {
   bananas: number;
   workers: number;
   nextCost: number;
-  hireRequired: number;
+  meal: number;
   canHire: boolean;
   grossPerSec: number;
   wagesPerSec: number;
@@ -19,8 +19,9 @@ type GameState = {
   monkeys: Array<{
     x: number;
     y: number;
-    segment: "to-grove" | "pick" | "to-depot" | "unload";
+    segment: "to-grove" | "pick" | "to-depot" | "unload" | "snack";
     carrying: boolean;
+    hungry: boolean;
   }>;
   interaction: "idle" | "dragging" | "keyboard-harvest";
   menu: "closed" | "open" | "confirm-restart";
