@@ -1,50 +1,98 @@
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{MAX_SAFE_BANANAS_COUNT, Treasury};
+use crate::domain::{Treasury, Workforce};
 
-const SAVE_VERSION: u32 = 1;
+const SAVE_VERSION: u32 = 2;
+// The storage key is a namespace, not a schema version: it deliberately stays
+// at `v1` across schema bumps so that existing players keep their progress.
+// Bump it only to orphan every save on purpose.
 #[cfg(not(target_arch = "wasm32"))]
 const SAVE_FILE_NAME: &str = "save-v1.json";
 #[cfg(target_arch = "wasm32")]
 const WEB_STORAGE_KEY: &str = "banana-monkey-incremental.save-v1";
 
-#[derive(Debug, Deserialize, Serialize)]
-struct SaveData {
+/// What the game restores on launch. Cycle phase is deliberately absent:
+/// workers re-jitter on load, which is tolerable only because a worker cycle is
+/// 47.5 seconds. A longer-cycle unit (the Net Cart) will have to persist phase,
+/// or reloading becomes both a save-scum surface and an invisible punishment.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct SavedRun {
+    pub treasury: Treasury,
+    pub workforce: Workforce,
+}
+
+/// Read just enough to route to the right schema. Untagged deserialisation
+/// would happily accept a v1 payload as v2 and give useless errors when it
+/// did not, so version dispatch is explicit.
+#[derive(Debug, Deserialize)]
+struct VersionProbe {
     version: u32,
+}
+
+/// Bananas were whole and workers did not exist.
+#[derive(Debug, Deserialize)]
+struct SaveV1 {
     bananas: u64,
 }
 
-pub fn load_treasury() -> Treasury {
-    match platform::read() {
-        Ok(Some(raw)) => decode(&raw).unwrap_or_else(|| {
-            bevy::log::warn!("Save data is invalid or unsupported; starting with 0 bananas");
-            Treasury::default()
-        }),
-        Ok(None) => Treasury::default(),
-        Err(error) => {
-            bevy::log::warn!("Could not load save data: {error}; starting with 0 bananas");
-            Treasury::default()
+#[derive(Debug, Deserialize, Serialize)]
+struct SaveV2 {
+    version: u32,
+    /// Fractional, because wages drain continuously. Never round on the way in
+    /// or out: flooring here would burn up to a banana on every reload.
+    bananas: f64,
+    workers: u32,
+}
+
+impl From<SaveV1> for SaveV2 {
+    fn from(old: SaveV1) -> Self {
+        Self {
+            version: SAVE_VERSION,
+            bananas: old.bananas as f64,
+            workers: 0,
         }
     }
 }
 
-pub fn store_treasury(treasury: Treasury) -> Result<(), String> {
-    platform::write(&encode(treasury))
+pub fn load_run() -> SavedRun {
+    match platform::read() {
+        Ok(Some(raw)) => decode(&raw).unwrap_or_else(|| {
+            bevy::log::warn!("Save data is invalid or unsupported; starting a fresh run");
+            SavedRun::default()
+        }),
+        Ok(None) => SavedRun::default(),
+        Err(error) => {
+            bevy::log::warn!("Could not load save data: {error}; starting a fresh run");
+            SavedRun::default()
+        }
+    }
 }
 
-fn encode(treasury: Treasury) -> String {
-    serde_json::to_string(&SaveData {
+pub fn store_run(run: SavedRun) -> Result<(), String> {
+    platform::write(&encode(run))
+}
+
+fn encode(run: SavedRun) -> String {
+    serde_json::to_string(&SaveV2 {
         version: SAVE_VERSION,
-        bananas: treasury.display_count(),
+        bananas: run.treasury.bananas(),
+        workers: run.workforce.count(),
     })
-    .expect("valid treasury always serializes")
+    .expect("valid run state always serializes")
 }
 
-fn decode(raw: &str) -> Option<Treasury> {
-    let data: SaveData = serde_json::from_str(raw).ok()?;
-    (data.version == SAVE_VERSION && data.bananas <= MAX_SAFE_BANANAS_COUNT)
-        .then(|| Treasury::from_saved(data.bananas as f64))
-        .flatten()
+fn decode(raw: &str) -> Option<SavedRun> {
+    let probe: VersionProbe = serde_json::from_str(raw).ok()?;
+    let data: SaveV2 = match probe.version {
+        1 => serde_json::from_str::<SaveV1>(raw).ok()?.into(),
+        2 => serde_json::from_str(raw).ok()?,
+        _ => return None,
+    };
+
+    Some(SavedRun {
+        treasury: Treasury::from_saved(data.bananas)?,
+        workforce: Workforce::from_saved(data.workers)?,
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -129,35 +177,66 @@ mod tests {
     use super::*;
     use crate::domain::MAX_SAFE_BANANAS;
 
-    #[test]
-    fn save_round_trip_preserves_treasury() {
-        let treasury = Treasury::from_saved(123.0).unwrap();
+    fn run(bananas: f64, workers: u32) -> SavedRun {
+        SavedRun {
+            treasury: Treasury::from_saved(bananas).unwrap(),
+            workforce: Workforce::from_saved(workers).unwrap(),
+        }
+    }
 
-        assert_eq!(decode(&encode(treasury)), Some(treasury));
+    #[test]
+    fn save_round_trip_preserves_the_run() {
+        let saved = run(123.0, 7);
+
+        assert_eq!(decode(&encode(saved)), Some(saved));
+    }
+
+    #[test]
+    fn fractional_bananas_survive_a_round_trip_exactly() {
+        // Wages leave the treasury fractional, and flooring anywhere on this
+        // path would quietly burn production on every reload.
+        let saved = run(12.345_678_9, 3);
+
+        assert_eq!(decode(&encode(saved)), Some(saved));
+    }
+
+    #[test]
+    fn version_1_saves_migrate_to_a_workerless_run() {
+        assert_eq!(
+            decode(r#"{"version":1,"bananas":42}"#),
+            Some(run(42.0, 0))
+        );
     }
 
     #[test]
     fn missing_fields_and_unknown_versions_are_rejected() {
         assert_eq!(decode("{}"), None);
         assert_eq!(decode(r#"{"version":2,"bananas":3}"#), None);
+        assert_eq!(decode(r#"{"version":2,"workers":1}"#), None);
+        assert_eq!(decode(r#"{"version":3,"bananas":3,"workers":1}"#), None);
+        // A v1 payload must not be read as a v2 one.
+        assert_eq!(decode(r#"{"version":1,"bananas":1.5}"#), None);
     }
 
     #[test]
     fn invalid_numeric_states_are_rejected() {
-        assert_eq!(decode(r#"{"version":1,"bananas":-1}"#), None);
-        assert_eq!(decode(r#"{"version":1,"bananas":1.5}"#), None);
+        assert_eq!(decode(r#"{"version":2,"bananas":-1,"workers":0}"#), None);
+        assert_eq!(decode(r#"{"version":2,"bananas":null,"workers":0}"#), None);
+        assert_eq!(decode(r#"{"version":2,"bananas":1,"workers":-1}"#), None);
+        // Local storage is player-writable, so an absurd worker count has to be
+        // rejected rather than spawned.
         assert_eq!(
-            decode(r#"{"version":1,"bananas":9007199254740991.4}"#),
+            decode(r#"{"version":2,"bananas":1,"workers":4000000000}"#),
             None
         );
         assert_eq!(
             decode(&format!(
-                r#"{{"version":1,"bananas":{}}}"#,
-                MAX_SAFE_BANANAS + 1.0
+                r#"{{"version":2,"bananas":{},"workers":0}}"#,
+                MAX_SAFE_BANANAS + 2.0
             )),
             None
         );
-        assert_eq!(decode(r#"{"version":1,"bananas":1e999}"#), None);
+        assert_eq!(decode(r#"{"version":2,"bananas":1e999,"workers":0}"#), None);
     }
 
     #[test]

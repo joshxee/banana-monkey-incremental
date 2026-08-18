@@ -183,16 +183,39 @@ def available(kind, s, p):
     return tech_level(s, p) >= p.k_tech_req if kind == "cart" else True
 
 
+def _income_sources(s, p):
+    """(gap between this source's deliveries, bananas/sec it contributes)."""
+    out = []
+    pool = s.W - s.A
+    if pool > 0:
+        out.append((sum(worker_cycle(s, p)) / pool, pool * worker_throughput(s, p)))
+    if s.K > 0:
+        out.append((sum(cart_cycle(s, p)) / s.K,
+                    cart_throughput(s, p) * crewed(s, p) / p.k_crew))
+    return out
+
+
 def wage_reserve(s, p):
-    """Deepest expected dip between cart deliveries: the wages the pool's
-    continuous income does not already cover, over one delivery gap."""
-    if s.K == 0:
+    """Wages falling due across the longest gap between deliveries, less the
+    income that keeps arriving during it.
+
+    Reserve against the LUMPIEST source and credit only sources that deliver
+    more often than it. The earlier form hard-coded "lumpiest = carts, frequent
+    = pool", so it returned 0 for a cart-free economy - but a lone worker
+    delivers every 47.5s, which is not continuous by any reading, and the
+    treasury goes underwater without a reserve. Picking the lumpiest source by
+    measurement rather than by name reduces to the published cart form when
+    carts exist, and to a constant 2 x 0.03 x 47.5 = 2.85 for a pure-worker
+    economy, independent of W.
+    """
+    sources = _income_sources(s, p)
+    if not sources:
         return 0.0
-    uncovered = max(0.0, salary(s, p) - (s.W - s.A) * worker_throughput(s, p))
-    mean_gap = sum(cart_cycle(s, p)) / s.K
+    gap = max(g for g, _ in sources)
+    covered = sum(rate for g, rate in sources if g < gap)
     # x2 safety factor: the gap between deliveries is a random variable, and
-    # the mean under-covers roughly half the time. Costs ~0.3 min of pacing.
-    return 2.0 * uncovered * mean_gap
+    # the mean under-covers roughly half the time.
+    return 2.0 * max(0.0, salary(s, p) - covered) * gap
 
 
 def affordable(kind, bananas, s, p):

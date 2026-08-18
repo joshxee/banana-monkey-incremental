@@ -312,6 +312,42 @@ $t_{\text{unload}} = 0.50$ s/banana. Research level $n$ costs $60 \times 2.2^n$;
 one Technologist yields 1.0 research/sec, scaled by $M_{\text{speed}}$ — chefs
 feed the researchers too. Net Cart requires tech level 1. Seed: one free worker.
 
+### 8.1 Where the shipped game differs at $t = 0$
+
+`banana_model.py` seeds one free worker (`free_workers = 1`); the Rust
+implementation seeds **none**. The game opens as a manual clicker, and buying
+the first monkey is the moment automation begins — a tutorial beat the model has
+no reason to represent.
+
+This is a difference in $t = 0$ semantics, not in balance. Cost is indexed on
+workers *owned*, so the ladder is unshifted: the oracle's first *purchase* is
+its second worker at $4 \times 1.15^1$, and the game's first purchase is its
+first worker at $4 \times 1.15^0$. Every subsequent price agrees. The whole
+downstream session is the oracle's, displaced by the time it takes to hand-pick
+the opening 6.85 bananas.
+
+Two consequences worth stating so they are not rediscovered as bugs:
+
+**The first delivery can be up to 47.5 seconds after the first purchase**, mean
+23.75 with phase jitter. The seed worker exists in the model partly because it
+hides this; without it, the wait is the price of making the purchase the
+tutorial. The implementation answers it with presentation — a gold flash on the
+new hire, a visible walk, a carried banana on the return leg, and a loud arrival
+— rather than by changing a parameter. Every numeric lever here is expensive:
+halving the grove distance invalidates D17's measured 230–280% cart advantage,
+doubling worker speed cuts the Chef effect from +102% to +52% and undermines
+§5.1, and $t_{\text{pick}}$ sets the ceiling in §3 outright.
+
+**Manual clicking dominates the automated economy for roughly the first dozen
+purchases.** At one drag per second the player earns 1.0/s against a worker's
+net 0.0753/s. That is ordinary for the genre, but it means the first monkey is
+sold on "it works while you are not clicking", not on rate.
+
+Prices are charged exactly as $b\,g^{\,n}$ and displayed to one decimal.
+Rounding them up to whole bananas was considered and rejected: it is a 15%
+premium on the third worker, an 8–11% drag on time-to-Nth-monkey, and it moves
+the measured session from 24.2 to 25.3 minutes, all for cosmetics.
+
 ---
 
 ## 9. Contract tests

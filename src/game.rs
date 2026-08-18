@@ -8,21 +8,40 @@ use bevy::{
     window::PrimaryWindow,
 };
 
-use crate::{domain::Treasury, persistence};
+use crate::{
+    domain::{
+        BANANAS_PER_HARVEST, EconomySnapshot, HarvestCycle, Jitter, Multipliers, Payload, SIM_HZ,
+        Treasury, Wage, Workforce, plan_hire, restart_run,
+    },
+    hud, persistence,
+    worker::{self, Worker},
+};
 
 const BANANA_FRAMES: usize = 12;
 const BANANA_FRAME_SIZE: u32 = 16;
 const KEYBOARD_HARVEST_SECONDS: f32 = 0.42;
+/// A pulse for the deposit the player just made, and is looking at.
 const SUCCESS_PULSE_SECONDS: f32 = 0.18;
+/// A worker delivers while the player may be watching the tree instead, so its
+/// pulse is longer and softer. Two lengths keep the two sources distinguishable
+/// even when a delivery lands mid-drag.
+const DELIVERY_PULSE_SECONDS: f32 = 0.5;
 const TOUCH_MOUSE_SUPPRESSION_SECONDS: f32 = 0.5;
 const SAVE_RETRY_INITIAL_SECONDS: f32 = 1.0;
 const SAVE_RETRY_MAX_SECONDS: f32 = 30.0;
+/// Wages move the treasury twenty times a second. Without a floor on the write
+/// rate that would be a synchronous `localStorage.setItem` every frame.
+const SAVE_INTERVAL_SECONDS: f32 = 5.0;
 
-const INK: Color = Color::srgb(0.16, 0.08, 0.06);
-const CREAM: Color = Color::srgb(1.0, 0.94, 0.72);
-const BROWN: Color = Color::srgb(0.33, 0.14, 0.08);
-const BROWN_LIGHT: Color = Color::srgb(0.52, 0.25, 0.12);
-const GOLD: Color = Color::srgb(1.0, 0.75, 0.05);
+const FLOATER_SECONDS: f32 = 0.9;
+const FLOATER_RISE: f32 = 78.0;
+
+pub(crate) const INK: Color = Color::srgb(0.16, 0.08, 0.06);
+pub(crate) const CREAM: Color = Color::srgb(1.0, 0.94, 0.72);
+pub(crate) const BROWN: Color = Color::srgb(0.33, 0.14, 0.08);
+pub(crate) const BROWN_LIGHT: Color = Color::srgb(0.52, 0.25, 0.12);
+pub(crate) const GOLD: Color = Color::srgb(1.0, 0.75, 0.05);
+pub(crate) const MUTED: Color = Color::srgb(0.55, 0.47, 0.36);
 
 macro_rules! diagnostic_log {
     ($frame:expr, $event:expr, $pointer:expr; $($detail:tt)*) => {
@@ -40,36 +59,113 @@ macro_rules! diagnostic_log {
 
 pub struct HarvestGamePlugin;
 
+/// The simulation, at a fixed 20 Hz. Mirrors stages 1-7 of the architecture
+/// doc's §7 schedule; stages 8 and 9 arrive with the units that need them.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Sim {
+    Purchase,
+    Spawn,
+    Advance,
+    Settle,
+    Snapshot,
+}
+
+/// Presentation, every frame. Nothing in here may write simulation state.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Present {
+    Layout,
+    Input,
+    Render,
+    Export,
+}
+
 impl Plugin for HarvestGamePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SceneLayout>()
+            .init_resource::<Multipliers>()
+            .init_resource::<EconomySnapshot>()
             .init_resource::<HarvestController>()
             .init_resource::<PendingSettlement>()
+            .init_resource::<DeliveryQueue>()
+            .init_resource::<HireRequests>()
+            .init_resource::<RestartRequest>()
+            .init_resource::<Jitter>()
             .init_resource::<PersistenceDirty>()
             .init_resource::<Feedback>()
             .init_resource::<MenuState>()
             .init_resource::<PointerGuard>()
             .init_resource::<DiagnosticPointerTrace>()
+            .insert_resource(Time::<Fixed>::from_hz(SIM_HZ))
             .add_systems(Startup, setup)
+            .configure_sets(
+                FixedUpdate,
+                (
+                    Sim::Purchase,
+                    Sim::Spawn,
+                    Sim::Advance,
+                    Sim::Settle,
+                    Sim::Snapshot,
+                )
+                    .chain(),
+            )
+            .configure_sets(
+                Update,
+                (
+                    Present::Layout,
+                    Present::Input,
+                    Present::Render,
+                    Present::Export,
+                )
+                    .chain(),
+            )
+            .add_systems(
+                FixedUpdate,
+                (
+                    (apply_restart, apply_purchases).chain().in_set(Sim::Purchase),
+                    worker::spawn_missing_workers.in_set(Sim::Spawn),
+                    advance_cycles.in_set(Sim::Advance),
+                    settle.in_set(Sim::Settle),
+                    snapshot_economy.in_set(Sim::Snapshot),
+                ),
+            )
+            .add_systems(
+                Update,
+                // Chained, not merely grouped: `apply_responsive_hud` reads the
+                // `SceneLayout` that `refresh_layout` writes, and without an
+                // ordering edge Bevy is free to run it against last frame's
+                // viewport on the frame a resize lands.
+                (refresh_layout, apply_layout, hud::apply_responsive_hud)
+                    .chain()
+                    .in_set(Present::Layout),
+            )
             .add_systems(
                 Update,
                 (
-                    refresh_layout,
-                    apply_layout,
-                    apply_responsive_hud,
-                    handle_menu,
-                    sync_menu_visibility,
+                    (handle_menu, hud::sync_menu_visibility).chain(),
                     handle_harvest_input,
                     move_keyboard_harvest,
-                    settle_harvest,
-                    persist_changes,
+                    queue_manual_settlement,
+                )
+                    .chain()
+                    .in_set(Present::Input),
+            )
+            .add_systems(
+                Update,
+                (
+                    worker::position_workers,
+                    worker::animate_workers,
                     animate_banana,
                     update_feedback,
-                    sync_counter,
-                    style_buttons,
-                    sync_web_test_state,
+                    update_floaters,
+                    hud::sync_readout,
+                    hud::sync_shop,
+                    hud::style_buttons,
                 )
-                    .chain(),
+                    .in_set(Present::Render),
+            )
+            .add_systems(
+                Update,
+                (persist_changes, sync_web_test_state).in_set(Present::Export),
             );
     }
 }
@@ -101,6 +197,10 @@ struct HarvestLabel;
 #[derive(Component)]
 struct DepositLabel;
 
+/// The banana the *player* drags. Several systems reach for it through
+/// `Single`, which silently skips the whole system when the query does not
+/// match exactly one entity, so nothing else may ever carry this marker.
+/// Workers carry [`worker::CarriedBanana`] instead.
 #[derive(Component)]
 struct Banana;
 
@@ -109,14 +209,14 @@ struct BananaAnimation {
     timer: Timer,
 }
 
+/// A rising "+n" over the stall. Two sources, two colours, two magnitudes, so
+/// a worker's delivery is still legible as someone else's work when it lands
+/// during the player's own drag.
 #[derive(Component)]
-struct CounterText;
-
-#[derive(Component)]
-struct HudRoot;
-
-#[derive(Component)]
-struct OpenMenuButton;
+struct Floater {
+    elapsed: f32,
+    origin: Vec2,
+}
 
 #[derive(Component, Clone, Copy)]
 enum LayoutElement {
@@ -131,16 +231,10 @@ enum LayoutElement {
     DepositLabel,
 }
 
-#[derive(Component, Clone, Copy)]
-enum MenuView {
-    Scrim,
-    Main,
-    Restart,
-}
-
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
-enum ButtonAction {
+pub(crate) enum ButtonAction {
     OpenMenu,
+    HireWorker,
     Resume,
     #[cfg(target_arch = "wasm32")]
     Diagnostics,
@@ -149,17 +243,26 @@ enum ButtonAction {
     CancelRestart,
 }
 
-#[derive(Component, Clone, Copy)]
-enum MenuButtonTone {
-    Primary,
-    Emphasized,
-    #[cfg(target_arch = "wasm32")]
-    Secondary,
+impl ButtonAction {
+    /// Which menu state the button is live in. The touch hit-test iterates
+    /// every button regardless of what is actually on screen, so without this
+    /// a tap on the scrim would reach the shop card underneath it.
+    fn active_in(self, menu: MenuState) -> bool {
+        match self {
+            ButtonAction::OpenMenu | ButtonAction::HireWorker => menu == MenuState::Closed,
+            ButtonAction::Resume | ButtonAction::Restart => menu == MenuState::Open,
+            #[cfg(target_arch = "wasm32")]
+            ButtonAction::Diagnostics => menu == MenuState::Open,
+            ButtonAction::ConfirmRestart | ButtonAction::CancelRestart => {
+                menu == MenuState::ConfirmRestart
+            }
+        }
+    }
 }
 
 #[derive(Resource, Debug, Clone, Copy)]
-struct SceneLayout {
-    viewport: Vec2,
+pub(crate) struct SceneLayout {
+    pub(crate) viewport: Vec2,
     zone_size: f32,
     harvest: Vec2,
     deposit: Vec2,
@@ -168,6 +271,14 @@ struct SceneLayout {
     harvest_bounds: Rect,
     deposit_bounds: Rect,
     ground_top: f32,
+    /// Where a worker stands to pick, and where it stands to unload. The route
+    /// between the two is the whole visible economy.
+    pub(crate) grove_stand: f32,
+    pub(crate) stall_stand: f32,
+    /// Whole-number sprite scale, shared with the tree and the stall so every
+    /// texel in the scene is the same size. A fractional scale here would make
+    /// a walking monkey shimmer against a world drawn on the integer grid.
+    pub(crate) world_scale: f32,
 }
 
 impl Default for SceneLayout {
@@ -177,7 +288,7 @@ impl Default for SceneLayout {
 }
 
 impl SceneLayout {
-    fn for_viewport(viewport: Vec2) -> Self {
+    pub(crate) fn for_viewport(viewport: Vec2) -> Self {
         let width = viewport.x.max(320.0);
         let height = viewport.y.max(320.0);
         let available_zone_size = (width * 0.28).min(height * 0.38);
@@ -210,7 +321,26 @@ impl SceneLayout {
                 Vec2::splat(zone_size + 36.0),
             ),
             ground_top,
+            grove_stand: harvest.x + zone_size * 0.30,
+            stall_stand: deposit.x - zone_size * 0.34,
+            world_scale: zone_size / 128.0,
         }
+    }
+
+    /// Ground level, where a worker's feet go. Lanes step *down* from here,
+    /// toward the camera; stepping up would stand a monkey on the sky.
+    pub(crate) fn ground_top(self) -> f32 {
+        self.ground_top
+    }
+
+    pub(crate) fn stall_glow_anchor(self) -> Vec2 {
+        self.deposit + Vec2::new(0.0, self.zone_size * 0.34)
+    }
+
+    /// Snap to the world's texel grid, so pixel-art detail does not crawl at
+    /// the low speeds a walking monkey moves at.
+    pub(crate) fn snap(self, value: f32) -> f32 {
+        (value / self.world_scale).round() * self.world_scale
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -257,9 +387,35 @@ enum SettlementSource {
 #[derive(Resource, Debug, Default)]
 struct PendingSettlement(Option<SettlementSource>);
 
+/// Every banana that enters the treasury arrives through here, whether the
+/// player dragged it or a worker carried it. One queue, one settlement path,
+/// one place the economy can be wrong.
+#[derive(Resource, Debug, Default)]
+struct DeliveryQueue {
+    entries: Vec<Delivery>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Delivery {
+    amount: f64,
+    by_worker: bool,
+}
+
+/// Counted rather than a flag, so clicking twice between two fixed ticks does
+/// not silently drop a purchase.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct HireRequests(pub(crate) u32);
+
+#[derive(Resource, Debug, Default)]
+struct RestartRequest(bool);
+
 #[derive(Resource, Debug)]
 struct PersistenceDirty {
     pending: bool,
+    /// Set for things the player did, so their progress reaches disk before
+    /// they can close the tab. The wage drain never sets it.
+    immediate: bool,
+    since_last_save: f32,
     retry_in_seconds: f32,
     next_retry_delay_seconds: f32,
 }
@@ -268,6 +424,8 @@ impl Default for PersistenceDirty {
     fn default() -> Self {
         Self {
             pending: false,
+            immediate: false,
+            since_last_save: 0.0,
             retry_in_seconds: 0.0,
             next_retry_delay_seconds: SAVE_RETRY_INITIAL_SECONDS,
         }
@@ -277,6 +435,11 @@ impl Default for PersistenceDirty {
 impl PersistenceDirty {
     fn mark_pending(&mut self) {
         self.pending = true;
+    }
+
+    fn mark_immediate(&mut self) {
+        self.pending = true;
+        self.immediate = true;
         self.retry_in_seconds = 0.0;
     }
 }
@@ -284,7 +447,15 @@ impl PersistenceDirty {
 #[derive(Resource, Debug, Default)]
 struct PointerGuard {
     suppress_mouse_for: f32,
+    /// `handle_menu` collects presses from `Changed<Interaction>` *and* from a
+    /// manual touch hit-test, deduplicated only within a single frame. Every
+    /// other action is idempotent - `OpenMenu` when the menu is already open is
+    /// a no-op - but hiring is not, so one tap resolving on two frames would
+    /// buy two workers. A human cannot tap twice inside this window anyway.
+    suppress_hire_for: f32,
 }
+
+const HIRE_DEBOUNCE_SECONDS: f32 = 0.25;
 
 #[derive(Resource, Debug, Default)]
 struct DiagnosticPointerTrace {
@@ -306,12 +477,14 @@ impl DiagnosticPointerTrace {
 }
 
 #[derive(Resource, Debug, Default)]
-struct Feedback {
+pub(crate) struct Feedback {
     success: Option<Timer>,
+    /// 0.0..=1.0, shared with the HUD so the counter can accent a delivery.
+    pub(crate) pulse: f32,
 }
 
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum MenuState {
+pub(crate) enum MenuState {
     #[default]
     Closed,
     Open,
@@ -425,252 +598,8 @@ fn setup(
         LayoutElement::DepositLabel,
     ));
 
-    setup_hud(&mut commands);
-    setup_menu(&mut commands);
-}
-
-fn setup_hud(commands: &mut Commands) {
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                width: percent(100),
-                height: percent(100),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::FlexStart,
-                padding: UiRect::top(px(16)),
-                ..default()
-            },
-            Pickable::IGNORE,
-            HudRoot,
-        ))
-        .with_children(|root| {
-            root.spawn((
-                Node {
-                    min_width: px(210),
-                    min_height: px(58),
-                    padding: UiRect::axes(px(22), px(10)),
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    border: UiRect::all(px(4)),
-                    border_radius: BorderRadius::all(px(12)),
-                    ..default()
-                },
-                BackgroundColor(CREAM),
-                BorderColor::all(BROWN),
-                children![(
-                    Text::new("Bananas: 0"),
-                    TextFont::from_font_size(30.0),
-                    TextColor(INK),
-                    CounterText,
-                )],
-            ));
-        });
-
-    commands
-        .spawn((
-            Button,
-            ButtonAction::OpenMenu,
-            OpenMenuButton,
-            Node {
-                position_type: PositionType::Absolute,
-                top: px(16),
-                right: px(16),
-                min_width: px(96),
-                min_height: px(52),
-                padding: UiRect::axes(px(16), px(8)),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                border: UiRect::all(px(3)),
-                border_radius: BorderRadius::all(px(10)),
-                ..default()
-            },
-            BackgroundColor(BROWN),
-            BorderColor::all(CREAM),
-        ))
-        .with_child((
-            Text::new("MENU"),
-            TextFont::from_font_size(22.0),
-            TextColor(CREAM),
-        ));
-}
-
-fn setup_menu(commands: &mut Commands) {
-    commands
-        .spawn((
-            Node {
-                display: Display::None,
-                position_type: PositionType::Absolute,
-                width: percent(100),
-                height: percent(100),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                padding: UiRect::all(px(16)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.06, 0.03, 0.02, 0.72)),
-            GlobalZIndex(100),
-            MenuView::Scrim,
-        ))
-        .with_children(|scrim| {
-            scrim
-                .spawn((
-                    menu_panel_node(),
-                    BackgroundColor(CREAM),
-                    BorderColor::all(BROWN),
-                    MenuView::Main,
-                ))
-                .with_children(|panel| {
-                    panel.spawn((
-                        Text::new("BANANA BREAK"),
-                        TextFont::from_font_size(34.0),
-                        TextColor(INK),
-                    ));
-                    panel.spawn((
-                        Text::new("CONTROLS"),
-                        TextFont::from_font_size(20.0),
-                        TextColor(BROWN_LIGHT),
-                    ));
-                    let controls = if cfg!(target_arch = "wasm32") {
-                        "Drag banana from tree to stall\nPress H to harvest\nPress L for input logs"
-                    } else {
-                        "Drag banana from tree to stall\nPress H to harvest"
-                    };
-                    panel.spawn((
-                        Text::new(controls),
-                        TextFont::from_font_size(19.0),
-                        TextColor(INK),
-                        TextLayout::justify(Justify::Center),
-                    ));
-                    panel.spawn(menu_button_row()).with_children(|row| {
-                        row.spawn(row_menu_button(
-                            ButtonAction::Resume,
-                            MenuButtonTone::Emphasized,
-                        ))
-                        .with_child(menu_button_text("RESUME"));
-                        #[cfg(target_arch = "wasm32")]
-                        row.spawn(row_menu_button(
-                            ButtonAction::Diagnostics,
-                            MenuButtonTone::Secondary,
-                        ))
-                        .with_child(menu_button_text("INPUT LOGS"));
-                    });
-                    panel
-                        .spawn(menu_button(ButtonAction::Restart))
-                        .with_child(menu_button_text("RESTART GAME"));
-                });
-
-            scrim
-                .spawn((
-                    Node {
-                        display: Display::None,
-                        ..menu_panel_node()
-                    },
-                    BackgroundColor(CREAM),
-                    BorderColor::all(BROWN),
-                    MenuView::Restart,
-                ))
-                .with_children(|panel| {
-                    panel.spawn((
-                        Text::new("RESET BANANAS?"),
-                        TextFont::from_font_size(30.0),
-                        TextColor(INK),
-                    ));
-                    panel.spawn((
-                        Text::new("Reset bananas to 0?\nThis cannot be undone."),
-                        TextFont::from_font_size(19.0),
-                        TextColor(INK),
-                        TextLayout::justify(Justify::Center),
-                    ));
-                    panel
-                        .spawn(menu_button(ButtonAction::ConfirmRestart))
-                        .with_child(menu_button_text("RESET TO 0"));
-                    panel
-                        .spawn(menu_button(ButtonAction::CancelRestart))
-                        .with_child(menu_button_text("CANCEL"));
-                });
-        });
-}
-
-fn menu_panel_node() -> Node {
-    Node {
-        width: percent(92),
-        max_width: px(440),
-        padding: UiRect::all(px(24)),
-        flex_direction: FlexDirection::Column,
-        align_items: AlignItems::Center,
-        row_gap: px(14),
-        border: UiRect::all(px(5)),
-        border_radius: BorderRadius::all(px(14)),
-        ..default()
-    }
-}
-
-fn menu_button(action: ButtonAction) -> impl Bundle {
-    (
-        Button,
-        action,
-        MenuButtonTone::Primary,
-        Node {
-            width: percent(100),
-            min_height: px(52),
-            padding: UiRect::axes(px(18), px(10)),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            border: UiRect::all(px(3)),
-            border_radius: BorderRadius::all(px(10)),
-            ..default()
-        },
-        BackgroundColor(BROWN),
-        BorderColor::all(BROWN_LIGHT),
-    )
-}
-
-fn menu_button_row() -> Node {
-    Node {
-        width: percent(100),
-        column_gap: px(10),
-        ..default()
-    }
-}
-
-fn row_menu_button(action: ButtonAction, tone: MenuButtonTone) -> impl Bundle {
-    (
-        Button,
-        action,
-        tone,
-        Node {
-            min_width: px(0),
-            min_height: px(52),
-            flex_grow: 1.0,
-            flex_basis: px(0),
-            padding: UiRect::axes(px(8), px(10)),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            border: UiRect::all(px(3)),
-            border_radius: BorderRadius::all(px(10)),
-            ..default()
-        },
-        BackgroundColor(match tone {
-            MenuButtonTone::Primary | MenuButtonTone::Emphasized => BROWN,
-            #[cfg(target_arch = "wasm32")]
-            MenuButtonTone::Secondary => BROWN,
-        }),
-        BorderColor::all(match tone {
-            MenuButtonTone::Primary => CREAM,
-            MenuButtonTone::Emphasized => GOLD,
-            #[cfg(target_arch = "wasm32")]
-            MenuButtonTone::Secondary => BROWN_LIGHT,
-        }),
-    )
-}
-
-fn menu_button_text(label: &'static str) -> impl Bundle {
-    (
-        Text::new(label),
-        TextFont::from_font_size(21.0),
-        TextColor(CREAM),
-    )
+    hud::setup_hud(&mut commands);
+    hud::setup_menu(&mut commands);
 }
 
 fn refresh_layout(window: Single<&Window, With<PrimaryWindow>>, mut layout: ResMut<SceneLayout>) {
@@ -688,7 +617,7 @@ fn apply_layout(
 ) {
     let ground_height = (layout.viewport.y * 0.5 + layout.ground_top).max(96.0);
     let ground_center_y = -layout.viewport.y * 0.5 + ground_height * 0.5;
-    let zone_scale = layout.zone_size / 128.0;
+    let zone_scale = layout.world_scale;
     let label_y = layout.harvest.y + layout.zone_size * 0.5 + 24.0;
 
     for (element, sprite, mut transform) in &mut elements {
@@ -741,25 +670,154 @@ fn apply_layout(
     }
 }
 
-fn apply_responsive_hud(
-    window: Single<&Window, With<PrimaryWindow>>,
-    mut hud: Single<&mut Node, (With<HudRoot>, Without<OpenMenuButton>)>,
-    mut menu_button: Single<&mut Node, (With<OpenMenuButton>, Without<HudRoot>)>,
+// ────────────────────────────────────────────────── simulation, at 20 Hz
+
+/// Stage 1. [`Treasury`] is written here and in [`settle`], both inside
+/// `FixedUpdate`; no presentation system may write it.
+fn apply_purchases(
+    mut requests: ResMut<HireRequests>,
+    mut treasury: ResMut<Treasury>,
+    mut workforce: ResMut<Workforce>,
+    mut dirty: ResMut<PersistenceDirty>,
+    multipliers: Res<Multipliers>,
 ) {
-    if window.width() < 600.0 {
-        hud.padding = UiRect {
-            top: px(10),
-            right: px(110),
-            ..default()
-        };
-        menu_button.top = px(10);
-        menu_button.right = px(10);
-    } else {
-        hud.padding = UiRect::top(px(16));
-        menu_button.top = px(16);
-        menu_button.right = px(16);
+    let requested = std::mem::take(&mut requests.0);
+    for _ in 0..requested {
+        let plan = plan_hire(*workforce, *treasury, *multipliers);
+        if !plan.affordable {
+            break;
+        }
+        treasury.charge(plan.cost);
+        workforce.hire();
+        dirty.mark_immediate();
     }
 }
+
+/// Restart fans out across five pieces of state. Routing it through a request
+/// keeps that fan-out in one place instead of inlining it into menu handling.
+#[allow(clippy::too_many_arguments)]
+fn apply_restart(
+    mut request: ResMut<RestartRequest>,
+    mut commands: Commands,
+    mut treasury: ResMut<Treasury>,
+    mut workforce: ResMut<Workforce>,
+    mut jitter: ResMut<Jitter>,
+    mut queue: ResMut<DeliveryQueue>,
+    mut requests: ResMut<HireRequests>,
+    mut dirty: ResMut<PersistenceDirty>,
+    workers: Query<Entity, With<Worker>>,
+    floaters: Query<Entity, With<Floater>>,
+) {
+    if !std::mem::take(&mut request.0) {
+        return;
+    }
+
+    restart_run(&mut treasury, &mut workforce);
+    jitter.restart();
+    queue.entries.clear();
+    requests.0 = 0;
+    for entity in &workers {
+        commands.entity(entity).despawn();
+    }
+    // Otherwise up to 0.9 s of "+5" keeps rising over a stall that just went
+    // back to zero.
+    for entity in &floaters {
+        commands.entity(entity).despawn();
+    }
+    dirty.mark_immediate();
+}
+
+/// Stage 5. The only writer of [`HarvestCycle`] once a worker is in flight.
+fn advance_cycles(
+    time: Res<Time<Fixed>>,
+    multipliers: Res<Multipliers>,
+    mut queue: ResMut<DeliveryQueue>,
+    mut workers: Query<(&mut HarvestCycle, &Payload)>,
+) {
+    // f64 from the fixed clock. `delta_secs()` is f32, which would make the
+    // economy's determinism depend on f32 rounding; 50 ms is exactly
+    // representable as a `Duration`, so this is reproducible across platforms.
+    let dt = time.delta().as_secs_f64();
+
+    for (mut cycle, payload) in &mut workers {
+        let completed = cycle.advance(dt, *multipliers);
+        if completed > 0 {
+            queue.entries.push(Delivery {
+                amount: completed as f64 * payload.0,
+                by_worker: true,
+            });
+        }
+    }
+}
+
+/// Stage 6. Deliveries are credited *before* wages are charged; the other
+/// order shifts every reading by one tick's worth of wages.
+#[allow(clippy::too_many_arguments)]
+fn settle(
+    time: Res<Time<Fixed>>,
+    mut treasury: ResMut<Treasury>,
+    mut queue: ResMut<DeliveryQueue>,
+    mut dirty: ResMut<PersistenceDirty>,
+    mut feedback: ResMut<Feedback>,
+    mut commands: Commands,
+    layout: Res<SceneLayout>,
+    wages: Query<&Wage>,
+) {
+    for delivery in queue.entries.drain(..) {
+        treasury.credit(delivery.amount);
+        if delivery.by_worker {
+            // Not immediate: these arrive `W / 47.5` times a second, so the
+            // immediate path would put the save write rate back on the
+            // treadmill the throttle exists to stop, and would reset the retry
+            // backoff every time.
+            dirty.mark_pending();
+        } else {
+            dirty.mark_immediate();
+        }
+        feedback.success = Some(Timer::new(
+            Duration::from_secs_f32(if delivery.by_worker {
+                DELIVERY_PULSE_SECONDS
+            } else {
+                SUCCESS_PULSE_SECONDS
+            }),
+            TimerMode::Once,
+        ));
+        spawn_floater(&mut commands, &layout, delivery);
+    }
+
+    // D2: the wage bill is the sum of what each unit costs, never a count times
+    // a constant, so a future unit cannot be silently left out of it.
+    let wages_per_sec: f64 = wages.iter().map(|wage| wage.0).sum();
+    if wages_per_sec > 0.0 {
+        treasury.charge(wages_per_sec * time.delta().as_secs_f64());
+        // Deliberately not immediate: this runs twenty times a second.
+        dirty.mark_pending();
+    }
+}
+
+fn snapshot_economy(
+    workforce: Res<Workforce>,
+    multipliers: Res<Multipliers>,
+    mut snapshot: ResMut<EconomySnapshot>,
+) {
+    *snapshot = EconomySnapshot::project(workforce.count(), *multipliers);
+}
+
+fn spawn_floater(commands: &mut Commands, layout: &SceneLayout, delivery: Delivery) {
+    let origin = layout.stall_glow_anchor();
+    commands.spawn((
+        Text2d::new(format!("+{:.0}", delivery.amount)),
+        TextFont::from_font_size(if delivery.by_worker { 34.0 } else { 26.0 }),
+        TextColor(if delivery.by_worker { GOLD } else { CREAM }),
+        Transform::from_translation(origin.extend(5.0)),
+        Floater {
+            elapsed: 0.0,
+            origin,
+        },
+    ));
+}
+
+// ─────────────────────────────────────────────────────────────── input
 
 #[allow(clippy::too_many_arguments)]
 fn handle_menu(
@@ -771,12 +829,16 @@ fn handle_menu(
     mut menu: ResMut<MenuState>,
     mut controller: ResMut<HarvestController>,
     mut pending: ResMut<PendingSettlement>,
-    mut treasury: ResMut<Treasury>,
-    mut dirty: ResMut<PersistenceDirty>,
+    mut restart: ResMut<RestartRequest>,
+    mut hire_requests: ResMut<HireRequests>,
+    mut pointer_guard: ResMut<PointerGuard>,
     mut feedback: ResMut<Feedback>,
+    time: Res<Time>,
     layout: Res<SceneLayout>,
     mut banana: Single<&mut Transform, With<Banana>>,
 ) {
+    pointer_guard.suppress_hire_for =
+        (pointer_guard.suppress_hire_for - time.delta_secs()).max(0.0);
     let mut requested = None;
     let mut pressed_actions = Vec::new();
     #[cfg(target_arch = "wasm32")]
@@ -803,7 +865,10 @@ fn handle_menu(
         for (action, node, transform) in &buttons {
             let center = transform.translation * node.inverse_scale_factor;
             let size = node.size() * node.inverse_scale_factor;
-            if contains_inclusive(Rect::from_center_size(center, size), position)
+            // `active_in` is the guard that stops a tap on the menu scrim from
+            // reaching the shop card sitting underneath it.
+            if action.active_in(*menu)
+                && contains_inclusive(Rect::from_center_size(center, size), position)
                 && !pressed_actions.contains(action)
             {
                 pressed_actions.push(*action);
@@ -815,6 +880,12 @@ fn handle_menu(
         match action {
             ButtonAction::OpenMenu if *menu == MenuState::Closed => {
                 requested = Some(MenuState::Open);
+            }
+            ButtonAction::HireWorker
+                if *menu == MenuState::Closed && pointer_guard.suppress_hire_for == 0.0 =>
+            {
+                hire_requests.0 += 1;
+                pointer_guard.suppress_hire_for = HIRE_DEBOUNCE_SECONDS;
             }
             ButtonAction::Resume if *menu == MenuState::Open => {
                 requested = Some(MenuState::Closed);
@@ -828,8 +899,7 @@ fn handle_menu(
             }
             ButtonAction::ConfirmRestart if *menu == MenuState::ConfirmRestart => {
                 cancel_harvest(&mut controller, &mut pending);
-                treasury.restart();
-                dirty.mark_pending();
+                restart.0 = true;
                 feedback.success = None;
                 banana.translation = layout.banana_home.extend(3.0);
                 requested = Some(MenuState::Closed);
@@ -850,17 +920,6 @@ fn handle_menu(
     }
 }
 
-fn sync_menu_visibility(menu: Res<MenuState>, mut views: Query<(&MenuView, &mut Node)>) {
-    for (view, mut node) in &mut views {
-        node.display = match view {
-            MenuView::Scrim if *menu != MenuState::Closed => Display::Flex,
-            MenuView::Main if *menu == MenuState::Open => Display::Flex,
-            MenuView::Restart if *menu == MenuState::ConfirmRestart => Display::Flex,
-            _ => Display::None,
-        };
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn handle_harvest_input(
     frame_count: Res<FrameCount>,
@@ -875,6 +934,7 @@ fn handle_harvest_input(
     mut controller: ResMut<HarvestController>,
     mut pointer_guard: ResMut<PointerGuard>,
     mut pending: ResMut<PendingSettlement>,
+    mut hire_requests: ResMut<HireRequests>,
     mut diagnostic_trace: ResMut<DiagnosticPointerTrace>,
     mut banana: Single<&mut Transform, With<Banana>>,
 ) {
@@ -901,6 +961,10 @@ fn handle_harvest_input(
 
     if *menu != MenuState::Closed {
         return;
+    }
+
+    if keys.just_pressed(KeyCode::KeyB) {
+        hire_requests.0 += 1;
     }
 
     let interaction = controller.interaction;
@@ -1225,14 +1289,15 @@ fn move_keyboard_harvest(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn settle_harvest(
+/// The player's own harvest joins the queue every worker delivers into, so
+/// there is exactly one path from "bananas were earned" to "the treasury says
+/// so". The interaction resets here, in the frame the player acted; the credit
+/// lands on the next fixed tick.
+fn queue_manual_settlement(
     frame_count: Res<FrameCount>,
     mut controller: ResMut<HarvestController>,
     mut pending: ResMut<PendingSettlement>,
-    mut treasury: ResMut<Treasury>,
-    mut dirty: ResMut<PersistenceDirty>,
-    mut feedback: ResMut<Feedback>,
+    mut queue: ResMut<DeliveryQueue>,
     layout: Res<SceneLayout>,
     mut banana: Single<&mut Transform, With<Banana>>,
 ) {
@@ -1246,17 +1311,11 @@ fn settle_harvest(
         SettlementSource::Keyboard => None,
     };
     let matched = settlement_matches(interaction_before, source);
-    let before = treasury.display_count();
-    let mut committed = false;
     if matched {
-        committed = treasury.commit_harvest();
-        if committed {
-            dirty.mark_pending();
-            feedback.success = Some(Timer::new(
-                Duration::from_secs_f32(SUCCESS_PULSE_SECONDS),
-                TimerMode::Once,
-            ));
-        }
+        queue.entries.push(Delivery {
+            amount: BANANAS_PER_HARVEST,
+            by_worker: false,
+        });
         controller.interaction = HarvestInteraction::Idle;
         banana.translation = layout.banana_home.extend(3.0);
     }
@@ -1264,13 +1323,11 @@ fn settle_harvest(
         frame_count,
         "settlement",
         diagnostic_pointer;
-        "source={:?} interaction={:?} matched={} commit_harvest={} treasury_before={} treasury_after={}",
+        "source={:?} interaction={:?} matched={} queued={}",
         source,
         interaction_before,
         matched,
-        committed,
-        before,
-        treasury.display_count(),
+        matched,
     );
 }
 
@@ -1295,7 +1352,15 @@ fn cancel_harvest(controller: &mut HarvestController, pending: &mut PendingSettl
     pending.0 = None;
 }
 
-fn persist_changes(time: Res<Time>, mut dirty: ResMut<PersistenceDirty>, treasury: Res<Treasury>) {
+// ────────────────────────────────────────────────────────── presentation
+
+fn persist_changes(
+    time: Res<Time>,
+    mut dirty: ResMut<PersistenceDirty>,
+    treasury: Res<Treasury>,
+    workforce: Res<Workforce>,
+) {
+    dirty.since_last_save += time.delta_secs();
     if !dirty.pending {
         return;
     }
@@ -1304,10 +1369,19 @@ fn persist_changes(time: Res<Time>, mut dirty: ResMut<PersistenceDirty>, treasur
     if dirty.retry_in_seconds > 0.0 {
         return;
     }
+    if !dirty.immediate && dirty.since_last_save < SAVE_INTERVAL_SECONDS {
+        return;
+    }
 
-    match persistence::store_treasury(*treasury) {
+    let run = persistence::SavedRun {
+        treasury: *treasury,
+        workforce: *workforce,
+    };
+    match persistence::store_run(run) {
         Ok(()) => {
             dirty.pending = false;
+            dirty.immediate = false;
+            dirty.since_last_save = 0.0;
             dirty.next_retry_delay_seconds = SAVE_RETRY_INITIAL_SECONDS;
         }
         Err(error) => {
@@ -1337,7 +1411,6 @@ fn update_feedback(
     layout: Res<SceneLayout>,
     mut feedback: ResMut<Feedback>,
     mut glow: Single<&mut Sprite, With<DepositGlow>>,
-    mut counter: Single<&mut TextFont, With<CounterText>>,
 ) {
     let drag_highlight = matches!(
         controller.interaction,
@@ -1354,52 +1427,32 @@ fn update_feedback(
             feedback.success = None;
         }
     }
+    feedback.pulse = pulse;
 
     let alpha = if drag_highlight { 0.34 } else { pulse * 0.46 };
     glow.color = Color::srgba(1.0, 0.78, 0.08, alpha);
-    counter.font_size = FontSize::Px(30.0 + pulse * 6.0);
 }
 
-fn sync_counter(treasury: Res<Treasury>, mut text: Single<&mut Text, With<CounterText>>) {
-    text.0 = format!("Bananas: {}", treasury.display_count());
-}
-
-#[allow(clippy::type_complexity)]
-fn style_buttons(
-    mut buttons: Query<
-        (
-            &Interaction,
-            Option<&MenuButtonTone>,
-            &mut BackgroundColor,
-            &mut BorderColor,
-        ),
-        (With<ButtonAction>, Changed<Interaction>),
-    >,
+fn update_floaters(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut floaters: Query<(Entity, &mut Floater, &mut Transform, &mut TextColor)>,
 ) {
-    for (interaction, tone, mut background, mut border) in &mut buttons {
-        match interaction {
-            Interaction::Pressed => {
-                *background = BackgroundColor(GOLD);
-                *border = BorderColor::all(CREAM);
-            }
-            Interaction::Hovered => {
-                *background = BackgroundColor(BROWN_LIGHT);
-                *border = BorderColor::all(GOLD);
-            }
-            Interaction::None => {
-                *background = BackgroundColor(BROWN);
-                *border = BorderColor::all(match tone {
-                    Some(MenuButtonTone::Emphasized) => GOLD,
-                    #[cfg(target_arch = "wasm32")]
-                    Some(MenuButtonTone::Secondary) => BROWN_LIGHT,
-                    _ => CREAM,
-                });
-            }
+    for (entity, mut floater, mut transform, mut color) in &mut floaters {
+        floater.elapsed += time.delta_secs();
+        let progress = (floater.elapsed / FLOATER_SECONDS).clamp(0.0, 1.0);
+        // Ease out, so it leaps off the stall and settles as it fades.
+        let eased = 1.0 - (1.0 - progress) * (1.0 - progress);
+        transform.translation = (floater.origin + Vec2::new(0.0, FLOATER_RISE * eased)).extend(5.0);
+        color.0.set_alpha(1.0 - eased);
+
+        if progress >= 1.0 {
+            commands.entity(entity).despawn();
         }
     }
 }
 
-fn contains_inclusive(bounds: Rect, point: Vec2) -> bool {
+pub(crate) fn contains_inclusive(bounds: Rect, point: Vec2) -> bool {
     point.x >= bounds.min.x
         && point.x <= bounds.max.x
         && point.y >= bounds.min.y
@@ -1505,17 +1558,88 @@ fn web_diagnostics_panel_open() -> bool {
 fn sync_web_test_state() {}
 
 #[cfg(target_arch = "wasm32")]
+#[derive(serde::Serialize)]
+struct TestPoint {
+    x: f32,
+    y: f32,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(serde::Serialize)]
+struct TestBounds {
+    min: TestPoint,
+    max: TestPoint,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(serde::Serialize)]
+struct TestWorker {
+    x: f32,
+    y: f32,
+    segment: &'static str,
+    carrying: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestButtons {
+    menu: TestPoint,
+    hire_worker: TestPoint,
+    resume: TestPoint,
+    logs: TestPoint,
+    restart: TestPoint,
+    confirm_restart: TestPoint,
+    cancel_restart: TestPoint,
+}
+
+/// Serialised through `serde` rather than hand-rolled positional formatting:
+/// one transposed argument in a thirty-argument `format!` is a silent lie in
+/// the test oracle, and this struct is about to grow several fields.
+#[cfg(target_arch = "wasm32")]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestState {
+    ready: bool,
+    bananas: f64,
+    workers: u32,
+    next_cost: f64,
+    hire_required: f64,
+    can_hire: bool,
+    gross_per_sec: f64,
+    wages_per_sec: f64,
+    net_per_sec: f64,
+    interaction: &'static str,
+    menu: &'static str,
+    viewport: TestPoint,
+    active_touches: usize,
+    touch: TestPoint,
+    banana: TestPoint,
+    harvest: TestPoint,
+    harvest_bounds: TestBounds,
+    deposit: TestPoint,
+    monkeys: Vec<TestWorker>,
+    buttons: TestButtons,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
 fn sync_web_test_state(
     treasury: Res<Treasury>,
+    workforce: Res<Workforce>,
+    multipliers: Res<Multipliers>,
+    snapshot: Res<EconomySnapshot>,
     controller: Res<HarvestController>,
     menu: Res<MenuState>,
     layout: Res<SceneLayout>,
     primary_window: Single<&Window, With<PrimaryWindow>>,
     touches: Res<Touches>,
     banana_transform: Single<&Transform, With<Banana>>,
+    workers: Query<(&HarvestCycle, &Transform), With<Worker>>,
     buttons: Query<(&ButtonAction, &ComputedNode, &UiGlobalTransform)>,
     mut warmup_frames: Local<u8>,
 ) {
+    use crate::domain::Segment;
     use wasm_bindgen::JsValue;
 
     if *warmup_frames < 3 {
@@ -1523,83 +1647,104 @@ fn sync_web_test_state(
         return;
     }
 
-    let interaction = match controller.interaction {
-        HarvestInteraction::Idle => "idle",
-        HarvestInteraction::Dragging { .. } => "dragging",
-        HarvestInteraction::KeyboardHarvest { .. } => "keyboard-harvest",
+    let point = |value: Vec2| TestPoint {
+        x: value.x,
+        y: value.y,
     };
-    let menu = match *menu {
-        MenuState::Closed => "closed",
-        MenuState::Open => "open",
-        MenuState::ConfirmRestart => "confirm-restart",
-    };
-    let banana = layout.world_to_screen(banana_transform.translation.truncate());
-    let harvest = layout.world_to_screen(layout.harvest);
-    let harvest_bounds_min = layout.world_to_screen(Vec2::new(
-        layout.harvest_bounds.min.x,
-        layout.harvest_bounds.max.y,
-    ));
-    let harvest_bounds_max = layout.world_to_screen(Vec2::new(
-        layout.harvest_bounds.max.x,
-        layout.harvest_bounds.min.y,
-    ));
-    let deposit = layout.world_to_screen(layout.deposit);
-    let active_touches = touches.iter().count();
-    let touch = touches
-        .iter()
-        .next()
-        .map_or(Vec2::ZERO, |touch| touch.position());
-    let mut button_centers = [Vec2::ZERO; 6];
+    let screen = |value: Vec2| point(layout.world_to_screen(value));
+
+    let mut button_centers = [Vec2::ZERO; 7];
     for (action, node, transform) in &buttons {
         let index = match action {
             ButtonAction::OpenMenu => 0,
-            ButtonAction::Resume => 1,
-            ButtonAction::Diagnostics => 2,
-            ButtonAction::Restart => 3,
-            ButtonAction::ConfirmRestart => 4,
-            ButtonAction::CancelRestart => 5,
+            ButtonAction::HireWorker => 1,
+            ButtonAction::Resume => 2,
+            ButtonAction::Diagnostics => 3,
+            ButtonAction::Restart => 4,
+            ButtonAction::ConfirmRestart => 5,
+            ButtonAction::CancelRestart => 6,
         };
         button_centers[index] = transform.translation * node.inverse_scale_factor;
     }
-    let state = format!(
-        r#"{{"ready":true,"bananas":{},"interaction":"{}","menu":"{}","viewport":{{"x":{:.2},"y":{:.2}}},"activeTouches":{},"touch":{{"x":{:.2},"y":{:.2}}},"banana":{{"x":{:.2},"y":{:.2}}},"harvest":{{"x":{:.2},"y":{:.2}}},"harvestBounds":{{"min":{{"x":{:.2},"y":{:.2}}},"max":{{"x":{:.2},"y":{:.2}}}}},"deposit":{{"x":{:.2},"y":{:.2}}},"buttons":{{"menu":{{"x":{:.2},"y":{:.2}}},"resume":{{"x":{:.2},"y":{:.2}}},"logs":{{"x":{:.2},"y":{:.2}}},"restart":{{"x":{:.2},"y":{:.2}}},"confirmRestart":{{"x":{:.2},"y":{:.2}}},"cancelRestart":{{"x":{:.2},"y":{:.2}}}}}}}"#,
-        treasury.display_count(),
-        interaction,
-        menu,
-        primary_window.width(),
-        primary_window.height(),
-        active_touches,
-        touch.x,
-        touch.y,
-        banana.x,
-        banana.y,
-        harvest.x,
-        harvest.y,
-        harvest_bounds_min.x,
-        harvest_bounds_min.y,
-        harvest_bounds_max.x,
-        harvest_bounds_max.y,
-        deposit.x,
-        deposit.y,
-        button_centers[0].x,
-        button_centers[0].y,
-        button_centers[1].x,
-        button_centers[1].y,
-        button_centers[2].x,
-        button_centers[2].y,
-        button_centers[3].x,
-        button_centers[3].y,
-        button_centers[4].x,
-        button_centers[4].y,
-        button_centers[5].x,
-        button_centers[5].y,
-    );
 
+    let plan = plan_hire(*workforce, *treasury, *multipliers);
+    let state = TestState {
+        ready: true,
+        bananas: treasury.bananas(),
+        workers: workforce.count(),
+        next_cost: plan.cost,
+        hire_required: plan.required,
+        can_hire: plan.affordable,
+        gross_per_sec: snapshot.gross_per_sec,
+        wages_per_sec: snapshot.wages_per_sec,
+        net_per_sec: snapshot.net_per_sec,
+        interaction: match controller.interaction {
+            HarvestInteraction::Idle => "idle",
+            HarvestInteraction::Dragging { .. } => "dragging",
+            HarvestInteraction::KeyboardHarvest { .. } => "keyboard-harvest",
+        },
+        menu: match *menu {
+            MenuState::Closed => "closed",
+            MenuState::Open => "open",
+            MenuState::ConfirmRestart => "confirm-restart",
+        },
+        viewport: point(Vec2::new(primary_window.width(), primary_window.height())),
+        active_touches: touches.iter().count(),
+        touch: point(
+            touches
+                .iter()
+                .next()
+                .map_or(Vec2::ZERO, |touch| touch.position()),
+        ),
+        banana: screen(banana_transform.translation.truncate()),
+        harvest: screen(layout.harvest),
+        harvest_bounds: TestBounds {
+            min: screen(Vec2::new(
+                layout.harvest_bounds.min.x,
+                layout.harvest_bounds.max.y,
+            )),
+            max: screen(Vec2::new(
+                layout.harvest_bounds.max.x,
+                layout.harvest_bounds.min.y,
+            )),
+        },
+        deposit: screen(layout.deposit),
+        monkeys: workers
+            .iter()
+            .map(|(cycle, transform)| {
+                let position = layout.world_to_screen(transform.translation.truncate());
+                TestWorker {
+                    x: position.x,
+                    y: position.y,
+                    segment: match cycle.segment() {
+                        Segment::ToGrove => "to-grove",
+                        Segment::Pick => "pick",
+                        Segment::ToDepot => "to-depot",
+                        Segment::Unload => "unload",
+                    },
+                    carrying: cycle.segment().is_carrying(),
+                }
+            })
+            .collect(),
+        buttons: TestButtons {
+            menu: point(button_centers[0]),
+            hire_worker: point(button_centers[1]),
+            resume: point(button_centers[2]),
+            logs: point(button_centers[3]),
+            restart: point(button_centers[4]),
+            confirm_restart: point(button_centers[5]),
+            cancel_restart: point(button_centers[6]),
+        },
+    };
+
+    let Ok(encoded) = serde_json::to_string(&state) else {
+        return;
+    };
     if let Some(window) = web_sys::window() {
         let _ = js_sys::Reflect::set(
             window.as_ref(),
             &JsValue::from_str("__BANANA_MONKEY_TEST_STATE__"),
-            &JsValue::from_str(&state),
+            &JsValue::from_str(&encoded),
         );
     }
 }
@@ -1691,5 +1836,44 @@ mod tests {
             assert!(layout.harvest_bounds.width() >= layout.zone_size);
             assert!(layout.deposit_bounds.width() >= 148.0);
         }
+    }
+
+    #[test]
+    fn the_worker_route_runs_between_the_two_zones_at_every_viewport() {
+        for viewport in [Vec2::new(320.0, 568.0), Vec2::new(390.0, 844.0), Vec2::new(1920.0, 1080.0)] {
+            let layout = SceneLayout::for_viewport(viewport);
+
+            assert!(layout.grove_stand < layout.stall_stand);
+            // Workers stand clear of both sprite centres, so they do not walk
+            // through the tree or the stall.
+            assert!(layout.grove_stand > layout.harvest.x);
+            assert!(layout.stall_stand < layout.deposit.x);
+        }
+    }
+
+    #[test]
+    fn world_positions_snap_to_a_whole_texel_grid() {
+        let desktop = SceneLayout::for_viewport(Vec2::new(1280.0, 720.0));
+        let phone = SceneLayout::for_viewport(Vec2::new(390.0, 844.0));
+
+        // A fractional scale would make the monkey shimmer against a scene
+        // whose every other sprite is drawn on the integer grid.
+        assert_eq!(desktop.world_scale, 2.0);
+        assert_eq!(phone.world_scale, 1.0);
+        assert_eq!(desktop.snap(10.4), 10.0);
+        assert_eq!(desktop.snap(11.4), 12.0);
+    }
+
+    #[test]
+    fn buttons_are_only_live_in_the_view_that_shows_them() {
+        // A tap on the menu scrim must never reach the shop card underneath.
+        assert!(ButtonAction::HireWorker.active_in(MenuState::Closed));
+        assert!(!ButtonAction::HireWorker.active_in(MenuState::Open));
+        assert!(!ButtonAction::HireWorker.active_in(MenuState::ConfirmRestart));
+        assert!(ButtonAction::OpenMenu.active_in(MenuState::Closed));
+        assert!(ButtonAction::Resume.active_in(MenuState::Open));
+        assert!(!ButtonAction::Resume.active_in(MenuState::Closed));
+        assert!(ButtonAction::ConfirmRestart.active_in(MenuState::ConfirmRestart));
+        assert!(!ButtonAction::ConfirmRestart.active_in(MenuState::Open));
     }
 }

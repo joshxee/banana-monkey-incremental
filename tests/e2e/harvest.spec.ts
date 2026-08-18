@@ -9,6 +9,19 @@ type Bounds = { min: Point; max: Point };
 type GameState = {
   ready: boolean;
   bananas: number;
+  workers: number;
+  nextCost: number;
+  hireRequired: number;
+  canHire: boolean;
+  grossPerSec: number;
+  wagesPerSec: number;
+  netPerSec: number;
+  monkeys: Array<{
+    x: number;
+    y: number;
+    segment: "to-grove" | "pick" | "to-depot" | "unload";
+    carrying: boolean;
+  }>;
   interaction: "idle" | "dragging" | "keyboard-harvest";
   menu: "closed" | "open" | "confirm-restart";
   viewport: Point;
@@ -20,6 +33,7 @@ type GameState = {
   deposit: Point;
   buttons: {
     menu: Point;
+    hireWorker: Point;
     resume: Point;
     restart: Point;
     confirmRestart: Point;
@@ -28,6 +42,16 @@ type GameState = {
 };
 
 test.beforeEach(async ({ page }) => installDevicePixelContentBoxFix(page));
+
+async function savedBananas(page: Page): Promise<number | null> {
+  const raw = await page.evaluate((key) => localStorage.getItem(key), SAVE_KEY);
+  return raw === null ? null : (JSON.parse(raw).bananas as number);
+}
+
+async function savedWorkers(page: Page): Promise<number | null> {
+  const raw = await page.evaluate((key) => localStorage.getItem(key), SAVE_KEY);
+  return raw === null ? null : (JSON.parse(raw).workers as number);
+}
 
 async function state(page: Page): Promise<GameState> {
   return page.evaluate(() => {
@@ -191,9 +215,7 @@ test.describe("manual harvest", () => {
 
     await expect.poll(async () => (await state(page)).bananas).toBe(1);
     await page.keyboard.up("h");
-    await expect
-      .poll(async () => page.evaluate((key) => localStorage.getItem(key), SAVE_KEY))
-      .toContain('"bananas":1');
+    await expect.poll(async () => savedBananas(page)).toBe(1);
 
     await page.reload();
     await waitForGame(page);
@@ -245,9 +267,8 @@ test.describe("manual harvest", () => {
     }
     await expect.poll(async () => (await state(page)).bananas).toBe(0);
     await expect.poll(async () => (await state(page)).menu).toBe("closed");
-    await expect
-      .poll(async () => page.evaluate((key) => localStorage.getItem(key), SAVE_KEY))
-      .toContain('"bananas":0');
+    await expect.poll(async () => savedBananas(page)).toBe(0);
+    await expect.poll(async () => savedWorkers(page)).toBe(0);
   });
 
   test("malformed save safely starts at zero", async ({ page }) => {

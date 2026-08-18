@@ -120,6 +120,25 @@ The UI labels gross and net as steady-state averages and shows each cart's
 in-flight payload, so a staffing change cannot make the next delivery look
 incorrect.
 
+*Implementation note (Worker Monkey, 2026-08-18).* A tick must be spent as a
+**time budget**, not as `remaining -= rate × dt` followed by `remaining <= 0`.
+The naive form fails twice, and both failures are silent:
+
+- `1/20` is not exactly representable in binary, so repeated subtraction leaves
+  a *positive* residual — 9.4e-15 on a 5-banana pick segment, 1.0e-15 on
+  unload. Each residual costs a whole extra tick, turning the 47.5-second
+  worker cycle into a 47.6-second one.
+- Discarding the budget left over at a segment boundary loses `dt/2` per
+  boundary, a 0.21% throughput error at these parameters. Because the loss is
+  absolute, it grows as a *fraction* when multipliers shorten the cycle: 0.28%
+  with ten Chefs, 0.43% at `M_speed = 2.5`. Buying support would quietly make
+  the implementation less accurate.
+
+So: consume `needed = remaining / rate` out of a per-tick budget, carry the
+remainder across the boundary, and compare with a tolerance of a billionth of
+the segment's duration. A bounded iteration guard is load-bearing rather than
+defensive — a zero rate makes `needed` infinite and the loop never terminates.
+
 **D14 — Technologists are never ranked against harvesters.**
 Their banana delta is exactly $-\text{wage}$ at every possible world state — it
 carries no information. Ranking them requires net-present-value reasoning over
@@ -134,11 +153,68 @@ reserve = 2 × max(0, wages − pool_income) × cart_cycle / cart_count
 Only the wages that carts are covering are at risk, and only for one delivery
 gap. Costs 0.3 minutes across a 24-minute session.
 
+*Amended (Worker Monkey, 2026-08-18) — the formula returns zero for a cart-free
+economy, and that is wrong.* It hard-codes "the lumpy source is carts, the
+continuous one is the pool", so with `K = 0` it reserves nothing. But a lone
+worker delivers once every 47.5 seconds, which is not continuous by any
+reading, and the treasury goes underwater without a reserve.
+
+The fix is to identify the lumpiest source by *measurement* rather than by
+name: reserve against the largest gap between deliveries, and credit only the
+income that keeps arriving inside it.
+
+```
+gap     = maxᵢ (Tᵢ / nᵢ)                 over every source in the field
+covered = Σ { rateᵢ : Tᵢ / nᵢ < gap }
+reserve = 2 × max(0, wages − covered) × gap
+```
+
+This reduces to the published cart form whenever carts are the lumpiest source,
+and to a constant **2.85 bananas** for a worker-only economy — `2 × 0.03W ×
+47.5/W`, independent of `W`. Measured over 30 purchases and 40 seeds: median
+worst dip −3.36 → −1.09, minimum −6.54 → −3.04, for 1.8% of pacing. The first
+hire therefore needs 6.85 bananas rather than 4. All 39 contract assertions
+still pass.
+
+One near miss is worth recording, because it looks correct and is not. Using a
+*blended* mean gap, `1 / Σ(nᵢ/Tᵢ)`, also collapses to 2.85 for workers — but it
+under-reserves badly once carts exist (38.5 against a measured −66.0 dip at
+`K = 4`), because frequent five-banana pool deliveries drag the average gap down
+without doing anything to cover wages across the two-hundred-banana cart gap.
+Averaging delivery *frequency* is the wrong statistic when income is both lumpy
+and heterogeneous.
+
+The alternative considered and rejected was clamping the treasury at zero.
+Unpayable wages then become *free bananas*: a 12.5% pacing gift concentrated in
+the first twelve purchases, and an exploit with no on-screen tell, since
+spending down to exactly zero buys a wage holiday until the next delivery. At
+`W ≈ 7` the forgiven amount exceeds the price of the monkey that caused it. Debt
+is allowed to happen instead; it is rare and small, exactly as §6 intends.
+
 **D16 — Cart cycle phase is randomised after assignment on spawn.**
 Carts bought in one burst otherwise synchronise. Measured, that deepens the
 treasury dip from −38 to −255 in the same economy. One line; prevents a
 punishment the player cannot see or diagnose. A new cart remains pending until
 assignment completes, then samples its crew fraction and initial phase together.
+
+*Extended to workers (Worker Monkey, 2026-08-18), and the window is not
+negotiable.* The phase must be uniform in **time across the whole cycle**. Two
+narrower windows are tempting and both are wrong:
+
+- Sampling a segment and then a position inside it puts 25% of new workers in
+  Unload, which is 5.3% of the cycle, biasing first-cycle income upward by ~25%.
+  It self-corrects after one cycle, so only a first-minute test catches it.
+- Confining the window to the outbound leg — attractive because a worker would
+  then always appear empty-handed and walking, rather than materialising
+  mid-route — leaves 27.5 seconds of every cycle in which a burst-bought cohort
+  delivers nothing. D15's amended reserve is derived from a mean gap of `T/W`,
+  so the dip becomes `0.03 × W × 27.5`, which passes the 2.85 reserve at `W = 4`
+  and grows without bound. The full-cycle window holds the dip at 1.425 for
+  every `W`.
+
+The presentation cost is real and is paid elsewhere: because a hire can appear
+anywhere on the route, the purchase needs its own visible cue. The
+implementation flashes the new worker gold for 0.6 s.
 
 **D17 — Assignment is auto-pull.**
 Cart slots beat the pool by 230–280% at every reachable world state, so the

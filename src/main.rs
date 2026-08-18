@@ -1,6 +1,8 @@
 mod domain;
 mod game;
+mod hud;
 mod persistence;
+mod worker;
 
 use bevy::{
     asset::{AssetMetaCheck, AssetPlugin},
@@ -35,8 +37,9 @@ fn main() {
                 }),
         );
 
-    let treasury = persistence::load_treasury();
-    app.insert_resource(treasury)
+    let run = persistence::load_run();
+    app.insert_resource(run.treasury)
+        .insert_resource(run.workforce)
         .add_plugins(HarvestGamePlugin)
         .run();
 }
