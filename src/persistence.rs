@@ -11,11 +11,12 @@ const SAVE_FILE_NAME: &str = "save-v1.json";
 #[cfg(target_arch = "wasm32")]
 const WEB_STORAGE_KEY: &str = "banana-monkey-incremental.save-v1";
 
-/// What the game restores on launch. Cycle phase is deliberately absent: every
-/// worker restarts its trip from the stall, which is tolerable only because a
-/// worker cycle is 50 seconds. A longer-cycle unit (the Net Cart) will have to
-/// persist phase, or reloading becomes both a save-scum surface and an invisible
-/// punishment - and it costs the player at most one trip either way.
+/// What the game restores on launch. Worker cycle phase is deliberately absent:
+/// restored workers receive a random phase because this save format does not
+/// claim to preserve in-flight simulation progress. Their first partial cycle
+/// is presentation-only, so placement cannot create income or wages. A
+/// longer-cycle unit (the Net Cart) will need to persist phase if its progress
+/// is player-visible.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct SavedRun {
     pub treasury: Treasury,

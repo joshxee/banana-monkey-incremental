@@ -202,21 +202,31 @@ treasury dip from −38 to −255 in the same economy. One line; prevents a
 punishment the player cannot see or diagnose. A new cart remains pending until
 assignment completes, then samples its crew fraction and initial phase together.
 
-*Not extended to workers (Worker Monkey, 2026-08-18).* Jitter was applied to
-workers first and then withdrawn. Its entire justification for that unit was
-bounding the treasury dip, and D18 removes the dip at its source: with post-paid
-meals the measured worst dip is 0.000 at every worker count, jittered or not.
-
-What jitter cost, by contrast, was real. A phase drawn over the whole cycle puts
-a new hire anywhere on the route, so a purchase can produce a monkey
-materialising in the middle of the field — which reads as a spawn bug, and had
-to be papered over with a gold flash. Every worker now starts at the stall at
-phase zero and walks out on the click, which *is* the purchase's consequence.
-The geometric cost ladder staggers hires on its own, so lockstep requires
-several purchases inside one tick.
+Workers remain phase zero when newly hired so the purchase has a clear visible
+consequence. On save restore, however, the existing workforce is assigned a
+random elapsed-time phase across the cycle. This avoids a resume screen full of
+monkeys reset to the stall without changing the economy: phase construction is
+pure presentation state, and return-leg phases already imply a carried banana.
+The geometric cost ladder still staggers hires on its own.
 
 Carts keep their jitter: their wages are still drained continuously, so D15
 still binds and the −38 → −255 measurement still stands.
+
+*One cost this decision did not anticipate.* Withdrawing jitter was argued
+purely against the treasury dip, which post-paid meals had already flattened to
+0.000. But D18 introduced a *second* phase-sensitive channel: a worker stalls
+only if a purchase lands inside its 2.5-second snack window. With jitter that is
+an independent 5% risk per worker; without it, workers hired close together
+snack in lockstep, so one ill-timed purchase can stall a whole cohort at once. A
+single delivery funds 3.3 meals, so a cohort unblocks within a cycle and the
+severity is low — but jitter is no longer *purposeless* for workers, and if the
+stall ever becomes a harsher mechanic this is the first decision to revisit.
+
+*And one presentational cost that was live.* Identical phases mean identical
+positions: workers sharing a depth lane drew exactly on top of each other, so
+four hires showed three monkeys. Jitter used to hide it. `worker::Lane` now
+carries the hire index and derives a small deterministic along-route offset from
+it — a presentation fix, deliberately not an economic one.
 
 **D18 — Harvesters are paid out of the delivery they have just made.**
 *(Worker Monkey, 2026-08-18. Supersedes D15 for workers.)*

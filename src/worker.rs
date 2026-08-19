@@ -10,11 +10,14 @@
 //! write `Transform`, so capping avatars at a fixed pool later is a change to
 //! *which* entities they iterate, not a rendering rewrite.
 
+use std::f32::consts::TAU;
+
 use bevy::prelude::*;
 
 use crate::{
     domain::{
         HarvestCycle, Multipliers, Payload, Segment, WORKER_PAYLOAD, WORKER_WAGE, Wage, Workforce,
+        cycle_time,
     },
     game::SceneLayout,
 };
@@ -45,10 +48,36 @@ const LANE_STEP_TEXELS: f32 = 3.0;
 #[derive(Component)]
 pub struct Worker;
 
-/// Which depth row this worker walks in. Assigned round-robin at spawn, so it
-/// stays stable across a reload.
+/// Prevents a random resume phase from creating income or wages before the
+/// worker has completed its first post-resume cycle. The carried banana remains
+/// presentation state through the existing segment rules.
+#[derive(Component)]
+pub(crate) struct RestoredCycle;
+
+/// A worker's hire index. Depth row and along-route stagger are both derived
+/// from it, so both stay stable across a reload without storing either.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Lane(u32);
+
+impl Lane {
+    /// Depth row, front to back.
+    fn row(self) -> u32 {
+        self.0 % LANES
+    }
+
+    /// A small along-route offset, in source texels, so that workers sharing a
+    /// row are not pixel-identical.
+    ///
+    /// Without it, workers 0 and 3 occupy the same lane at the same phase with
+    /// the same animation frame and draw exactly on top of each other: hire
+    /// four in a burst and the player counts three monkeys while the store
+    /// reads OWNED 4. Removing spawn jitter is what exposed this - phases used
+    /// to differ, so positions did too.
+    fn stagger_texels(self) -> f32 {
+        const SPREAD: u32 = 5;
+        (self.0 / LANES % SPREAD) as f32 * 4.0 - 8.0
+    }
+}
 
 /// The banana a worker carries home. Deliberately *not* the `Banana` marker:
 /// that one is claimed by several `Single` queries, which silently skip their
@@ -69,6 +98,8 @@ pub struct JustHired {
 }
 
 const HIRE_HIGHLIGHT_SECONDS: f32 = 0.6;
+/// Slow enough to read as distress rather than as a strobe.
+const HUNGRY_PULSE_HZ: f32 = 0.8;
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pose {
@@ -103,6 +134,27 @@ impl WorkerArt {
     }
 }
 
+/// Workers restored from a save get a random elapsed-time phase. Fresh hires
+/// still start at the stall so the purchase has an immediate, legible result.
+#[derive(Resource)]
+pub struct RestoreWorkers {
+    remaining: usize,
+    rng: fastrand::Rng,
+}
+
+impl RestoreWorkers {
+    pub fn new(count: u32) -> Self {
+        Self {
+            remaining: count as usize,
+            rng: fastrand::Rng::new(),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.remaining = 0;
+    }
+}
+
 /// Give every hired worker an avatar, whether the workforce grew because of a
 /// purchase or because a save was loaded.
 ///
@@ -110,17 +162,15 @@ impl WorkerArt {
 /// every worker outright; if a unit ever becomes sellable, the excess has to be
 /// despawned here or the stale avatars keep delivering and eating.
 ///
-/// Every worker starts at the stall, at cycle phase zero. There is no spawn
-/// jitter: the geometric cost ladder staggers hires on its own, and a monkey
-/// that materialises mid-route reads as a spawn bug. Jitter existed to bound a
-/// treasury dip that post-paid meals removed outright.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_missing_workers(
     mut commands: Commands,
     workforce: Res<Workforce>,
+    multipliers: Res<Multipliers>,
     art: Option<Res<WorkerArt>>,
     asset_server: Res<AssetServer>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
+    mut restored: ResMut<RestoreWorkers>,
     existing: Query<Entity, With<Worker>>,
 ) {
     let target = workforce.count() as usize;
@@ -170,15 +220,22 @@ pub fn spawn_missing_workers(
     };
 
     for index in current..target {
-        commands.spawn((
+        let was_restored = restored.remaining > 0;
+        let cycle = if was_restored {
+            restored.remaining -= 1;
+            HarvestCycle::from_phase(
+                restored.rng.f64() * cycle_time(*multipliers),
+                *multipliers,
+            )
+        } else {
+            HarvestCycle::default()
+        };
+        let mut worker = commands.spawn((
             Worker,
-            HarvestCycle::default(),
+            cycle,
             Payload(WORKER_PAYLOAD),
             Wage(WORKER_WAGE),
-            Lane(index as u32 % LANES),
-            JustHired {
-                remaining: HIRE_HIGHLIGHT_SECONDS,
-            },
+            Lane(index as u32),
             Pose::Run,
             Sprite {
                 image: art.run_image.clone(),
@@ -189,7 +246,16 @@ pub fn spawn_missing_workers(
                 ..default()
             },
             Transform::from_xyz(0.0, 0.0, 1.0),
-            children![(
+        ));
+        if was_restored {
+            worker.insert(RestoredCycle);
+        } else {
+            worker.insert(JustHired {
+                remaining: HIRE_HIGHLIGHT_SECONDS,
+            });
+        }
+        worker.with_children(|parent| {
+            parent.spawn((
                 CarriedBanana,
                 Sprite {
                     image: art.banana_image.clone(),
@@ -205,8 +271,8 @@ pub fn spawn_missing_workers(
                 // so this rides just above it rather than floating clear.
                 Transform::from_xyz(1.0, 16.0, 0.1),
                 Visibility::Hidden,
-            )],
-        ));
+            ));
+        });
     }
 }
 
@@ -245,20 +311,23 @@ pub fn position_workers(
             Segment::Unload | Segment::Snack => (layout.stall_stand, true),
         };
 
-        // Depth: lane 0 is the back row, standing a few pixels higher up the
-        // ground plane, and the last lane is nearest the camera with its feet
-        // on the ground line itself. Going the other way - stepping down from
-        // the ground line - sinks the front row into the dirt.
-        let back = (LANES - 1 - lane.0.min(LANES - 1)) as f32;
+        // Depth: lane 0 is the *front* row, feet on the ground line itself, and
+        // later lanes step back up the ground plane. Front-first matters more
+        // than it sounds - lanes are handed out in hire order, so the common
+        // case of a single worker would otherwise spend the whole game in the
+        // back row, shaded and visibly hovering 6 texels off the grass. Going
+        // the other way, stepping *down* from the ground line, sinks the front
+        // row into the dirt.
+        let back = lane.row() as f32;
         let feet = layout.ground_top() + back * LANE_STEP_TEXELS * layout.world_scale;
         let half_height = FRAME_SIZE as f32 * 0.5 * layout.world_scale;
 
         let translation = Vec3::new(
-            layout.snap(x),
+            layout.snap(x + lane.stagger_texels() * layout.world_scale),
             layout.snap(feet + half_height),
             // Nearer lanes draw in front, and every worker sits behind the
             // dragged banana (z 3) and the zone labels (z 2).
-            1.0 + lane.0 as f32 * 0.01,
+            1.0 + (LANES - 1) as f32 * 0.01 - back * 0.01,
         );
         let scale = Vec3::splat(layout.world_scale);
         // Written only on change: a worker stands still through Pick and
@@ -278,10 +347,16 @@ pub fn position_workers(
         let mut tint = Vec3::splat(shade);
         // A worker stuck waiting for a banana to eat has stopped producing, and
         // the player has to be able to see why the rate died. Idling at the
-        // stall alone is ambiguous - unloading looks the same - so drain the
-        // colour out of it.
+        // stall alone is ambiguous - unloading looks the same.
+        //
+        // Signalled by a slow *pulse* toward cold grey, not by darkening. A
+        // static darken shares a channel with the depth cue above, and loses:
+        // a hungry front-row worker at 0.72 came out brighter than a healthy
+        // back-row one at 0.82, so the two meanings were 12% apart and
+        // ambiguous. Nothing else in the scene pulses.
         if cycle.is_hungry() {
-            tint = tint * 0.62 + Vec3::new(0.10, 0.10, 0.14);
+            let pulse = 0.5 + 0.5 * (time.elapsed_secs() * HUNGRY_PULSE_HZ * TAU).sin();
+            tint = tint.lerp(Vec3::new(0.34, 0.36, 0.46), 0.45 + 0.35 * pulse);
         }
         if let Some(mut hired) = hired {
             hired.remaining -= time.delta_secs();
@@ -343,8 +418,10 @@ pub fn animate_workers(
             if let Ok(mut visibility) = carried.get_mut(child) {
                 // Held through the snack too: that banana is the meal, and
                 // seeing it in hand is what connects the counter's dip to the
-                // monkey that caused it.
-                let wanted = if segment.holds_banana() {
+                // monkey that caused it. Not while starving, though - a hungry
+                // monkey holding a banana contradicts the reason it has
+                // stopped, and the empty hands are half the tell.
+                let wanted = if segment.holds_banana() && !cycle.is_hungry() {
                     Visibility::Inherited
                 } else {
                     Visibility::Hidden
@@ -370,15 +447,43 @@ mod tests {
         let band = 16.0;
 
         for lane in 0..LANES {
-            let back = (LANES - 1 - lane) as f32;
+            let back = lane as f32;
             let feet = layout.ground_top() + back * LANE_STEP_TEXELS * layout.world_scale;
             let lift = feet - layout.ground_top();
 
             assert!(lift >= 0.0, "lane {lane} is below the ground line");
             assert!(lift <= band, "lane {lane} floats {lift} above the ground");
         }
-        // The back row is the one that gets shaded, and the front row is not.
-        assert_eq!(LANES - 1 - (LANES - 1), 0);
+        // Lane 0 is the front row: feet exactly on the ground line, unshaded,
+        // drawn in front. Lanes are handed out in hire order, so the first
+        // worker - which for most of a session is the only worker - must be the
+        // one standing on the grass rather than hovering above it.
+        let z = |lane: Lane| 1.0 + (LANES - 1) as f32 * 0.01 - lane.row() as f32 * 0.01;
+        let shade = |lane: Lane| 1.0 - 0.09 * lane.row() as f32;
+
+        assert_eq!(Lane(0).row(), 0);
+        assert_eq!(shade(Lane(0)), 1.0);
+        assert!(z(Lane(0)) > z(Lane(LANES - 1)));
+        assert!(shade(Lane(0)) > shade(Lane(LANES - 1)));
+    }
+
+    #[test]
+    fn workers_sharing_a_row_do_not_draw_on_top_of_each_other() {
+        // Without spawn jitter, same lane plus same phase means pixel-identical
+        // sprites: four hires would show three monkeys. Every worker sharing a
+        // row within one spread must sit at a different offset.
+        let mut seen = std::collections::HashSet::new();
+        for index in 0..LANES * 5 {
+            let lane = Lane(index);
+            assert!(
+                seen.insert((lane.row(), lane.stagger_texels().to_bits())),
+                "worker {index} collides with an earlier one"
+            );
+        }
+        // And the spread stays inside the route rather than walking off it.
+        for index in 0..200u32 {
+            assert!(Lane(index).stagger_texels().abs() <= 8.0);
+        }
     }
 
     #[test]

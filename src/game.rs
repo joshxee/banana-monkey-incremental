@@ -14,7 +14,7 @@ use crate::{
         SIM_HZ, Treasury, Wage, Workforce, plan_hire, restart_run,
     },
     hud, persistence,
-    worker::{self, Worker},
+    worker::{self, RestoredCycle, Worker},
 };
 
 const BANANA_FRAMES: usize = 12;
@@ -96,6 +96,7 @@ impl Plugin for HarvestGamePlugin {
             .init_resource::<DiagnosticPointerTrace>()
             .insert_resource(Time::<Fixed>::from_hz(SIM_HZ))
             .add_systems(Startup, setup)
+            .add_systems(Startup, apply_test_time_scale)
             .configure_sets(
                 FixedUpdate,
                 (
@@ -135,7 +136,12 @@ impl Plugin for HarvestGamePlugin {
                 // `SceneLayout` that `refresh_layout` writes, and without an
                 // ordering edge Bevy is free to run it against last frame's
                 // viewport on the frame a resize lands.
-                (refresh_layout, apply_layout, hud::apply_responsive_hud)
+                (
+                    refresh_layout,
+                    apply_layout,
+                    hud::apply_responsive_hud,
+                    hud::apply_store_layout,
+                )
                     .chain()
                     .in_set(Present::Layout),
             )
@@ -688,6 +694,63 @@ fn apply_layout(
     }
 }
 
+/// Run the clock faster, for tests only.
+///
+/// A worker's cycle is 50 *simulated* seconds, and an end-to-end test that
+/// watches a delivery therefore takes 50 real ones. Scaling `Time<Virtual>` is
+/// the honest way to shorten that: `Time<Fixed>` is driven by virtual time, so
+/// `advance_cycles` still sees a constant 50 ms `dt` and the *fixed-step
+/// simulation* is bit-identical per tick. Shortening the cycle constants
+/// instead would test a different game.
+///
+/// What is **not** identical is anything paced by frames rather than ticks, and
+/// a test that cares about these should ask for real time:
+///
+/// - `queue_manual_settlement` runs in `Update`, so a hand-harvest is capped at
+///   one per frame. Per *simulated* second, manual income falls by roughly the
+///   scale factor.
+/// - `persist_changes` and `PointerGuard` both read `Res<Time>`, which is
+///   virtual. `SAVE_INTERVAL_SECONDS` and the touch-suppression window shrink
+///   by the scale factor in wall-clock terms.
+///
+/// Behind a default-off cargo feature rather than a plain `#[cfg(debug)]`,
+/// because the shipped artefact is a wasm build like the test one: without the
+/// feature gate, `?speed=100` would be a cheat code in the released game.
+///
+/// `max_delta` is deliberately left alone. It clamps the **raw** delta before
+/// the scale is applied (`bevy_time::virt`), not after, so a 60 Hz frame's
+/// 16.7 ms is already 15x under the 250 ms default and the clamp never fires at
+/// any scale this hook allows. Raising it "to match" would only widen the
+/// spiral-of-death guard: at 60x, a 30-second stall - a breakpoint, a
+/// backgrounded tab, a lost wgpu device - would become 1800 virtual seconds and
+/// 36,000 fixed ticks in a single frame.
+#[cfg(all(feature = "test-hooks", target_arch = "wasm32"))]
+fn apply_test_time_scale(mut virtual_time: ResMut<Time<Virtual>>) {
+    /// Beyond this the fixed-step catch-up loop does more work per frame than a
+    /// frame has time for, and the run stops being faster in wall-clock terms.
+    const MAX_SCALE: f64 = 60.0;
+
+    let Some(scale) = web_sys::window()
+        .and_then(|window| window.location().search().ok())
+        .and_then(|search| {
+            search
+                .trim_start_matches('?')
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("speed=").map(str::to_owned))
+        })
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|scale| scale.is_finite() && (1.0..=MAX_SCALE).contains(scale))
+    else {
+        return;
+    };
+
+    virtual_time.set_relative_speed_f64(scale);
+    bevy::log::info!("test-hooks: simulation running at {scale}x");
+}
+
+#[cfg(not(all(feature = "test-hooks", target_arch = "wasm32")))]
+fn apply_test_time_scale() {}
+
 // ────────────────────────────────────────────────── simulation, at 20 Hz
 
 /// Stage 1. [`Treasury`] is written here and in [`settle`], both inside
@@ -722,6 +785,7 @@ fn apply_restart(
     mut queue: ResMut<DeliveryQueue>,
     mut requests: ResMut<HireRequests>,
     mut dirty: ResMut<PersistenceDirty>,
+    mut restored: ResMut<worker::RestoreWorkers>,
     workers: Query<Entity, With<Worker>>,
     floaters: Query<Entity, With<Floater>>,
 ) {
@@ -730,6 +794,7 @@ fn apply_restart(
     }
 
     restart_run(&mut treasury, &mut workforce);
+    restored.clear();
     queue.entries.clear();
     requests.0 = 0;
     for entity in &workers {
@@ -756,7 +821,16 @@ fn advance_cycles(
     multipliers: Res<Multipliers>,
     treasury: Res<Treasury>,
     mut queue: ResMut<DeliveryQueue>,
-    mut workers: Query<(&mut HarvestCycle, &Payload, &Wage)>,
+    mut workers: Query<
+        (
+            Entity,
+            &mut HarvestCycle,
+            &Payload,
+            &Wage,
+            Option<&RestoredCycle>,
+        ),
+    >,
+    mut commands: Commands,
 ) {
     // f64 from the fixed clock. `delta_secs()` is f32, which would make the
     // economy's determinism depend on f32 rounding; 50 ms is exactly
@@ -773,11 +847,22 @@ fn advance_cycles(
         .sum();
     let mut larder = treasury.bananas() + pending;
 
-    for (mut cycle, payload, wage) in &mut workers {
+    for (entity, mut cycle, payload, wage, restored) in &mut workers {
         // D2: what a unit earns and what it eats both come off its own
         // components, never off a count times a constant.
-        let terms = CycleTerms::for_worker(payload.0, wage.0, *multipliers);
+        let terms = if restored.is_some() {
+            CycleTerms {
+                payload: 0.0,
+                meal: 0.0,
+            }
+        } else {
+            CycleTerms::for_worker(payload.0, wage.0, *multipliers)
+        };
         let output = cycle.advance(dt, *multipliers, terms, &mut larder);
+
+        if restored.is_some() && cycle.segment() == crate::domain::Segment::ToGrove {
+            commands.entity(entity).remove::<RestoredCycle>();
+        }
 
         if output.delivered > 0.0 {
             queue.entries.push(Delivery {
@@ -838,12 +923,18 @@ fn settle(
     }
 }
 
+/// Stage 7. Counted from the world rather than from `Workforce`, because a
+/// stalled worker is still hired: the count cannot tell you how many are
+/// actually working, and reporting a rate the world is not producing is what
+/// the readout used to get wrong.
 fn snapshot_economy(
     workforce: Res<Workforce>,
     multipliers: Res<Multipliers>,
+    cycles: Query<&HarvestCycle, With<Worker>>,
     mut snapshot: ResMut<EconomySnapshot>,
 ) {
-    *snapshot = EconomySnapshot::project(workforce.count(), *multipliers);
+    let stalled = cycles.iter().filter(|cycle| cycle.is_hungry()).count() as u32;
+    *snapshot = EconomySnapshot::project(workforce.count(), stalled, *multipliers);
 }
 
 /// Three sources, three sizes, three colours - readable without reading. The

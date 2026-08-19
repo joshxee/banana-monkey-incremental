@@ -296,15 +296,22 @@ $$\text{meal} \;=\; w_{\text{salary}} \cdot T_{\text{worker}} \;=\; 1.5 \ \text{
 
 Three properties follow, and between them they replace the reserve entirely:
 
-1. **Solvency is structural.** Within a cycle the credit strictly precedes the
-   debit and strictly exceeds it, so a worker cannot take the treasury below
-   where it stood before its delivery landed. Measured worst dip over twenty
-   minutes: **0.000 at W = 1, 4, 10 and 25**, against −1.42 under the drained
-   model. The signing fee can therefore be the whole requirement.
+1. **Solvency is structural**, by *two* mechanisms, and it is worth being
+   precise about which does the work. Within a cycle the credit strictly
+   precedes the debit and strictly exceeds it, so an undisturbed worker cannot
+   take the treasury below where it stood before its delivery landed. But a
+   purchase *can* land in the 47.5→50 s window between a delivery and the meal
+   it funds, since `plan_hire` gates on the fee alone — and there the ordering
+   argument does not save you. What does is the larder gate: the worker cannot
+   afford its meal, and stalls. Measured worst dip over twenty minutes:
+   **0.000 at W = 1, 4, 10 and 25**, against −1.42 under the drained model. The
+   signing fee can therefore be the whole requirement.
 2. **The wage rate is unchanged.** Both the meal and the eating time are defined
    against the cycle, so $w_{\text{salary}}$ stays exactly 0.03/s at every
    multiplier. Nothing downstream — payback ranking, chef viability, §5.1 —
-   moves.
+   moves. (Per second of *cycle*: a stalled worker's cycle stretches, so its
+   realised wage rate falls below 0.03/s while it starves. That is intended — it
+   is the punishment — but the invariant is conditional on a fed workforce.)
 3. **The counter reads as arithmetic.** +5 on delivery, −1.5 two seconds later,
    flat in between. The drained model instead ticked imperceptibly downward for
    47 seconds and then jumped; players read the first half as a freeze and the
@@ -320,9 +327,12 @@ more, and the theorem survives with a constant factor:
 
 $$\lim \text{throughput} \;=\; (1 - f_{\text{snack}}) \cdot \frac{M_{\text{tech}}}{t_{\text{pick}}}$$
 
-**Owed, never forgiven.** A worker that cannot afford its meal stalls at the
-stall rather than eating on credit, and resumes the instant food arrives. This
-matters: clamping the treasury at zero instead would turn unpayable wages into
+**Owed, never forgiven — within a session.** A worker that cannot afford its
+meal stalls at the stall rather than eating on credit, and resumes the instant
+food arrives. Reloading is the exception: cycle phase is not persisted, so a
+starving worker's debt dies with the page. Not worth save-scumming for — a
+reload also discards in-flight progress worth about half a payload per healthy
+worker — but a real hole, recorded in `persistence.rs`. This matters: clamping the treasury at zero instead would turn unpayable wages into
 free bananas and make spending down to zero a wage holiday. Stalling is a
 penalty, it is visible — the sprite greys out and production stops — and it is
 the only place in the economy where overspending has a consequence the player
@@ -395,11 +405,12 @@ wait is the price of making the purchase the tutorial. The implementation answer
 it with presentation — the monkey walks out of the stall on the click, carries a
 banana home, and arrives loudly — rather than by changing a parameter.
 
-There is deliberately **no spawn phase jitter**. It existed to bound a treasury
-dip that §6.1 removed at the source, and it cost the purchase its most legible
-consequence: a hire drawn mid-route materialised in the middle of the field,
-which reads as a spawn bug. The geometric cost ladder staggers hires on its own,
-so lockstep needs several purchases inside one tick to occur at all. Every numeric lever here is expensive:
+Fresh hires deliberately start at phase zero. This keeps the purchase's most
+legible consequence: a new monkey walks out of the stall. When loading saved
+data, the existing workforce receives random elapsed-time phases so a resume
+does not reset every monkey to the stall. This is presentation-only because the
+save format does not claim to preserve offline cycle progress. The geometric
+cost ladder still staggers hires on its own. Every numeric lever here is expensive:
 halving the grove distance invalidates D17's measured 230–280% cart advantage,
 doubling worker speed cuts the Chef effect from +102% to +52% and undermines
 §5.1, and $t_{\text{pick}}$ sets the ceiling in §3 outright.

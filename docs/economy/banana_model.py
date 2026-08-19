@@ -206,7 +206,14 @@ def _income_sources(s, p):
     out = []
     pool = s.W - s.A
     if pool > 0:
-        out.append((sum(worker_cycle(s, p)) / pool, pool * worker_throughput(s, p)))
+        # NET of the meal, not gross. `continuous_salary` already removes pool
+        # wages from the drain being reserved against; reporting gross income
+        # here applies the same D18 exemption a second time, on the other side
+        # of the subtraction, and understates the reserve by exactly
+        # 2 * pool * w_salary * gap. Measured at RUN n=84: 46.81 against a
+        # correct 57.32.
+        out.append((sum(worker_cycle(s, p)) / pool,
+                    pool * (worker_throughput(s, p) - p.w_salary)))
     if s.K > 0:
         out.append((sum(cart_cycle(s, p)) / s.K,
                     cart_throughput(s, p) * crewed(s, p) / p.k_crew))

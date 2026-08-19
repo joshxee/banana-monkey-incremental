@@ -38,8 +38,10 @@ fn main() {
         );
 
     let run = persistence::load_run();
+    let restored_workers = run.workforce.count();
     app.insert_resource(run.treasury)
         .insert_resource(run.workforce)
+        .insert_resource(worker::RestoreWorkers::new(restored_workers))
         .add_plugins(HarvestGamePlugin)
         .run();
 }

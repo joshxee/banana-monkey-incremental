@@ -4,8 +4,8 @@ import { installDevicePixelContentBoxFix } from "./device-pixel-content-box";
 
 const SAVE_KEY = "banana-monkey-incremental.save-v1";
 
-/// Every worker starts at the stall at phase zero - there is no spawn jitter -
-/// so a hire delivers 47.5 s later and eats 2.5 s after that, every time.
+/// Fresh hires start at the stall at phase zero, so a new hire delivers 47.5 s
+/// later and eats 2.5 s after that. Restored workers are phased independently.
 const CYCLE_SECONDS = 50;
 const DELIVERY_AT_SECONDS = 47.5;
 const PAYLOAD = 5;
@@ -84,7 +84,13 @@ async function state(page: Page): Promise<GameState> {
   });
 }
 
-async function openFreshGame(page: Page): Promise<void> {
+/// How much faster than real time the simulation runs, unless a test asks for
+/// real time. A worker's cycle is 50 *simulated* seconds either way - the tick
+/// count and every economic figure are identical - so this only shortens the
+/// wall clock, from 50 seconds a cycle to about two.
+const FAST = 25;
+
+async function openFreshGame(page: Page, speed = FAST): Promise<void> {
   // Guarded, because init scripts re-run on every navigation: clearing
   // unconditionally would wipe the save the reload test is there to check.
   await page.addInitScript(
@@ -96,14 +102,20 @@ async function openFreshGame(page: Page): Promise<void> {
     },
     { saveKey: SAVE_KEY, guardKey: `${SAVE_KEY}.test-cleared` },
   );
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.goto(speed === 1 ? "/" : `/?speed=${speed}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await waitForGame(page);
+  await page.locator("#banana-monkey-canvas").focus();
+}
+
+async function waitForGame(page: Page): Promise<void> {
   await page.waitForFunction(
     () =>
       typeof (window as typeof window & {
         __BANANA_MONKEY_TEST_STATE__?: string;
       }).__BANANA_MONKEY_TEST_STATE__ === "string",
   );
-  await page.locator("#banana-monkey-canvas").focus();
 }
 
 /// Hand-harvest until the shop reports the hire is affordable. The gate is the
@@ -124,11 +136,16 @@ async function harvestUntilAffordable(page: Page): Promise<void> {
 test.describe("worker monkey", () => {
   test.beforeEach(async ({ page }) => openFreshGame(page));
 
-  test("hiring spawns a monkey that walks the route and delivers", async ({
+
+  test("hiring spawns a monkey that walks the route and delivers @slow", async ({
     page,
   }) => {
-    // One full cycle, plus harvesting time and browser slack.
+    // One full cycle at real speed, plus harvesting time and browser slack.
+    // Deliberately the only test that does: everything else scales the clock,
+    // so this one is what proves the cycle really is 47.5 seconds to a delivery
+    // and that the scaling is a test convenience rather than a balance change.
     test.setTimeout(160_000);
+    await openFreshGame(page, 1);
 
     const start = await state(page);
     expect(start.workers).toBe(0);
@@ -202,7 +219,13 @@ test.describe("worker monkey", () => {
   });
 
   test("a monkey only carries a banana on the way back", async ({ page }) => {
-    test.setTimeout(160_000);
+    test.setTimeout(90_000);
+    // Much slower than the rest: this samples every segment, and Unload and
+    // Snack are 2.5 simulated seconds each. At 25x that is a tenth of a real
+    // second; even at 5x it is half a second, which a loaded machine steps
+    // over. At 2x they are 1.25 s apiece and the sampler cannot miss them.
+    const speed = 2;
+    await openFreshGame(page, speed);
 
     await harvestUntilAffordable(page);
     await page.keyboard.press("b");
@@ -211,7 +234,7 @@ test.describe("worker monkey", () => {
     // Sample the whole cycle and check the carried banana never contradicts the
     // segment: empty on the way out and while picking, loaded on the way home.
     const seen = new Set<string>();
-    const deadline = Date.now() + (CYCLE_SECONDS + 8) * 1000;
+    const deadline = Date.now() + (CYCLE_SECONDS / speed + 8) * 1000;
     while (Date.now() < deadline) {
       const monkey = (await state(page)).monkeys[0];
       seen.add(monkey.segment);
@@ -222,7 +245,7 @@ test.describe("worker monkey", () => {
       );
       expect(monkey.carrying).toBe(shouldCarry);
       expect(monkey.hungry).toBe(false);
-      await page.waitForTimeout(250);
+      await page.waitForTimeout(100);
     }
 
     // A full round trip visits all five segments.
@@ -295,7 +318,7 @@ test.describe("worker monkey", () => {
   });
 
   test("workers and a fractional treasury survive a reload", async ({ page }) => {
-    test.setTimeout(120_000);
+    test.setTimeout(90_000);
 
     await harvestUntilAffordable(page);
     await page.keyboard.press("b");
@@ -306,39 +329,49 @@ test.describe("worker monkey", () => {
     // wait again for the throttled save to carry that fraction to disk.
     await expect
       .poll(async () => (await state(page)).bananas % 1, {
-        timeout: (CYCLE_SECONDS + 15) * 1000,
-        intervals: [250],
+        timeout: (CYCLE_SECONDS / FAST + 15) * 1000,
+        intervals: [100],
       })
       .not.toBe(0);
     await expect
       .poll(async () => (await savedBananas(page))! % 1, {
         timeout: 15_000,
-        intervals: [250],
+        intervals: [100],
       })
       .not.toBe(0);
     const saved = await savedBananas(page);
-    const before = await state(page);
+    expect(saved! % 1).not.toBe(0);
 
+    // `reload` keeps the query string, so the restored run stays fast too.
     await page.reload();
-    await page.waitForFunction(
-      () =>
-        typeof (window as typeof window & {
-          __BANANA_MONKEY_TEST_STATE__?: string;
-        }).__BANANA_MONKEY_TEST_STATE__ === "string",
-    );
+    await waitForGame(page);
 
     await expect.poll(async () => (await state(page)).workers).toBe(1);
     await expect.poll(async () => (await state(page)).monkeys.length).toBe(1);
 
-    // Compared against what was actually on disk, not against the live balance.
-    // Saves are throttled to a 5 s cadence and the economy now moves in lumps,
-    // so a delivery or a meal landing inside that window legitimately leaves the
-    // two up to a payload apart. What must be exact is the round trip itself:
-    // an f64 treasury has to come back bit for bit, which the old integer save
-    // format could not do.
+    // A band, not an equality. Booting the page back up costs a second or two
+    // of wall clock, and at 25x that is whole cycles of production, so the live
+    // balance has legitimately moved on before it can be read. What the band
+    // still catches is the failure this test exists for: a truncating save
+    // restores *below* what it recorded, and production cannot make `after`
+    // start out smaller than `saved`.
     const after = await state(page);
-    expect(after.bananas).toBe(saved);
-    expect(Math.abs(after.bananas - before.bananas)).toBeLessThanOrEqual(PAYLOAD);
+    expect(after.bananas).toBeGreaterThanOrEqual(saved!);
+    expect(after.bananas).toBeLessThanOrEqual(saved! + 5 * (PAYLOAD - MEAL));
+
+    // The restored worker is walking, not stranded. Cycle phase is deliberately
+    // *not* persisted (see `persistence.rs`), so it restarts its trip from the
+    // stall - the check is that it is alive and productive, not that it resumed
+    // mid-route.
+    await expect
+      .poll(async () => (await state(page)).monkeys[0].hungry, { timeout: 5_000 })
+      .toBe(false);
+    await expect
+      .poll(async () => (await state(page)).bananas, {
+        timeout: (CYCLE_SECONDS / FAST + 15) * 1000,
+        intervals: [100],
+      })
+      .toBeGreaterThan(after.bananas);
   });
 
   test("restart dismisses every worker, and the scrim covers the shop", async ({

@@ -28,8 +28,11 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
+    // `--features test-hooks` builds in the `?speed=` clock scale that lets a
+    // spec watch a 50-second harvest cycle in a couple of real seconds. The
+    // feature is off by default, so the released build has no such switch.
     command:
-      `CARGO_TARGET_DIR=target/playwright-e2e-${port} trunk serve --dist ${runRoot}/trunk-dist --port ${port} --no-autoreload=true --watch src --watch assets --watch Cargo.toml --watch index.html --watch diagnostics.js`,
+      `CARGO_TARGET_DIR=target/playwright-e2e-${port} trunk serve --features test-hooks --dist ${runRoot}/trunk-dist --port ${port} --no-autoreload=true --watch src --watch assets --watch Cargo.toml --watch index.html --watch diagnostics.js`,
     url: `http://127.0.0.1:${port}`,
     reuseExistingServer: false,
     timeout: 600_000,
@@ -53,6 +56,13 @@ export default defineConfig({
     {
       name: "mobile-fractional-dpr",
       testMatch: /harvest\.spec\.ts/,
+      // Emulated touch at a fractional DPR is by far the slowest project here:
+      // every `mouse.move` step is a CDP round trip against a re-rendering wgpu
+      // canvas, and the three-drag test measures 1.9 min on an idle machine. It
+      // was passing under the 90 s default with no headroom at all, so it failed
+      // the moment the box was busy. The tests are not doing anything they
+      // should not; the budget was simply wrong for this project.
+      timeout: 240_000,
       use: {
         viewport: { width: 475, height: 653 },
         hasTouch: true,

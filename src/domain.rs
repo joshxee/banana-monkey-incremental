@@ -238,6 +238,30 @@ impl Default for HarvestCycle {
 }
 
 impl HarvestCycle {
+    /// Construct a cycle at an elapsed-time phase without advancing it.
+    /// Advancing here would emit delivery or meal output while merely placing
+    /// an avatar on the route.
+    pub fn from_phase(phase: f64, multipliers: Multipliers) -> Self {
+        let cycle = cycle_time(multipliers);
+        let mut remaining_phase = phase.rem_euclid(cycle);
+
+        for segment in Segment::ORDER {
+            let duration = segment.duration(multipliers);
+            if remaining_phase < duration {
+                let fraction = (remaining_phase / duration).clamp(0.0, 1.0);
+                return Self {
+                    segment,
+                    remaining: segment.nominal_work(multipliers) * (1.0 - fraction),
+                };
+            }
+            remaining_phase -= duration;
+        }
+
+        // Floating-point subtraction can land exactly on the exclusive upper
+        // bound. Treat that boundary as phase zero.
+        Self::default()
+    }
+
     pub fn segment(self) -> Segment {
         self.segment
     }
@@ -319,7 +343,14 @@ impl HarvestCycle {
                     *larder += terms.payload;
                 }
                 Segment::Snack => {
-                    if *larder + tolerance < terms.meal {
+                    // Exactly, with no slack. `tolerance` above is in seconds
+                    // and belongs to the time budget; reusing it here would
+                    // compare a duration against a quantity of bananas and let
+                    // a worker eat a couple of nano-bananas it does not have -
+                    // enough to take the treasury negative and trip the
+                    // `debug_assert` in `Treasury::charge`. A worker that
+                    // misses its meal by 2e-9 simply waits one more tick.
+                    if *larder < terms.meal {
                         // Nothing to eat. Hold the worker here - not on the
                         // next leg - so the debt is still owed when food
                         // arrives, and so the idle sprite reads as hunger.
@@ -336,6 +367,13 @@ impl HarvestCycle {
             self.segment = self.segment.next();
             self.remaining = self.segment.nominal_work(multipliers);
         }
+
+        // The guard is a safety net against a zero rate, not a work limit. If
+        // it is ever the thing that ends the loop, segments are completing
+        // faster than 64 per tick and the simulation is silently dropping
+        // work - a throughput cliff that would appear only once support
+        // multipliers shorten the cycle below a few milliseconds.
+        debug_assert!(guard < 64, "segment budget loop hit its iteration guard");
 
         output
     }
@@ -396,8 +434,14 @@ impl Treasury {
     /// Callers must not spend what is not there. Two rules keep that true and
     /// between them make the balance structurally non-negative: a hire is gated
     /// on [`HirePlan::affordable`], and a meal is gated on the larder inside
-    /// [`HarvestCycle::advance`]. There is deliberately no clamp here - a clamp
-    /// would turn an unpayable charge into free bananas and hide the bug.
+    /// [`HarvestCycle::advance`].
+    ///
+    /// The `debug_assert` is the real check - it fails the build's tests on any
+    /// caller that overdraws. The `max(0.0)` behind it is a release-only last
+    /// resort, chosen over letting the balance go negative because a negative
+    /// banana count on screen is a worse failure than a rounding-sized one that
+    /// is silently absorbed. It should be unreachable; if it ever fires in
+    /// practice, the bug is in the gate, not here.
     pub fn charge(&mut self, amount: f64) {
         debug_assert!(amount.is_finite() && amount >= 0.0);
         debug_assert!(
@@ -477,22 +521,39 @@ pub fn restart_run(treasury: &mut Treasury, workforce: &mut Workforce) {
 /// derived from world state every tick rather than cached (I3').
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
 pub struct EconomySnapshot {
-    /// Steady-state expected rate, `Σ payload / cycle_time`. The realised rate
-    /// depends on phase; over any short window the two disagree, which is why
-    /// the readout is labelled an average.
+    /// Steady-state expected rate, `Σ payload / cycle_time`, counting only
+    /// workers that are actually working. The realised rate depends on phase;
+    /// over any short window the two disagree, which is why the readout is
+    /// labelled an average.
     pub gross_per_sec: f64,
     pub wages_per_sec: f64,
     pub net_per_sec: f64,
+    pub workers: u32,
+    /// Workers stalled at the stall with a meal they cannot afford.
+    pub stalled: u32,
 }
 
 impl EconomySnapshot {
-    pub fn project(workers: u32, multipliers: Multipliers) -> Self {
-        let gross_per_sec = workers as f64 * worker_throughput(multipliers);
-        let wages_per_sec = workers as f64 * WORKER_WAGE;
+    /// `stalled` workers are excluded from *both* sides. A starving worker
+    /// harvests nothing, and it is not eating either - that is the whole point
+    /// of the stall - so counting it in the wage bill would be as wrong as
+    /// counting it in production.
+    ///
+    /// Excluding it at all is the fix for a readout that used to lie: the
+    /// projection was a pure function of the worker *count*, so a wholly
+    /// stalled workforce reported `+6.0/min` indefinitely while producing
+    /// nothing, and no number on screen explained why the pile had stopped
+    /// growing. That is the same complaint that started this redesign.
+    pub fn project(workers: u32, stalled: u32, multipliers: Multipliers) -> Self {
+        let working = workers.saturating_sub(stalled) as f64;
+        let gross_per_sec = working * worker_throughput(multipliers);
+        let wages_per_sec = working * WORKER_WAGE;
         Self {
             gross_per_sec,
             wages_per_sec,
             net_per_sec: gross_per_sec - wages_per_sec,
+            workers,
+            stalled: stalled.min(workers),
         }
     }
 }
@@ -525,8 +586,10 @@ pub struct HirePlan {
 pub fn plan_hire(workforce: Workforce, treasury: Treasury, multipliers: Multipliers) -> HirePlan {
     let cost = workforce.next_cost();
 
-    let before = EconomySnapshot::project(workforce.count(), multipliers);
-    let after = EconomySnapshot::project(workforce.count() + 1, multipliers);
+    // Hypothetical steady state, so no stalls: this is "what would this hire be
+    // worth", not "what is happening right now".
+    let before = EconomySnapshot::project(workforce.count(), 0, multipliers);
+    let after = EconomySnapshot::project(workforce.count() + 1, 0, multipliers);
 
     HirePlan {
         cost,
@@ -719,7 +782,7 @@ mod tests {
             }
 
             let realised = delivered / 600.0;
-            let projected = EconomySnapshot::project(workers, m).gross_per_sec;
+            let projected = EconomySnapshot::project(workers, 0, m).gross_per_sec;
             assert!(
                 (realised - projected).abs() / projected < 0.05,
                 "workers={workers} realised={realised} projected={projected}"
@@ -778,14 +841,31 @@ mod tests {
 
     #[test]
     fn every_worker_starts_at_the_stall_facing_the_grove() {
-        // Hires are staggered by the cost ladder, so there is no phase jitter:
-        // a new monkey always walks out of the stall, which is the purchase's
-        // visible consequence.
+        // A new monkey always walks out of the stall, which is the purchase's
+        // visible consequence. Only restored workers receive a phase.
         let fresh = HarvestCycle::default();
 
         assert_eq!(fresh.segment(), Segment::ToGrove);
         assert_eq!(fresh.segment_fraction(base()), 0.0);
         assert!(!fresh.is_hungry());
+    }
+
+    #[test]
+    fn phase_constructor_uses_elapsed_time_segment_boundaries() {
+        let m = base();
+
+        assert_eq!(HarvestCycle::from_phase(0.0, m), HarvestCycle::default());
+        assert_eq!(HarvestCycle::from_phase(20.0, m).segment(), Segment::Pick);
+        assert_eq!(HarvestCycle::from_phase(25.0, m).segment(), Segment::ToDepot);
+        assert_eq!(HarvestCycle::from_phase(45.0, m).segment(), Segment::Unload);
+        assert_eq!(HarvestCycle::from_phase(47.5, m).segment(), Segment::Snack);
+        assert_eq!(HarvestCycle::from_phase(50.0, m), HarvestCycle::default());
+
+        let halfway_home = HarvestCycle::from_phase(35.0, m);
+        assert_eq!(halfway_home.segment(), Segment::ToDepot);
+        assert_eq!(halfway_home.segment_fraction(m), 0.5);
+        assert!(halfway_home.segment().holds_banana());
+        assert!(!halfway_home.is_hungry());
     }
 
     // ──────────────────────────────────────────────────────────── feeding
@@ -1010,15 +1090,28 @@ mod tests {
 
     #[test]
     fn snapshot_reports_gross_wages_and_net_together() {
-        let snapshot = EconomySnapshot::project(1, base());
+        let snapshot = EconomySnapshot::project(1, 0, base());
 
         assert!((snapshot.gross_per_sec - 0.1).abs() < 1e-15);
         assert!((snapshot.wages_per_sec - 0.03).abs() < 1e-15);
         assert!((snapshot.net_per_sec - 0.07).abs() < 1e-15);
         assert_eq!(
-            EconomySnapshot::project(0, base()),
+            EconomySnapshot::project(0, 0, base()),
             EconomySnapshot::default()
         );
+
+        // A stalled workforce reports what it is actually doing: nothing, and
+        // eating nothing while it does it.
+        let starving = EconomySnapshot::project(4, 4, base());
+        assert_eq!(starving.gross_per_sec, 0.0);
+        assert_eq!(starving.wages_per_sec, 0.0);
+        assert_eq!(starving.net_per_sec, 0.0);
+        assert_eq!(starving.stalled, 4);
+
+        // And a partly stalled one reports the fed fraction.
+        let half = EconomySnapshot::project(4, 2, base());
+        assert!((half.gross_per_sec - 0.2).abs() < 1e-15);
+        assert!((half.wages_per_sec - 0.06).abs() < 1e-15);
     }
 
     // ─────────────────────────────────────────── the settled trajectory

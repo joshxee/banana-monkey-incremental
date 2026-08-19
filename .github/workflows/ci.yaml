@@ -75,3 +75,61 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+  e2e:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    # The full suite is ~25 minutes: the worker specs wait out real 50-second
+    # harvest cycles, and the emulated-mobile projects are slow. That is why it
+    # lives here and not in the local feature loop - `npm run test:e2e:fast`
+    # covers a developer's cycle in a couple of minutes.
+    timeout-minutes: 60
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.toml') }}
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxkbcommon-dev
+      - name: Install trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Playwright
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run Playwright suite
+        # Not via `npm run test:e2e`, which wraps the run in `nix-shell`; the
+        # runner has the toolchain on PATH already.
+        #
+        # `visual.spec.ts` is excluded on purpose. Its baselines are committed
+        # per platform (`*-linux.png`) and were rendered on a developer machine;
+        # a hosted runner's font rasterisation and GPU stack will not reproduce
+        # them byte for byte, so it would fail on day one for something that is
+        # not a regression. Visual review stays local, where the baselines are
+        # regenerated and looked at.
+        run: npx playwright test tests/e2e/harvest.spec.ts tests/e2e/worker.spec.ts tests/e2e/diagnostics.spec.ts
+      - name: Upload failure artefacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: test-results/
+          retention-days: 7
