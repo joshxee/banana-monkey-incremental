@@ -323,6 +323,7 @@ test.describe("worker monkey", () => {
     await harvestUntilAffordable(page);
     await page.keyboard.press("b");
     await expect.poll(async () => (await state(page)).workers).toBe(1);
+    const spawnPosition = (await state(page)).monkeys[0].x;
 
     // Wait out a full trip so the monkey's meal makes the treasury fractional,
     // which the old integer save format would have silently truncated, and then
@@ -343,11 +344,23 @@ test.describe("worker monkey", () => {
     expect(saved! % 1).not.toBe(0);
 
     // `reload` keeps the query string, so the restored run stays fast too.
-    await page.reload();
-    await waitForGame(page);
+    // A random phase can land near the stall by chance, so retry a few resumes
+    // to make this assertion reliable without exposing a test-only seed.
+    let after: GameState | undefined;
+    let resumedOffStall = false;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await page.reload();
+      await waitForGame(page);
 
-    await expect.poll(async () => (await state(page)).workers).toBe(1);
-    await expect.poll(async () => (await state(page)).monkeys.length).toBe(1);
+      await expect.poll(async () => (await state(page)).workers).toBe(1);
+      await expect.poll(async () => (await state(page)).monkeys.length).toBe(1);
+
+      after = await state(page);
+      resumedOffStall ||=
+        after.monkeys[0].segment !== "to-grove" ||
+        after.monkeys[0].x < spawnPosition - 20;
+      if (resumedOffStall) break;
+    }
 
     // A band, not an equality. Booting the page back up costs a second or two
     // of wall clock, and at 25x that is whole cycles of production, so the live
@@ -355,14 +368,13 @@ test.describe("worker monkey", () => {
     // still catches is the failure this test exists for: a truncating save
     // restores *below* what it recorded, and production cannot make `after`
     // start out smaller than `saved`.
-    const after = await state(page);
-    expect(after.bananas).toBeGreaterThanOrEqual(saved!);
-    expect(after.bananas).toBeLessThanOrEqual(saved! + 5 * (PAYLOAD - MEAL));
+    expect(after!.bananas).toBeGreaterThanOrEqual(saved!);
+    expect(after!.bananas).toBeLessThanOrEqual(saved! + 5 * (PAYLOAD - MEAL));
 
-    // The restored worker is walking, not stranded. Cycle phase is deliberately
-    // *not* persisted (see `persistence.rs`), so it restarts its trip from the
-    // stall - the check is that it is alive and productive, not that it resumed
-    // mid-route.
+    // Cycle phase is deliberately not persisted (see `persistence.rs`), but a
+    // restored worker must still be placed somewhere in its cycle rather than
+    // reset to the phase-zero stall position every time.
+    expect(resumedOffStall).toBe(true);
     await expect
       .poll(async () => (await state(page)).monkeys[0].hungry, { timeout: 5_000 })
       .toBe(false);
