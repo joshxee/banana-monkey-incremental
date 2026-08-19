@@ -165,36 +165,25 @@ def t_auto_pull_fills_every_slot():
     check("STAF auto-pull keeps every cart slot filled", not bad)
 
 
-def t_understaffed_cart_is_proportional():
-    one = State(W=1, A=1, K=1)
-    full = State(W=P.k_crew, A=P.k_crew, K=1)
-    part = gross(one, P)
-    check("STAF a 1-of-3 crewed cart produces exactly one third",
-          math.isclose(part, gross(full, P) / P.k_crew, rel_tol=1e-12),
-          f"{part:.4f} vs {gross(full, P)/P.k_crew:.4f}")
+def t_a_cart_runs_whole_or_not_at_all():
+    """D8 is deleted. There is no such thing as a one-third cart: the game
+    crews a cart with exactly three monkeys at purchase, buying any it is short
+    of, and `Carts::running()` is `crewed // 3`.
 
-
-def t_understaffed_cart_snapshots_scale_at_cycle_start():
-    partial = State(W=1, A=1, K=1)
+    These two assertions used to check the opposite - that a 1-of-3 crewed cart
+    produced exactly one third, and that the fraction was snapshotted at cycle
+    start. Both described a mechanic the shipped game no longer has, and both
+    passed, which made this suite green against a different economy.
+    """
     full = State(W=P.k_crew, A=P.k_crew, K=1)
-    _, realised = discrete_run(partial, P, duration=6000.0)
-    same_segments = cart_cycle(partial, P) == cart_cycle(full, P)
-    cycle_time = sum(cart_cycle(partial, P))
-    initial = cart_delivery_trace(full, P, deliveries=1)
-    changed = cart_delivery_trace(
-        partial, P, staffing_changes=[(cycle_time / 2, P.k_crew)])
-    payloads = [payload for _, payload in changed]
-    expected = [P.k_payload / P.k_crew, P.k_payload]
-    transition_ok = (
-        math.isclose(initial[0][1], P.k_payload, rel_tol=1e-12)
-        and all(math.isclose(a, b, rel_tol=1e-12)
-                for a, b in zip(payloads, expected)))
-    check("STAF crew scale snapshots after spawn assignment and per cycle",
-          same_segments
-          and math.isclose(realised, gross(partial, P), rel_tol=0.05)
-          and transition_ok,
-          f"same_segments={same_segments}, realised={realised:.4f}, "
-          f"expected={gross(partial, P):.4f}, payloads={payloads}")
+    check("STAF a fully crewed cart produces a full payload",
+          math.isclose(cart_throughput(full, P) * sum(cart_cycle(full, P)),
+                       P.k_payload, rel_tol=1e-12))
+    # The pool, not the cart, is what a short crew leaves behind.
+    short = State(W=2, A=2, K=1)
+    check("STAF a cart the pool cannot crew is not reachable in the game",
+          crewed(short, P) < P.k_crew,
+          "the purchase gate buys the missing crew; this state is oracle-only")
 
 
 def t_crew_never_exceeds_capacity():

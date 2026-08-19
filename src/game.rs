@@ -92,6 +92,7 @@ impl Plugin for HarvestGamePlugin {
             .init_resource::<Multipliers>()
             .init_resource::<Carts>()
             .init_resource::<worker::NextLane>()
+            .init_resource::<worker::RestoreCarts>()
             .init_resource::<Staff>()
             .init_resource::<Research>()
             .init_resource::<FedStaff>()
@@ -475,19 +476,19 @@ struct PendingSettlement(Option<SettlementSource>);
 /// dragged it, a worker carried it, or a worker ate it. One queue, one
 /// settlement path, one place the economy can be wrong.
 #[derive(Resource, Debug, Default)]
-struct DeliveryQueue {
-    entries: Vec<Delivery>,
+pub(crate) struct DeliveryQueue {
+    pub(crate) entries: Vec<Delivery>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Delivery {
+pub(crate) struct Delivery {
     /// Always positive. [`DeliveryKind::Snack`] is the one that subtracts.
-    amount: f64,
-    kind: DeliveryKind,
+    pub(crate) amount: f64,
+    pub(crate) kind: DeliveryKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeliveryKind {
+pub(crate) enum DeliveryKind {
     /// The player dragged a banana to the stall.
     Manual,
     /// A worker unloaded its payload.
@@ -902,8 +903,14 @@ fn apply_restart(
     mut queue: ResMut<DeliveryQueue>,
     mut requests: ResMut<HireRequests>,
     mut dirty: ResMut<PersistenceDirty>,
-    mut restored: ResMut<worker::RestoreWorkers>,
-    mut next_lane: ResMut<worker::NextLane>,
+    // One parameter, because `apply_restart` is at Bevy's sixteen-parameter
+    // cap and these three are the same concern: where freshly spawned avatars
+    // are placed, and which indices they get.
+    mut placement: (
+        ResMut<worker::RestoreWorkers>,
+        ResMut<worker::RestoreCarts>,
+        ResMut<worker::NextLane>,
+    ),
     workers: Query<Entity, With<Worker>>,
     support: Query<Entity, With<SupportUnit>>,
     vehicles: Query<Entity, With<Cart>>,
@@ -920,7 +927,9 @@ fn apply_restart(
         &mut staff,
         &mut research,
     );
+    let (restored, restored_carts, next_lane) = &mut placement;
     restored.clear();
+    restored_carts.clear();
     next_lane.restart();
     queue.entries.clear();
     requests.0.clear();
@@ -973,6 +982,7 @@ fn advance_cycles(
     fed: Res<FedStaff>,
     mut research: ResMut<Research>,
     treasury: Res<Treasury>,
+    committed: Res<Committed>,
     mut queue: ResMut<DeliveryQueue>,
     mut workers: PoolQuery,
     mut carts: CartQuery,
@@ -992,7 +1002,18 @@ fn advance_cycles(
         .filter(|delivery| delivery.kind.is_income())
         .map(|delivery| delivery.amount)
         .sum();
-    let mut larder = treasury.bananas() + pending;
+    // Less every meal a harvester has already reserved. Without this the
+    // reservation holds for exactly one tick: `settle` credits the whole
+    // payload to the treasury, and the next tick re-derives the larder from
+    // that balance - which now contains the very meal that was set aside. A
+    // worker holds its earmark for 50 ticks and a cart for 758, so support was
+    // eating reserved bananas ~98% of the time it mattered, `Treasury::charge`
+    // was overdrawing, and release builds were silently forgiving the meal.
+    //
+    // `Committed` is one tick stale, exactly as `apply_purchases` reads it.
+    // That staleness is conservative in the right direction: it can only be too
+    // large, immediately after a delivery.
+    let mut larder = (treasury.bananas() + pending - committed.0).max(0.0);
 
     for (entity, mut cycle, spec, restored) in &mut workers {
         // D2: what a unit earns and what it eats both come off its own

@@ -227,6 +227,10 @@ pub(crate) struct UnitField {
 #[derive(Component)]
 pub(crate) struct HireButton(pub(crate) Unit);
 
+/// Stands in for a hire button while its unit is locked.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct LockedPlaque(pub(crate) Unit);
+
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MenuView {
     Scrim,
@@ -621,6 +625,14 @@ fn spawn_unit_row(store: &mut ChildSpawnerCommands, unit: Unit) {
             ));
 
             spawn_hire_button(row, unit, unit.kind());
+            if matches!(unit, Unit::Cart) {
+                // Shown in the button's place while the Cart is locked. A
+                // dimmed button and a unit that does not exist yet are
+                // different states, and a dimmed button says the first when it
+                // means the second - it also *takes taps*, queues a hire that
+                // is silently dropped, and burns the debounce doing it.
+                spawn_locked_plaque(row, unit);
+            }
             spawn_unit_cell(row, unit, UnitStat::Gain, COL_FARMING, false);
             spawn_unit_cell(row, unit, UnitStat::Feeding, COL_EATS, true);
             spawn_unit_cell(row, unit, UnitStat::Owned, COL_OWNED, false);
@@ -655,6 +667,31 @@ fn spawn_hire_button(row: &mut ChildSpawnerCommands, unit: Unit, kind: UnitKind)
                 unit,
                 stat: UnitStat::Price,
             },
+        )],
+    ));
+}
+
+fn spawn_locked_plaque(row: &mut ChildSpawnerCommands, unit: Unit) {
+    row.spawn((
+        LockedPlaque(unit),
+        TableCell(COL_HIRE),
+        Node {
+            display: Display::None,
+            width: px(COL_HIRE),
+            min_height: px(34),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            flex_shrink: 0.0,
+            border: UiRect::all(px(2)),
+            border_radius: BorderRadius::all(px(7)),
+            ..default()
+        },
+        BackgroundColor(STORE_SOIL),
+        BorderColor::all(STORE_LABEL),
+        children![(
+            Text::new("LOCKED"),
+            TextFont::from_font_size(12.0),
+            TextColor(STORE_LABEL),
         )],
     ));
 }
@@ -1068,7 +1105,7 @@ pub fn apply_store_layout(
     /// and it is the reason the height below is quantised at all: clipped to an
     /// arbitrary fraction, the fold lands through the middle of a row's text
     /// and reads as a rendering fault instead of an affordance.
-    const PEEK: f32 = 11.0;
+    const PEEK: f32 = 8.0;
 
     let dirt = layout.viewport.y * DIRT_FRACTION;
     let target = if expanded.0 {
@@ -1304,7 +1341,9 @@ pub fn sync_shop(
         &Interaction,
         &mut BackgroundColor,
         &mut BorderColor,
+        &mut Node,
     )>,
+    mut plaques: Query<(&LockedPlaque, &mut Node), Without<HireButton>>,
 ) {
     let world = EconomyState {
         workforce: *workforce,
@@ -1355,6 +1394,10 @@ pub fn sync_shop(
                 // and carries no information. Gold, so being the row the
                 // ranking does not price looks deliberate.
                 (UnitStat::Gain, Unit::Support(SupportRole::Technologist)) => GOLD,
+                // A column that exists to say "worth it / not worth it" cannot
+                // spend its whole signal on one glyph in eight. The banner
+                // already establishes the convention with FEEDING.
+                (UnitStat::Gain, _) if plan.gain_per_min < 0.0 => BROWN_LIGHT,
                 _ => CREAM,
             },
         );
@@ -1372,15 +1415,23 @@ pub fn sync_shop(
             // player can act on. Once one is hired the same cells become a
             // counter, which turns buying an unlock on faith into a wait with a
             // clock - and gives 1.0 RES/s the denominator it otherwise lacks.
-            (UnitStat::Price, Unit::Cart) if cart_locked => "LOCKED".to_string(),
+            (UnitStat::Price, Unit::Cart) if cart_locked => String::new(),
             (UnitStat::Gain, Unit::Cart) if cart_locked => {
                 if staff.count(SupportRole::Technologist) == 0 {
-                    "NEEDS A TECH".to_string()
+                    // Names the Technologist, not "cart technology". The
+                    // technologist is the row directly above with a button on
+                    // it; a sentence pointing at something the player can act
+                    // on closes the loop, and one naming an abstraction they
+                    // have never met does not.
+                    "NEEDS A TECHNOLOGIST".to_string()
                 } else {
-                    format!("{into_level:.0}/{level_cost:.0} RES")
+                    format!("RESEARCH {into_level:.0}/{level_cost:.0}")
                 }
             }
-            (UnitStat::Feeding, Unit::Cart) if cart_locked => "-".to_string(),
+            // Blanked rather than filled with "-", so the message above has the
+            // width of all three columns it has no values for. A locked unit has
+            // no rate, no meal and no count; it has one thing worth saying.
+            (UnitStat::Feeding | UnitStat::Owned, Unit::Cart) if cart_locked => String::new(),
             (UnitStat::Gain, Unit::Support(SupportRole::Technologist)) => {
                 format!("{RESEARCH_PER_TECHNOLOGIST:.1} RES/s")
             }
@@ -1405,7 +1456,15 @@ pub fn sync_shop(
         set_if_changed(&mut text.0, value);
     }
 
-    for (button, interaction, mut background, mut border) in &mut buttons {
+    for (plaque, mut node) in &mut plaques {
+        let shown = locked(plaque.0);
+        set_if_changed(
+            &mut node.display,
+            if shown { Display::Flex } else { Display::None },
+        );
+    }
+
+    for (button, interaction, mut background, mut border, mut node) in &mut buttons {
         let affordable = plan_for(button.0).affordable && !locked(button.0);
         // Affordability outranks hover: a button the player cannot press must
         // not light up under the cursor.
@@ -1428,6 +1487,16 @@ pub fn sync_shop(
         };
         set_if_changed(&mut *background, BackgroundColor(fill));
         set_if_changed(&mut *border, BorderColor::all(edge));
+        // A locked unit's button steps aside for its plaque entirely, rather
+        // than sitting there dimmed and swallowing taps.
+        set_if_changed(
+            &mut node.display,
+            if locked(button.0) {
+                Display::None
+            } else {
+                Display::Flex
+            },
+        );
     }
 }
 

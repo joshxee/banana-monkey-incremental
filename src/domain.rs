@@ -133,11 +133,12 @@ impl CycleSpec {
     };
 }
 
-/// D4: every multiplier is additive within its term, `M = 1 + count × bonus`.
+/// D4: every multiplier is additive within its term, `M = 1 + count × bonus`,
+/// and only *fed* monkeys count towards it.
 ///
-/// Chefs, Unpackers and Technologists do not exist yet, so all three are 1.0.
-/// They are carried explicitly rather than elided so that adding those units is
-/// a change of value, not a change of shape.
+/// Derived every tick by [`multipliers_for`], never set by hand: speed from
+/// Chefs, unpack from Unpackers, and tech from the research *level* rather than
+/// from the Technologists who bought it.
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub struct Multipliers {
     /// Chefs: shortens travel.
@@ -508,6 +509,18 @@ impl HarvestCycle {
 /// Starvation frequency is set by how hard the player is spending; the period
 /// only sets how much it hurts.
 pub const SUPPORT_MEAL_PERIOD: f64 = 10.0;
+
+/// Stride between successive support monkeys' shift phases, as a share of the
+/// period.
+///
+/// The golden ratio, because it is the stride that spreads N points around a
+/// circle most evenly for *every* N without ever repeating. The first attempt
+/// divided the period by the sprite budget, which gave three phases: monkeys 0,
+/// 3 and 6 ate on exactly the same tick, so at the whitepaper's twenty-one-strong
+/// end state the drain arrived as three lumps per ten seconds rather than as the
+/// smooth 0.10/s it was supposed to buy - and the *economy* changed whenever the
+/// crowd budget did.
+pub const SUPPORT_PHASE_STRIDE: f64 = 0.618_033_988_749_895;
 
 /// Pick multiplier added per research *level* - not per Technologist.
 ///
@@ -1200,16 +1213,19 @@ pub fn plan_hire(kind: UnitKind, state: EconomyState) -> HirePlan {
         workforce,
         carts,
         staff,
-        fed,
         research,
         treasury,
         committed,
         multipliers,
+        // Live fed-ness is what the *snapshot* reports; an offer is priced
+        // against a fed world. See below.
+        fed: _,
     } = state;
     // Hypothetical steady state with everything fed: this is "what would this
     // purchase be worth", not "what is happening right now". A shop that priced
     // a chef against a currently-starving kitchen would quote a number that
-    // buying the chef immediately falsifies.
+    // buying the chef immediately falsifies - which is why `state.fed`, the
+    // live count, is deliberately not read here.
     let all_fed = FedStaff {
         chefs: staff.count(SupportRole::Chef),
         unpackers: staff.count(SupportRole::Unpacker),
@@ -1281,7 +1297,6 @@ pub fn plan_hire(kind: UnitKind, state: EconomyState) -> HirePlan {
         }
     };
 
-    let _ = fed;
     // The one hard gate left in the economy. Everything else is "can you pay";
     // this is "does this exist yet".
     let unlocked = kind != UnitKind::Cart || research.level() >= CART_TECH_REQUIREMENT;
@@ -1295,8 +1310,15 @@ pub fn plan_hire(kind: UnitKind, state: EconomyState) -> HirePlan {
 }
 
 /// How many workers the player is short of a full cart crew.
+///
+/// Spare means "not already promised to a berth", not "not yet aboard". Counting
+/// only the monkeys who have physically boarded lets a second cart bought during
+/// the first one's boarding window see the same three spare workers twice: six
+/// berths, three monkeys, and a cart that can never launch - while the shop
+/// quotes it a bare 70 and projects the gain of a running vehicle.
 pub fn cart_crew_shortfall(workforce: Workforce, carts: Carts) -> u32 {
-    let spare = workforce.count().saturating_sub(carts.crewed());
+    let promised = carts.owned() * CART_CREW;
+    let spare = workforce.count().saturating_sub(promised);
     CART_CREW.saturating_sub(spare.min(CART_CREW))
 }
 
@@ -2260,6 +2282,37 @@ mod tests {
     }
 
     #[test]
+    fn a_second_cart_bought_during_boarding_still_pays_for_its_own_crew() {
+        // `crewed()` is monkeys aboard; berths are monkeys *promised*. Counting
+        // only the boarded ones let a cart bought inside the first one's
+        // boarding window see the same three spare workers twice - six berths,
+        // three monkeys, and a cart that could never launch, quoted at a bare
+        // 70 and projected as if it were running.
+        let workforce = Workforce::from_saved(3).unwrap();
+        let mut carts = Carts::default();
+
+        assert_eq!(cart_crew_shortfall(workforce, carts), 0);
+        assert_eq!(cart_price(workforce, carts), 70.0);
+        carts.buy(0);
+
+        // Nobody has boarded yet, and the three spare monkeys are spoken for.
+        assert_eq!(carts.crewed(), 0);
+        assert_eq!(cart_crew_shortfall(workforce, carts), 3);
+        let bundled = 70.0 * CART_COST_GROWTH
+            + 4.0 * WORKER_COST_GROWTH.powi(3)
+            + 4.0 * WORKER_COST_GROWTH.powi(4)
+            + 4.0 * WORKER_COST_GROWTH.powi(5);
+        assert!((cart_price(workforce, carts) - bundled).abs() < 1e-12);
+
+        // And the berths stay accounted for once they actually fill.
+        for _ in 0..CART_CREW {
+            carts.board();
+        }
+        assert_eq!(carts.berths_open(), 0);
+        assert_eq!(cart_crew_shortfall(workforce, carts), 3);
+    }
+
+    #[test]
     fn a_cart_is_locked_until_the_first_research_level() {
         let m = base();
         let rich = Treasury::from_saved(MAX_SAFE_BANANAS).unwrap();
@@ -2409,6 +2462,42 @@ mod tests {
     }
 
     #[test]
+    fn the_larder_is_the_treasury_less_what_is_already_reserved() {
+        // The blocker this pins. The reservation only survives if *everything*
+        // that draws on the treasury nets it out - including the next tick,
+        // which re-derives the larder from a balance that now contains the meal
+        // `settle` just credited. Get this wrong and support eats reserved
+        // bananas ~98% of the time it matters.
+        let m = base();
+        let spec = CycleSpec::WORKER;
+        let mut treasury = Treasury::default();
+        let mut cycle = HarvestCycle::starting(spec);
+        let mut chef = SupportCycle::starting(0.0);
+        let mut worst = f64::INFINITY;
+        let mut forgiven = 0.0;
+
+        for _ in 0..(600.0 * SIM_HZ) as u32 {
+            // Exactly what `advance_cycles` does.
+            let committed = cycle.earmarked();
+            let mut larder = (treasury.bananas() - committed).max(0.0);
+
+            let out = cycle.advance(SIM_DT, spec, m, CycleTerms::new(spec, m), &mut larder);
+            let eaten = chef.advance(SIM_DT, SupportRole::Chef.meal(), &mut larder);
+
+            treasury.credit(out.delivered);
+            // `settle` charges unconditionally; anything it cannot cover is a
+            // wage silently forgiven, which is the failure mode.
+            let owed = out.eaten + eaten;
+            forgiven += (owed - treasury.bananas()).max(0.0);
+            treasury.charge(owed.min(treasury.bananas()));
+            worst = worst.min(treasury.bananas());
+        }
+
+        assert!(worst >= 0.0, "treasury dipped to {worst}");
+        assert_eq!(forgiven, 0.0, "{forgiven} bananas of wages were forgiven");
+    }
+
+    #[test]
     fn support_eats_exactly_its_wage_per_second_over_a_long_run() {
         // The clock must not drift. `remaining -= dt` two hundred times leaves a
         // binary residual, and a shift that takes 201 ticks instead of 200 puts
@@ -2426,8 +2515,12 @@ mod tests {
             }
 
             let want = role.wage() * seconds;
+            // Tight on purpose. The failure this names - one extra tick per
+            // shift from float drift - costs about five bananas over this run,
+            // and a tolerance of a whole meal would have let a drift two
+            // hundred thousand times smaller than that through unnoticed.
             assert!(
-                (eaten - want).abs() < role.meal(),
+                (eaten - want).abs() < role.meal() * 1e-9,
                 "{role:?} ate {eaten}, expected {want}"
             );
         }

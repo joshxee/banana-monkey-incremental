@@ -674,6 +674,16 @@ its one outstanding cost: both harvest methods now converge to
 Its crew stop drawing their individual 0.03 — a cart is 0.20/s flat, crew
 included.
 
+*The load is the segment.* The box carries a banana-yellow pile scaled to what
+it is holding: it fills across Pick, rides full, drains across Unload, and is
+empty on the way out. Without it the two segments a cart spends 93% of its life
+in look identical — a still brown box parked at the grove for 67 s and a still
+brown box parked at the depot for 100 s — and §2's whole argument for the cart
+("it barely travels and instead sits at the depot being emptied") is invisible.
+The Unpacker purchase only explains itself if the player can watch the emptying.
+It also separates the cart from the Unpacker's crate, which is otherwise a second
+brown rectangle a hundred pixels away.
+
 *Presentation.* The cart has **no depth lane**, because there is none left: the
 three worker lanes already reach 12 texels of a 16-texel grass band and a fourth
 would stand a sprite on the sky. It separates by drawing *in front* instead,
@@ -694,10 +704,14 @@ when it means the second - and its message cell spans the three stat columns it
 has no values for, because a locked unit has no rate, no meal and no count but
 does have one thing worth saying:
 
-| technologists | message | plaque |
+| technologists | plaque | message |
 |---|---|---|
-| 0 | `NEEDS A TECHNOLOGIST` | `LOCKED` |
-| ≥1 | `RESEARCH 34/60` | `41%` |
+| 0 | `LOCKED` | `NEEDS A TECHNOLOGIST` |
+| ≥1 | `LOCKED` | `RESEARCH 34/60` |
+
+The plaque stays `LOCKED` throughout; the counter carries the progress. A
+percentage beside a fraction would say the same thing twice in a table whose
+whole job is one fact per column.
 
 The first string names **the Technologist**, not "cart technology". The
 technologist is a row one above with a button on it; a sentence that points at

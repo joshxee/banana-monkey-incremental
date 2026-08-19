@@ -20,7 +20,7 @@
 use bevy::prelude::*;
 
 use crate::{
-    domain::{SUPPORT_MEAL_PERIOD, Staff, SupportCycle, SupportRole},
+    domain::{SUPPORT_MEAL_PERIOD, SUPPORT_PHASE_STRIDE, Staff, SupportCycle, SupportRole},
     game::{CREAM, GOLD, SceneLayout},
     worker::WorkerArt,
 };
@@ -216,7 +216,7 @@ pub(crate) fn spawn_missing_support(
         );
 
         for index in current..target {
-            let phase = index as f64 * SUPPORT_MEAL_PERIOD / AVATARS_PER_ROLE as f64;
+            let phase = index as f64 * SUPPORT_MEAL_PERIOD * SUPPORT_PHASE_STRIDE;
             commands.spawn((SupportUnit, role, SupportCycle::starting(phase)));
         }
     }

@@ -39,13 +39,18 @@ fn main() {
         );
 
     let run = persistence::load_run();
-    let restored_workers = run.workforce.count();
+    // The *pool*, not the workforce: crewed monkeys get no avatar, so counting
+    // them here leaves the restore budget unspent and the next workers the
+    // player actually buys spawn as restored ghosts - placed at a random point
+    // on the route, no hire flash, and producing nothing for a full cycle.
+    let restored_workers = run.workforce.count().saturating_sub(run.carts.crewed());
     app.insert_resource(run.treasury)
         .insert_resource(run.workforce)
         .insert_resource(run.staff)
         .insert_resource(run.research)
         .insert_resource(run.carts)
         .insert_resource(worker::RestoreWorkers::new(restored_workers))
+        .insert_resource(worker::RestoreCarts::new(run.carts.running()))
         .add_plugins(HarvestGamePlugin)
         .run();
 }

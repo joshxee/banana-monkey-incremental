@@ -154,7 +154,12 @@ fn decode(raw: &str) -> Option<SavedRun> {
         // then re-persisted, so the tab never recovers.
         staff: Staff::from_saved(data.chefs, data.unpackers, data.technologists)?,
         research: Research::from_saved(data.research)?,
-        carts: Carts::from_saved(data.carts, data.crewed)?,
+        // Cross-field, so it cannot live inside `Carts::from_saved`: a crew
+        // larger than the workforce would put a running cart on an empty
+        // payroll, harvesting for free.
+        carts: (data.crewed <= data.workers)
+            .then(|| Carts::from_saved(data.carts, data.crewed))
+            .flatten()?,
     })
 }
 
@@ -359,6 +364,10 @@ mod tests {
         assert!(decode(&crewed(2, 6)).is_some());
         assert_eq!(decode(&crewed(2, 7)), None);
         assert_eq!(decode(&crewed(0, 1)), None);
+        // Nine workers is exactly enough for three carts, and not enough for
+        // four - a crew the workforce cannot supply is a tampered save.
+        assert!(decode(&crewed(3, 9)).is_some());
+        assert_eq!(decode(&crewed(4, 10)), None);
     }
 
     #[test]

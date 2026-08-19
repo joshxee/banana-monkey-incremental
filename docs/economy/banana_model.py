@@ -192,7 +192,14 @@ def gross(s, p):
 
 
 def salary(s, p):
-    return (s.W * p.w_salary + s.C * p.c_salary + s.U * p.u_salary
+    """Crewed monkeys do not draw a worker's wage (D23).
+
+    A cart is 0.20/sec flat, crew included - so counting the whole workforce at
+    0.03 *and* adding the cart wage on top charges the crew twice. Measured at
+    the session-end state (W=25, A=18) that was 0.54/sec, 5.3% of net, and it
+    biased every payback ranking a cart appeared in.
+    """
+    return ((s.W - s.A) * p.w_salary + s.C * p.c_salary + s.U * p.u_salary
             + s.X * p.x_salary + p.k_salary * crewed(s, p) / p.k_crew)
 
 
@@ -280,6 +287,19 @@ def unfunded_salary(s, p):
     return (salary(s, p)
             - (s.W - s.A) * p.w_salary
             - p.k_salary * crewed(s, p) / p.k_crew)
+
+
+def _partial_crew_is_deleted():
+    """D8 is deleted: a cart is crewed by exactly three monkeys or it does not
+    run. `crewed()` still clamps to capacity, but there is no such thing as a
+    one-third cart, and `Carts::running()` in the game is `crewed // 3`.
+
+    `discrete_run` and `cart_delivery_trace` below still carry the fractional
+    payload machinery. It is harmless - `assign` fills whole crews first, so the
+    fraction is only reachable when the pool cannot fill the last cart, which the
+    game now prevents at purchase - but it is dead weight and is flagged here so
+    it is not mistaken for current design.
+    """
 
 
 def committed(s, p):

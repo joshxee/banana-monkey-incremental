@@ -16,7 +16,7 @@ use crate::{
     domain::{
         CART_CREW, Carts, CycleSpec, HarvestCycle, Multipliers, Segment, Workforce, cycle_time,
     },
-    game::SceneLayout,
+    game::{Delivery, DeliveryKind, DeliveryQueue, SceneLayout},
 };
 
 const FRAME_SIZE: u32 = 32;
@@ -61,6 +61,34 @@ pub struct Cart;
 /// presentation state through the existing segment rules.
 #[derive(Component)]
 pub(crate) struct RestoredCycle;
+
+/// How many carts still need a restored phase, and the source of those phases.
+/// Mirrors [`RestoreWorkers`]; see `spawn_missing_carts` for why a cart needs it
+/// far more than a worker does.
+#[derive(Resource)]
+pub struct RestoreCarts {
+    remaining: u32,
+    rng: fastrand::Rng,
+}
+
+impl RestoreCarts {
+    pub fn new(remaining: u32) -> Self {
+        Self {
+            remaining,
+            rng: fastrand::Rng::new(),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.remaining = 0;
+    }
+}
+
+impl Default for RestoreCarts {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
 
 /// The next lane index to hand out. Monotonic, so an index is never reused.
 #[derive(Resource, Debug, Default)]
@@ -556,7 +584,9 @@ mod tests {
 pub fn spawn_missing_carts(
     mut commands: Commands,
     carts: Res<Carts>,
+    multipliers: Res<Multipliers>,
     art: Option<Res<WorkerArt>>,
+    mut restored: ResMut<RestoreCarts>,
     existing: Query<Entity, With<Cart>>,
 ) {
     let Some(art) = art else {
@@ -564,54 +594,94 @@ pub fn spawn_missing_carts(
     };
     let current = existing.iter().count() as u32;
     for index in current..carts.owned() {
-        commands
-            .spawn((
-                Cart,
-                Boarding,
+        // A restored cart gets a random elapsed phase, exactly as a restored
+        // worker does. Starting it at zero would be far worse than for a worker:
+        // a cart cycle is 189 s and 200 bananas, so every reload would discard
+        // up to a whole trip, and a player whose session cadence is shorter than
+        // a cart cycle would get *zero* cart income, permanently, with nothing
+        // on screen to explain it. `RestoredCycle` keeps the placement from
+        // creating income on that first partial trip.
+        let was_restored = restored.remaining > 0;
+        let cycle = if was_restored {
+            restored.remaining -= 1;
+            HarvestCycle::from_phase(
+                restored.rng.f64() * cycle_time(CycleSpec::CART, *multipliers),
                 CycleSpec::CART,
-                HarvestCycle::starting(CycleSpec::CART),
-                CartIndex(index),
-                Sprite::from_color(CART_BOX, CART_BOX_TEXELS),
-                Transform::default(),
-            ))
-            .with_children(|cart| {
-                // Riders are *children* of the box, which buys two things: their
-                // position and scale come from the parent for free, and a
-                // restart that despawns the cart takes them with it. Spawned
-                // separately they outlived it, and the next cart bought found
-                // its seats already occupied by ghosts.
-                //
-                // Three of them, always. A cart is crewed by exactly three
-                // monkeys or it does not run, so the sprite count is not a
-                // staffing readout - it is a fill gauge while boarding, and the
-                // whole crew afterwards.
-                for seat in 0..CART_CREW {
-                    let offset = (seat as f32 - (CART_CREW as f32 - 1.0) * 0.5) * SEAT_STEP_TEXELS;
-                    cart.spawn((
-                        CartSeat { cart: index, seat },
-                        Sprite {
-                            image: art.idle_image(),
-                            texture_atlas: Some(TextureAtlas {
-                                layout: art.idle_layout(),
-                                index: 0,
-                            }),
-                            flip_x: true,
-                            ..default()
-                        },
-                        // Sitting in the box: feet behind its front wall, heads
-                        // clear of the top. Local texels, so the parent's world
-                        // scale applies without this having to know it.
-                        Transform::from_xyz(offset, FRAME_SIZE as f32 * 0.30, -0.001),
-                        Visibility::Hidden,
-                    ));
-                }
-            });
+                *multipliers,
+            )
+        } else {
+            HarvestCycle::starting(CycleSpec::CART)
+        };
+        let mut cart = commands.spawn((
+            Cart,
+            Boarding,
+            CycleSpec::CART,
+            cycle,
+            CartIndex(index),
+            Sprite::from_color(CART_BOX, CART_BOX_TEXELS),
+            Transform::default(),
+        ));
+        if was_restored {
+            cart.insert(RestoredCycle);
+        }
+        cart.with_children(|cart| {
+            cart.spawn((
+                CartLoad,
+                Sprite::from_color(CART_LOAD, CART_LOAD_TEXELS),
+                // Behind the box's front wall and in front of the riders, so
+                // the pile reads as being *in* the cart.
+                Transform::from_xyz(0.0, 0.0, 0.001),
+                Visibility::Hidden,
+            ));
+            // Riders are *children* of the box, which buys two things: their
+            // position and scale come from the parent for free, and a
+            // restart that despawns the cart takes them with it. Spawned
+            // separately they outlived it, and the next cart bought found
+            // its seats already occupied by ghosts.
+            //
+            // Three of them, always. A cart is crewed by exactly three
+            // monkeys or it does not run, so the sprite count is not a
+            // staffing readout - it is a fill gauge while boarding, and the
+            // whole crew afterwards.
+            for seat in 0..CART_CREW {
+                let offset = (seat as f32 - (CART_CREW as f32 - 1.0) * 0.5) * SEAT_STEP_TEXELS;
+                cart.spawn((
+                    CartSeat { cart: index, seat },
+                    Sprite {
+                        image: art.idle_image(),
+                        texture_atlas: Some(TextureAtlas {
+                            layout: art.idle_layout(),
+                            index: 0,
+                        }),
+                        flip_x: true,
+                        ..default()
+                    },
+                    // Sitting in the box: feet behind its front wall, heads
+                    // clear of the top. Local texels, so the parent's world
+                    // scale applies without this having to know it.
+                    Transform::from_xyz(offset, FRAME_SIZE as f32 * 0.30, -0.001),
+                    Visibility::Hidden,
+                ));
+            }
+        });
     }
 }
 
 /// A cart that is still filling up.
 #[derive(Component)]
 pub struct Boarding;
+
+/// The pile of bananas inside a cart, scaled to what it is currently carrying.
+///
+/// Without it the two segments a cart spends 93% of its life in look identical:
+/// a still brown box parked at the grove for 67 s and a still brown box parked
+/// at the depot for 100 s. The whitepaper's whole cart argument is "it barely
+/// travels and instead sits at the depot being emptied", and the Unpacker
+/// purchase only explains itself if the player can see the emptying. Every
+/// other actor signals its segment - run pose, carried banana, hunger pulse -
+/// and the cart signalled nothing.
+#[derive(Component)]
+pub struct CartLoad;
 
 /// Which cart this is, so seats can find their box without a parent lookup.
 #[derive(Component, Debug, Clone, Copy)]
@@ -629,6 +699,13 @@ pub struct CartSeat {
 /// "three monkeys in a box", so the box must not swallow them.
 const CART_BOX_TEXELS: Vec2 = Vec2::new(52.0, 15.0);
 const CART_BOX: Color = Color::srgb(0.55, 0.33, 0.14);
+/// The bananas piled in the box. Banana-yellow, and the only large yellow mass
+/// in the scene, so a loaded cart is distinguishable from the Unpacker's crate
+/// at a glance - the two are otherwise both brown rectangles at the depot.
+const CART_LOAD: Color = Color::srgb(0.98, 0.82, 0.20);
+/// The load, at full payload, in source texels. Inset so the box's own walls
+/// still read as walls.
+const CART_LOAD_TEXELS: Vec2 = Vec2::new(46.0, 9.0);
 /// Seat spacing inside the box.
 const SEAT_STEP_TEXELS: f32 = 15.0;
 
@@ -644,6 +721,7 @@ const SEAT_STEP_TEXELS: f32 = 15.0;
 pub fn board_carts(
     mut commands: Commands,
     mut carts: ResMut<Carts>,
+    mut queue: ResMut<DeliveryQueue>,
     at_stall: Query<(Entity, &HarvestCycle), With<Worker>>,
 ) {
     let mut berths = carts.berths_open();
@@ -655,11 +733,21 @@ pub fn board_carts(
         if berths == 0 {
             break;
         }
-        // Snack is the moment a worker is standing still at the stall having
-        // just been paid - the one point in the cycle where it owes nothing and
-        // is carrying nothing.
+        // Snack is the moment a worker is standing still at the stall - the one
+        // point in the cycle where it is carrying nothing and going nowhere.
         if cycle.segment() != Segment::Snack {
             continue;
+        }
+        // It does still *owe* something: the meal reserved out of the delivery
+        // it has just made. Despawning without settling that would hand the
+        // monkey a free lunch on its way aboard, which is the one thing D18
+        // refuses to allow - and it would leave `Committed` describing a
+        // reservation no entity holds.
+        if cycle.earmarked() > 0.0 {
+            queue.entries.push(Delivery {
+                amount: cycle.earmarked(),
+                kind: DeliveryKind::Snack,
+            });
         }
         commands.entity(entity).despawn();
         carts.board();
@@ -681,20 +769,44 @@ pub fn launch_crewed_carts(
     }
 }
 
+/// Every cart on the route, and whether it has launched.
+type CartAvatarQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static HarvestCycle,
+        Option<&'static Boarding>,
+        &'static mut Transform,
+    ),
+    (With<Cart>, Without<CartLoad>),
+>;
+
 /// Position every cart, and reveal the riders that have boarded.
 ///
 /// Only the box is placed: the seats are its children, so their offsets and
 /// scale follow for free. All this loop decides is how many of them are visible.
 pub fn position_carts(
+    time: Res<Time>,
     layout: Res<SceneLayout>,
     multipliers: Res<Multipliers>,
     carts_res: Res<Carts>,
-    mut carts: Query<(&HarvestCycle, Option<&Boarding>, &mut Transform), With<Cart>>,
-    mut seats: Query<(&CartSeat, &mut Visibility)>,
+    mut carts: CartAvatarQuery,
+    mut seats: Query<(&CartSeat, &mut Visibility, &mut Sprite), Without<CartLoad>>,
+    mut loads: Query<(&ChildOf, &mut Transform, &mut Visibility, &mut Sprite), With<CartLoad>>,
 ) {
     let scale = layout.world_scale();
+    // The crew rides the same idle sheet everyone else is animated on. Frozen on
+    // frame zero inside a moving box they read as a rendering fault rather than
+    // as passengers, since every other monkey on screen is breathing.
+    let frame = ((time.elapsed_secs() * IDLE_FPS) as usize) % IDLE_FRAMES;
+    // Which way the crew faces. A cart heading out to the grove is travelling
+    // left, so a permanently flipped rider rides backwards for half the trip.
+    let mut facing_left = true;
 
-    for (cycle, boarding, mut transform) in &mut carts {
+    let mut carried: Vec<(Entity, f32)> = Vec::new();
+
+    for (entity, cycle, boarding, mut transform) in &mut carts {
         let progress = cycle.segment_fraction(CycleSpec::CART, *multipliers) as f32;
         // Its own bay at each end, on the *inside* of the route: pushed left at
         // the depot and right at the grove, so the cart never parks on the
@@ -722,9 +834,60 @@ pub fn position_carts(
             1.5,
         );
         transform.scale = Vec3::splat(scale);
+        facing_left = !matches!(cycle.segment(), Segment::ToDepot) || boarding.is_some();
+
+        // How full the box is, 0..=1. Rises as it is picked, stays full for the
+        // ride home, drains as it is unloaded, and is empty on the way out.
+        let load = if boarding.is_some() {
+            0.0
+        } else {
+            match cycle.segment() {
+                Segment::ToGrove => 0.0,
+                Segment::Pick => progress,
+                Segment::ToDepot => 1.0,
+                Segment::Unload => 1.0 - progress,
+                Segment::Snack => 0.0,
+            }
+        };
+        carried.push((entity, load));
     }
 
-    for (seat, mut visibility) in &mut seats {
+    for (parent, mut transform, mut visibility, mut sprite) in &mut loads {
+        let load = carried
+            .iter()
+            .find(|(entity, _)| *entity == parent.parent())
+            .map_or(0.0, |(_, load)| *load);
+        let wanted = if load > 0.01 {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != wanted {
+            *visibility = wanted;
+        }
+        // Grows from the floor of the box rather than from its centre, so a
+        // half-load sits in the bottom half like a pile rather than floating.
+        let height = CART_LOAD_TEXELS.y * load;
+        let size = Vec2::new(CART_LOAD_TEXELS.x, height);
+        if sprite.custom_size != Some(size) {
+            sprite.custom_size = Some(size);
+        }
+        let y = -CART_LOAD_TEXELS.y * 0.5 + height * 0.5;
+        if transform.translation.y != y {
+            transform.translation.y = y;
+        }
+    }
+
+    for (seat, mut visibility, mut sprite) in &mut seats {
+        if let Some(atlas) = sprite.texture_atlas.as_mut()
+            && atlas.index != frame
+        {
+            atlas.index = frame;
+        }
+        if sprite.flip_x != facing_left {
+            sprite.flip_x = facing_left;
+        }
+
         // A seat fills only once its monkey has actually climbed aboard, so an
         // empty box visibly gains riders one at a time. That filling is the only
         // feedback during the boarding wait, and the wait is the longest dead
