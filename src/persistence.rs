@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Treasury, Workforce};
+use crate::domain::{Staff, Treasury, Workforce};
 
-const SAVE_VERSION: u32 = 2;
+const SAVE_VERSION: u32 = 3;
 // The storage key is a namespace, not a schema version: it deliberately stays
 // at `v1` across schema bumps so that existing players keep their progress.
 // Bump it only to orphan every save on purpose.
@@ -21,6 +21,7 @@ const WEB_STORAGE_KEY: &str = "banana-monkey-incremental.save-v1";
 pub struct SavedRun {
     pub treasury: Treasury,
     pub workforce: Workforce,
+    pub staff: Staff,
 }
 
 /// Read just enough to route to the right schema. Untagged deserialisation
@@ -37,21 +38,47 @@ struct SaveV1 {
     bananas: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+/// Bananas were fractional and workers existed, but nobody else did.
+#[derive(Debug, Deserialize)]
 struct SaveV2 {
-    version: u32,
-    /// Fractional, because wages drain continuously. Never round on the way in
-    /// or out: flooring here would burn up to a banana on every reload.
     bananas: f64,
     workers: u32,
 }
 
-impl From<SaveV1> for SaveV2 {
+#[derive(Debug, Deserialize, Serialize)]
+struct SaveV3 {
+    version: u32,
+    /// Fractional, because meals are. Never round on the way in or out:
+    /// flooring here would burn up to a banana on every reload.
+    bananas: f64,
+    workers: u32,
+    chefs: u32,
+    unpackers: u32,
+    technologists: u32,
+}
+
+impl From<SaveV1> for SaveV3 {
     fn from(old: SaveV1) -> Self {
         Self {
             version: SAVE_VERSION,
             bananas: old.bananas as f64,
             workers: 0,
+            chefs: 0,
+            unpackers: 0,
+            technologists: 0,
+        }
+    }
+}
+
+impl From<SaveV2> for SaveV3 {
+    fn from(old: SaveV2) -> Self {
+        Self {
+            version: SAVE_VERSION,
+            bananas: old.bananas,
+            workers: old.workers,
+            chefs: 0,
+            unpackers: 0,
+            technologists: 0,
         }
     }
 }
@@ -75,25 +102,36 @@ pub fn store_run(run: SavedRun) -> Result<(), String> {
 }
 
 fn encode(run: SavedRun) -> String {
-    serde_json::to_string(&SaveV2 {
+    use crate::domain::SupportRole;
+    serde_json::to_string(&SaveV3 {
         version: SAVE_VERSION,
         bananas: run.treasury.bananas(),
         workers: run.workforce.count(),
+        chefs: run.staff.count(SupportRole::Chef),
+        unpackers: run.staff.count(SupportRole::Unpacker),
+        technologists: run.staff.count(SupportRole::Technologist),
     })
     .expect("valid run state always serializes")
 }
 
 fn decode(raw: &str) -> Option<SavedRun> {
     let probe: VersionProbe = serde_json::from_str(raw).ok()?;
-    let data: SaveV2 = match probe.version {
-        1 => serde_json::from_str::<SaveV1>(raw).ok()?.into(),
-        2 => serde_json::from_str(raw).ok()?,
+    // Chained rather than parallel, so each schema only has to know about the
+    // one after it.
+    let data: SaveV3 = match probe.version {
+        1 => SaveV3::from(serde_json::from_str::<SaveV1>(raw).ok()?),
+        2 => SaveV3::from(serde_json::from_str::<SaveV2>(raw).ok()?),
+        3 => serde_json::from_str(raw).ok()?,
         _ => return None,
     };
 
     Some(SavedRun {
         treasury: Treasury::from_saved(data.bananas)?,
         workforce: Workforce::from_saved(data.workers)?,
+        // Validated like the rest: local storage is player-writable, and an
+        // unchecked count spawns that many entities in a single tick and is
+        // then re-persisted, so the tab never recovers.
+        staff: Staff::from_saved(data.chefs, data.unpackers, data.technologists)?,
     })
 }
 
@@ -180,15 +218,20 @@ mod tests {
     use crate::domain::MAX_SAFE_BANANAS;
 
     fn run(bananas: f64, workers: u32) -> SavedRun {
+        staffed(bananas, workers, 0, 0, 0)
+    }
+
+    fn staffed(bananas: f64, workers: u32, c: u32, u: u32, x: u32) -> SavedRun {
         SavedRun {
             treasury: Treasury::from_saved(bananas).unwrap(),
             workforce: Workforce::from_saved(workers).unwrap(),
+            staff: Staff::from_saved(c, u, x).unwrap(),
         }
     }
 
     #[test]
     fn save_round_trip_preserves_the_run() {
-        let saved = run(123.0, 7);
+        let saved = staffed(123.0, 7, 2, 3, 1);
 
         assert_eq!(decode(&encode(saved)), Some(saved));
     }
@@ -208,11 +251,29 @@ mod tests {
     }
 
     #[test]
+    fn version_2_saves_keep_their_workers_and_arrive_unstaffed() {
+        // The schema that shipped before support staff existed. Its workforce
+        // has to survive intact - this is a live player's run - and it can only
+        // arrive with an empty payroll.
+        assert_eq!(
+            decode(r#"{"version":2,"bananas":12.5,"workers":6}"#),
+            Some(staffed(12.5, 6, 0, 0, 0))
+        );
+    }
+
+    #[test]
     fn missing_fields_and_unknown_versions_are_rejected() {
         assert_eq!(decode("{}"), None);
         assert_eq!(decode(r#"{"version":2,"bananas":3}"#), None);
         assert_eq!(decode(r#"{"version":2,"workers":1}"#), None);
+        // A v3 payload missing any of its required fields is still rejected,
+        // which is what this assertion was protecting before v3 existed.
         assert_eq!(decode(r#"{"version":3,"bananas":3,"workers":1}"#), None);
+        assert_eq!(
+            decode(r#"{"version":3,"bananas":3,"workers":1,"chefs":1,"unpackers":1}"#),
+            None
+        );
+        assert_eq!(decode(r#"{"version":4,"bananas":3,"workers":1}"#), None);
         // A v1 payload must not be read as a v2 one.
         assert_eq!(decode(r#"{"version":1,"bananas":1.5}"#), None);
     }
@@ -236,6 +297,16 @@ mod tests {
             None
         );
         assert_eq!(decode(r#"{"version":2,"bananas":1e999,"workers":0}"#), None);
+        // Support counts are player-writable too, and each one drives a spawn
+        // loop of its own.
+        let staffed_payload = |c: &str| {
+            format!(
+                r#"{{"version":3,"bananas":1,"workers":0,"chefs":{c},"unpackers":0,"technologists":0}}"#
+            )
+        };
+        assert_eq!(decode(&staffed_payload("-1")), None);
+        assert_eq!(decode(&staffed_payload("4000000000")), None);
+        assert!(decode(&staffed_payload("3")).is_some());
     }
 
     #[test]

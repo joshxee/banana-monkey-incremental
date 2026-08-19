@@ -10,10 +10,12 @@ use bevy::{
 
 use crate::{
     domain::{
-        BANANAS_PER_HARVEST, CycleSpec, CycleTerms, EconomySnapshot, HarvestCycle, Multipliers,
-        SIM_HZ, Treasury, Workforce, plan_hire, restart_run,
+        BANANAS_PER_HARVEST, Committed, CycleSpec, CycleTerms, EconomySnapshot, FedStaff,
+        HarvestCycle, Multipliers, SIM_HZ, Staff, SupportCycle, SupportRole, Treasury, UnitKind,
+        Workforce, multipliers_for, plan_hire, restart_run,
     },
     hud, persistence,
+    support::{self, SupportUnit},
     worker::{self, RestoredCycle, Worker},
 };
 
@@ -65,6 +67,10 @@ pub struct HarvestGamePlugin;
 enum Sim {
     Purchase,
     Spawn,
+    /// Stage 4. Derives `M_speed`/`M_unpack`/`M_tech` from the world, between
+    /// spawning and advancing, so every cycle in a tick runs at the same
+    /// multipliers and the readout projects the ones that were actually used.
+    Multipliers,
     Advance,
     Settle,
     Snapshot,
@@ -83,6 +89,9 @@ impl Plugin for HarvestGamePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SceneLayout>()
             .init_resource::<Multipliers>()
+            .init_resource::<Staff>()
+            .init_resource::<FedStaff>()
+            .init_resource::<Committed>()
             .init_resource::<EconomySnapshot>()
             .init_resource::<HarvestController>()
             .init_resource::<PendingSettlement>()
@@ -92,6 +101,7 @@ impl Plugin for HarvestGamePlugin {
             .init_resource::<PersistenceDirty>()
             .init_resource::<Feedback>()
             .init_resource::<MenuState>()
+            .init_resource::<hud::StoreExpanded>()
             .init_resource::<PointerGuard>()
             .init_resource::<DiagnosticPointerTrace>()
             .insert_resource(Time::<Fixed>::from_hz(SIM_HZ))
@@ -102,6 +112,7 @@ impl Plugin for HarvestGamePlugin {
                 (
                     Sim::Purchase,
                     Sim::Spawn,
+                    Sim::Multipliers,
                     Sim::Advance,
                     Sim::Settle,
                     Sim::Snapshot,
@@ -124,7 +135,12 @@ impl Plugin for HarvestGamePlugin {
                     (apply_restart, apply_purchases)
                         .chain()
                         .in_set(Sim::Purchase),
-                    worker::spawn_missing_workers.in_set(Sim::Spawn),
+                    (
+                        worker::spawn_missing_workers,
+                        support::spawn_missing_support,
+                    )
+                        .in_set(Sim::Spawn),
+                    recompute_multipliers.in_set(Sim::Multipliers),
                     advance_cycles.in_set(Sim::Advance),
                     settle.in_set(Sim::Settle),
                     snapshot_economy.in_set(Sim::Snapshot),
@@ -150,6 +166,7 @@ impl Plugin for HarvestGamePlugin {
                 (
                     (handle_menu, hud::sync_menu_visibility).chain(),
                     handle_harvest_input,
+                    hud::scroll_store,
                     move_keyboard_harvest,
                     queue_manual_settlement,
                 )
@@ -161,6 +178,8 @@ impl Plugin for HarvestGamePlugin {
                 (
                     worker::position_workers,
                     worker::animate_workers,
+                    support::sync_support_avatars,
+                    support::sync_support_badges,
                     animate_banana,
                     update_feedback,
                     update_floaters,
@@ -241,7 +260,8 @@ enum LayoutElement {
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ButtonAction {
     OpenMenu,
-    HireWorker,
+    Hire(UnitKind),
+    ToggleStore,
     Resume,
     #[cfg(target_arch = "wasm32")]
     Diagnostics,
@@ -256,7 +276,9 @@ impl ButtonAction {
     /// a tap on the scrim would reach the shop card underneath it.
     fn active_in(self, menu: MenuState) -> bool {
         match self {
-            ButtonAction::OpenMenu | ButtonAction::HireWorker => menu == MenuState::Closed,
+            ButtonAction::OpenMenu | ButtonAction::Hire(_) | ButtonAction::ToggleStore => {
+                menu == MenuState::Closed
+            }
             ButtonAction::Resume | ButtonAction::Restart => menu == MenuState::Open,
             #[cfg(target_arch = "wasm32")]
             ButtonAction::Diagnostics => menu == MenuState::Open,
@@ -329,7 +351,7 @@ impl SceneLayout {
             ),
             ground_top,
             grove_stand: harvest.x + zone_size * 0.30,
-            stall_stand: deposit.x - zone_size * 0.34,
+            stall_stand: deposit.x - zone_size * 0.44,
             world_scale: zone_size / 128.0,
         }
     }
@@ -338,6 +360,35 @@ impl SceneLayout {
     /// toward the camera; stepping up would stand a monkey on the sky.
     pub(crate) fn ground_top(self) -> f32 {
         self.ground_top
+    }
+
+    pub(crate) fn world_scale(self) -> f32 {
+        self.world_scale
+    }
+
+    /// Where each support role stands, as a ground-plane x and a depth row.
+    ///
+    /// All three are stations around the deposit rather than points on the
+    /// route, and they are laid out left to right in the order the cycle
+    /// touches them: a worker arrives, is unloaded, is fed, and the research
+    /// desk sits behind the whole business. Everything faces left, into the
+    /// traffic.
+    ///
+    /// The Technologist is clamped inside the viewport because at 320 px the
+    /// deposit's own zone is already against the right edge, so an unclamped
+    /// desk would sit off-screen on a phone.
+    pub(crate) fn support_stand(self, role: SupportRole) -> (f32, u32) {
+        let (offset, row) = match role {
+            // Nearest the arriving workers: it is the one clearing the depot.
+            SupportRole::Unpacker => (-0.30, 0),
+            // Under the sign, where the eating already happens.
+            SupportRole::Chef => (-0.02, 1),
+            // Behind the deposit, at the back of the ground plane.
+            SupportRole::Technologist => (0.28, 2),
+        };
+        let x = self.deposit.x + self.zone_size * offset;
+        let limit = self.viewport.x * 0.5 - self.zone_size * 0.22;
+        (x.min(limit), row)
     }
 
     pub(crate) fn stall_glow_anchor(self) -> Vec2 {
@@ -417,18 +468,20 @@ enum DeliveryKind {
     Worker,
     /// A worker ate its wage, out of the delivery it just made.
     Snack,
+    /// A support monkey ate its wage, out of whatever surplus there was.
+    Wage,
 }
 
 impl DeliveryKind {
     fn is_income(self) -> bool {
-        !matches!(self, DeliveryKind::Snack)
+        !matches!(self, DeliveryKind::Snack | DeliveryKind::Wage)
     }
 }
 
 /// Counted rather than a flag, so clicking twice between two fixed ticks does
 /// not silently drop a purchase.
 #[derive(Resource, Debug, Default)]
-pub(crate) struct HireRequests(pub(crate) u32);
+pub(crate) struct HireRequests(pub(crate) Vec<UnitKind>);
 
 #[derive(Resource, Debug, Default)]
 struct RestartRequest(bool);
@@ -755,21 +808,37 @@ fn apply_test_time_scale() {}
 
 /// Stage 1. [`Treasury`] is written here and in [`settle`], both inside
 /// `FixedUpdate`; no presentation system may write it.
+#[allow(clippy::too_many_arguments)]
 fn apply_purchases(
     mut requests: ResMut<HireRequests>,
     mut treasury: ResMut<Treasury>,
     mut workforce: ResMut<Workforce>,
+    mut staff: ResMut<Staff>,
     mut dirty: ResMut<PersistenceDirty>,
+    fed: Res<FedStaff>,
+    committed: Res<Committed>,
     multipliers: Res<Multipliers>,
 ) {
-    let requested = std::mem::take(&mut requests.0);
-    for _ in 0..requested {
-        let plan = plan_hire(*workforce, *treasury, *multipliers);
+    for kind in std::mem::take(&mut requests.0) {
+        let plan = plan_hire(
+            kind,
+            *workforce,
+            *staff,
+            *fed,
+            *treasury,
+            committed.0,
+            *multipliers,
+        );
+        // `continue`, not `break`: the requests are heterogeneous now, so an
+        // unaffordable chef says nothing about the worker queued behind it.
         if !plan.affordable {
-            break;
+            continue;
         }
         treasury.charge(plan.cost);
-        workforce.hire();
+        match kind {
+            UnitKind::Worker => workforce.hire(),
+            UnitKind::Support(role) => staff.hire(role),
+        }
         dirty.mark_immediate();
     }
 }
@@ -782,22 +851,24 @@ fn apply_restart(
     mut commands: Commands,
     mut treasury: ResMut<Treasury>,
     mut workforce: ResMut<Workforce>,
+    mut staff: ResMut<Staff>,
     mut queue: ResMut<DeliveryQueue>,
     mut requests: ResMut<HireRequests>,
     mut dirty: ResMut<PersistenceDirty>,
     mut restored: ResMut<worker::RestoreWorkers>,
     workers: Query<Entity, With<Worker>>,
+    support: Query<Entity, With<SupportUnit>>,
     floaters: Query<Entity, With<Floater>>,
 ) {
     if !std::mem::take(&mut request.0) {
         return;
     }
 
-    restart_run(&mut treasury, &mut workforce);
+    restart_run(&mut treasury, &mut workforce, &mut staff);
     restored.clear();
     queue.entries.clear();
-    requests.0 = 0;
-    for entity in &workers {
+    requests.0.clear();
+    for entity in workers.iter().chain(&support) {
         commands.entity(entity).despawn();
     }
     // Otherwise up to 0.9 s of "+5" keeps rising over a stall that just went
@@ -821,7 +892,13 @@ fn advance_cycles(
     multipliers: Res<Multipliers>,
     treasury: Res<Treasury>,
     mut queue: ResMut<DeliveryQueue>,
-    mut workers: Query<(Entity, &mut HarvestCycle, &CycleSpec, Option<&RestoredCycle>)>,
+    mut workers: Query<(
+        Entity,
+        &mut HarvestCycle,
+        &CycleSpec,
+        Option<&RestoredCycle>,
+    )>,
+    mut support: Query<(&SupportRole, &mut SupportCycle)>,
     mut commands: Commands,
 ) {
     // f64 from the fixed clock. `delta_secs()` is f32, which would make the
@@ -869,6 +946,29 @@ fn advance_cycles(
             });
         }
     }
+
+    // Support staff eat last, and only out of what the harvesters did not
+    // reserve for themselves. `larder` already excludes every earmarked meal,
+    // so no amount of hiring can starve a monkey that has just delivered.
+    //
+    // Within support, the order is `SupportRole::FEEDING_ORDER` rather than
+    // query order: Bevy's iteration order is stable within a run but changes
+    // whenever an archetype moves, and an economy whose feeding priority
+    // depended on that would be silently non-reproducible.
+    for role in SupportRole::FEEDING_ORDER {
+        for (unit, mut cycle) in &mut support {
+            if *unit != role {
+                continue;
+            }
+            let eaten = cycle.advance(dt, role.meal(), &mut larder);
+            if eaten > 0.0 {
+                queue.entries.push(Delivery {
+                    amount: eaten,
+                    kind: DeliveryKind::Wage,
+                });
+            }
+        }
+    }
 }
 
 /// Stage 6. The queue is settled strictly in the order it was filled, which is
@@ -896,7 +996,7 @@ fn settle(
                 // retry backoff every time.
                 dirty.mark_pending();
             }
-            DeliveryKind::Snack => {
+            DeliveryKind::Snack | DeliveryKind::Wage => {
                 treasury.charge(delivery.amount);
                 dirty.mark_pending();
             }
@@ -915,18 +1015,49 @@ fn settle(
     }
 }
 
-/// Stage 7. Counted from the world rather than from `Workforce`, because a
-/// stalled worker is still hired: the count cannot tell you how many are
-/// actually working, and reporting a rate the world is not producing is what
-/// the readout used to get wrong.
+/// Stage 4. Fed-ness is read off the world, never off the head count: an idle
+/// chef shortens nobody's trip, so it must not appear in `M_speed`.
+///
+/// Placed *before* [`advance_cycles`] rather than after [`settle`], which is
+/// where the fed flags are actually written. The one-tick lag that buys is
+/// deliberate and costs 50 ms; the alternative has `advance_cycles` and
+/// [`snapshot_economy`] disagreeing about the multipliers *within* one tick,
+/// which would put the readout's projected rate at odds with the rate the
+/// simulation just ran - exactly the drift I3' exists to prevent.
+fn recompute_multipliers(
+    support: Query<(&SupportRole, &SupportCycle)>,
+    mut fed: ResMut<FedStaff>,
+    mut multipliers: ResMut<Multipliers>,
+) {
+    let mut counted = FedStaff::default();
+    for (role, cycle) in &support {
+        if !cycle.is_hungry() {
+            counted.add(*role);
+        }
+    }
+    fed.set_if_neq(counted);
+    // `research` carries the tech term, which the Technologist's ladder will
+    // write; nothing here may clobber it.
+    let next = multipliers_for(counted, *multipliers);
+    multipliers.set_if_neq(next);
+}
+
+/// Stage 7. Counted from the world rather than from the resources, because a
+/// hired monkey is not necessarily a working one, and reporting a rate the
+/// world is not producing is what the readout used to get wrong.
 fn snapshot_economy(
     workforce: Res<Workforce>,
+    staff: Res<Staff>,
+    fed: Res<FedStaff>,
     multipliers: Res<Multipliers>,
-    cycles: Query<&HarvestCycle, With<Worker>>,
+    cycles: Query<&HarvestCycle>,
+    mut committed: ResMut<Committed>,
     mut snapshot: ResMut<EconomySnapshot>,
 ) {
-    let stalled = cycles.iter().filter(|cycle| cycle.is_hungry()).count() as u32;
-    *snapshot = EconomySnapshot::project(workforce.count(), stalled, *multipliers);
+    // Summed from the world every tick rather than accumulated, so it cannot
+    // drift out of step with the meals actually outstanding (I3').
+    committed.0 = cycles.iter().map(|cycle| cycle.earmarked()).sum();
+    *snapshot = EconomySnapshot::project(workforce.count(), *staff, *fed, *multipliers);
 }
 
 /// Three sources, three sizes, three colours - readable without reading. The
@@ -937,7 +1068,12 @@ fn spawn_floater(commands: &mut Commands, layout: &SceneLayout, delivery: Delive
     let (label, size, colour) = match delivery.kind {
         DeliveryKind::Worker => (format!("+{:.0}", delivery.amount), 34.0, GOLD),
         DeliveryKind::Manual => (format!("+{:.0}", delivery.amount), 26.0, CREAM),
-        DeliveryKind::Snack => (format!("-{:.1}", delivery.amount), 22.0, MUTED),
+        // Both wages read the same, because to the player they are the same
+        // event: a monkey being paid. The snack happens at the stall and the
+        // support wage happens beside it, so they even share an origin.
+        DeliveryKind::Snack | DeliveryKind::Wage => {
+            (format!("-{:.1}", delivery.amount), 22.0, MUTED)
+        }
     };
     commands.spawn((
         Text2d::new(label),
@@ -965,6 +1101,7 @@ fn handle_menu(
     mut pending: ResMut<PendingSettlement>,
     mut restart: ResMut<RestartRequest>,
     mut hire_requests: ResMut<HireRequests>,
+    mut store_expanded: ResMut<hud::StoreExpanded>,
     mut pointer_guard: ResMut<PointerGuard>,
     mut feedback: ResMut<Feedback>,
     time: Res<Time>,
@@ -1015,11 +1152,14 @@ fn handle_menu(
             ButtonAction::OpenMenu if *menu == MenuState::Closed => {
                 requested = Some(MenuState::Open);
             }
-            ButtonAction::HireWorker
+            ButtonAction::Hire(kind)
                 if *menu == MenuState::Closed && pointer_guard.suppress_hire_for == 0.0 =>
             {
-                hire_requests.0 += 1;
+                hire_requests.0.push(kind);
                 pointer_guard.suppress_hire_for = HIRE_DEBOUNCE_SECONDS;
+            }
+            ButtonAction::ToggleStore if *menu == MenuState::Closed => {
+                store_expanded.0 = !store_expanded.0;
             }
             ButtonAction::Resume if *menu == MenuState::Open => {
                 requested = Some(MenuState::Closed);
@@ -1098,7 +1238,7 @@ fn handle_harvest_input(
     }
 
     if keys.just_pressed(KeyCode::KeyB) {
-        hire_requests.0 += 1;
+        hire_requests.0.push(UnitKind::Worker);
     }
 
     let interaction = controller.interaction;
@@ -1493,6 +1633,7 @@ fn persist_changes(
     mut dirty: ResMut<PersistenceDirty>,
     treasury: Res<Treasury>,
     workforce: Res<Workforce>,
+    staff: Res<Staff>,
 ) {
     dirty.since_last_save += time.delta_secs();
     if !dirty.pending {
@@ -1510,6 +1651,7 @@ fn persist_changes(
     let run = persistence::SavedRun {
         treasury: *treasury,
         workforce: *workforce,
+        staff: *staff,
     };
     match persistence::store_run(run) {
         Ok(()) => {
@@ -1712,7 +1854,6 @@ struct TestWorker {
     y: f32,
     segment: &'static str,
     carrying: bool,
-    hungry: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1721,11 +1862,28 @@ struct TestWorker {
 struct TestButtons {
     menu: TestPoint,
     hire_worker: TestPoint,
+    hire_chef: TestPoint,
+    hire_unpacker: TestPoint,
+    hire_technologist: TestPoint,
+    toggle_store: TestPoint,
     resume: TestPoint,
     logs: TestPoint,
     restart: TestPoint,
     confirm_restart: TestPoint,
     cancel_restart: TestPoint,
+}
+
+/// One support role's state, as the e2e suite sees it.
+#[cfg(target_arch = "wasm32")]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestStaff {
+    role: &'static str,
+    owned: u32,
+    hungry: u32,
+    next_cost: f64,
+    gain_per_min: f64,
+    can_hire: bool,
 }
 
 /// Serialised through `serde` rather than hand-rolled positional formatting:
@@ -1754,16 +1912,37 @@ struct TestState {
     harvest_bounds: TestBounds,
     deposit: TestPoint,
     monkeys: Vec<TestWorker>,
+    staff: Vec<TestStaff>,
+    /// Bananas reserved by harvesters against meals they have earned but not
+    /// yet eaten, and which therefore nothing else may spend.
+    committed: f64,
+    store_expanded: bool,
     buttons: TestButtons,
+}
+
+/// Every resource the economy is made of, in one parameter.
+///
+/// Bevy caps a system at sixteen parameters, and the exporter passed it once
+/// the payroll grew. Bundling is also the fix the shape wanted anyway: these
+/// eight always travel together, and a reader that took seven of them would be
+/// reporting a partial economy.
+#[cfg(target_arch = "wasm32")]
+#[derive(bevy::ecs::system::SystemParam)]
+struct EconomyView<'w> {
+    treasury: Res<'w, Treasury>,
+    workforce: Res<'w, Workforce>,
+    staff: Res<'w, Staff>,
+    fed: Res<'w, FedStaff>,
+    committed: Res<'w, Committed>,
+    multipliers: Res<'w, Multipliers>,
+    snapshot: Res<'w, EconomySnapshot>,
+    store_expanded: Res<'w, hud::StoreExpanded>,
 }
 
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
 fn sync_web_test_state(
-    treasury: Res<Treasury>,
-    workforce: Res<Workforce>,
-    multipliers: Res<Multipliers>,
-    snapshot: Res<EconomySnapshot>,
+    economy: EconomyView,
     controller: Res<HarvestController>,
     menu: Res<MenuState>,
     layout: Res<SceneLayout>,
@@ -1771,11 +1950,23 @@ fn sync_web_test_state(
     touches: Res<Touches>,
     banana_transform: Single<&Transform, With<Banana>>,
     workers: Query<(&HarvestCycle, &Transform), With<Worker>>,
+    support: Query<(&SupportRole, &SupportCycle), With<SupportUnit>>,
     buttons: Query<(&ButtonAction, &ComputedNode, &UiGlobalTransform)>,
     mut warmup_frames: Local<u8>,
 ) {
     use crate::domain::Segment;
     use wasm_bindgen::JsValue;
+
+    let EconomyView {
+        treasury,
+        workforce,
+        staff,
+        fed,
+        committed,
+        multipliers,
+        snapshot,
+        store_expanded,
+    } = economy;
 
     if *warmup_frames < 3 {
         *warmup_frames += 1;
@@ -1788,21 +1979,38 @@ fn sync_web_test_state(
     };
     let screen = |value: Vec2| point(layout.world_to_screen(value));
 
-    let mut button_centers = [Vec2::ZERO; 7];
+    // One slot per button, so four hire buttons cannot collapse onto each
+    // other and leave the suite clicking whichever row happened to be last.
+    let mut button_centers = [Vec2::ZERO; 11];
     for (action, node, transform) in &buttons {
         let index = match action {
             ButtonAction::OpenMenu => 0,
-            ButtonAction::HireWorker => 1,
-            ButtonAction::Resume => 2,
-            ButtonAction::Diagnostics => 3,
-            ButtonAction::Restart => 4,
-            ButtonAction::ConfirmRestart => 5,
-            ButtonAction::CancelRestart => 6,
+            ButtonAction::Hire(UnitKind::Worker) => 1,
+            ButtonAction::Hire(UnitKind::Support(SupportRole::Chef)) => 2,
+            ButtonAction::Hire(UnitKind::Support(SupportRole::Unpacker)) => 3,
+            ButtonAction::Hire(UnitKind::Support(SupportRole::Technologist)) => 4,
+            ButtonAction::ToggleStore => 5,
+            ButtonAction::Resume => 6,
+            ButtonAction::Diagnostics => 7,
+            ButtonAction::Restart => 8,
+            ButtonAction::ConfirmRestart => 9,
+            ButtonAction::CancelRestart => 10,
         };
         button_centers[index] = transform.translation * node.inverse_scale_factor;
     }
 
-    let plan = plan_hire(*workforce, *treasury, *multipliers);
+    let plan_for = |kind| {
+        plan_hire(
+            kind,
+            *workforce,
+            *staff,
+            *fed,
+            *treasury,
+            committed.0,
+            *multipliers,
+        )
+    };
+    let plan = plan_for(UnitKind::Worker);
     let state = TestState {
         ready: true,
         bananas: treasury.bananas(),
@@ -1859,18 +2067,40 @@ fn sync_web_test_state(
                         Segment::Snack => "snack",
                     },
                     carrying: cycle.segment().holds_banana(),
-                    hungry: cycle.is_hungry(),
                 }
             })
             .collect(),
+        staff: SupportRole::ALL
+            .iter()
+            .map(|role| {
+                let plan = plan_for(UnitKind::Support(*role));
+                TestStaff {
+                    role: role.name(),
+                    owned: staff.count(*role),
+                    hungry: support
+                        .iter()
+                        .filter(|(unit, cycle)| *unit == role && cycle.is_hungry())
+                        .count() as u32,
+                    next_cost: plan.cost,
+                    gain_per_min: plan.gain_per_min,
+                    can_hire: plan.affordable,
+                }
+            })
+            .collect(),
+        committed: committed.0,
+        store_expanded: store_expanded.0,
         buttons: TestButtons {
             menu: point(button_centers[0]),
             hire_worker: point(button_centers[1]),
-            resume: point(button_centers[2]),
-            logs: point(button_centers[3]),
-            restart: point(button_centers[4]),
-            confirm_restart: point(button_centers[5]),
-            cancel_restart: point(button_centers[6]),
+            hire_chef: point(button_centers[2]),
+            hire_unpacker: point(button_centers[3]),
+            hire_technologist: point(button_centers[4]),
+            toggle_store: point(button_centers[5]),
+            resume: point(button_centers[6]),
+            logs: point(button_centers[7]),
+            restart: point(button_centers[8]),
+            confirm_restart: point(button_centers[9]),
+            cancel_restart: point(button_centers[10]),
         },
     };
 
@@ -2008,9 +2238,10 @@ mod tests {
     #[test]
     fn buttons_are_only_live_in_the_view_that_shows_them() {
         // A tap on the menu scrim must never reach the shop card underneath.
-        assert!(ButtonAction::HireWorker.active_in(MenuState::Closed));
-        assert!(!ButtonAction::HireWorker.active_in(MenuState::Open));
-        assert!(!ButtonAction::HireWorker.active_in(MenuState::ConfirmRestart));
+        let hire = ButtonAction::Hire(UnitKind::Worker);
+        assert!(hire.active_in(MenuState::Closed));
+        assert!(!hire.active_in(MenuState::Open));
+        assert!(!hire.active_in(MenuState::ConfirmRestart));
         assert!(ButtonAction::OpenMenu.active_in(MenuState::Closed));
         assert!(ButtonAction::Resume.active_in(MenuState::Open));
         assert!(!ButtonAction::Resume.active_in(MenuState::Closed));

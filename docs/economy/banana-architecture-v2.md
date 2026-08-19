@@ -29,11 +29,11 @@ current bottleneck and pay to remove it, then find the next one.
 
 | # | Invariant |
 |---|---|
-| I1 | Net banana rate is strictly positive after every legal purchase. |
-| I2 | No harvester is *offered* unless its projected net delta is positive. |
+| ~~I1~~ | ~~Net banana rate is strictly positive after every legal purchase.~~ **Deleted, support increment.** |
+| ~~I2~~ | ~~No harvester is *offered* unless its projected net delta is positive.~~ **Deleted, support increment.** |
 | I3′ | Production **rate** is derived from world state every tick and never cached. Harvest **progress** is per-entity state, stored as remaining work. The treasury is credited on delivery. |
 | I4 | The player can always see gross rate, wage rate, and net rate simultaneously. |
-| I5 | A purchase requires the treasury to cover its cost, plus a wage reserve for any unit whose wage is *drained continuously* rather than paid out of a delivery. |
+| I5′ | A purchase requires the *unencumbered* treasury to cover its cost: the balance less every meal a harvester has already reserved against a delivery it has made. There is no wage reserve. |
 
 I3′ is the load-bearing one, and it is weaker than v1's I3 by necessity. A
 monkey halfway to the grove is *somewhere*, and that position is not derivable
@@ -41,12 +41,22 @@ from component counts. What survives is the part that mattered: the rate is
 still a pure function of counts and multipliers, so nothing can silently drift
 out of sync with the world.
 
-I1 is stronger than v1's. Non-producing units draw wages, so "not negative" is
-not enough — a purchase that drives net to zero strands the run.
+I5 was once a *wage reserve*, because cart income is lumpy while wages were
+continuous. D18 removed the reserve for workers by removing the mismatch, and
+D19 removes it for everyone by making every monkey post-paid. What is left of I5
+is the encumbrance in D20: the price on the button is the price, but a banana a
+monkey has already earned is not yours to spend.
 
-I5 is new and exists because cart income is lumpy while wages are continuous.
-See D15 — and D18, which removes the reserve for workers entirely by removing
-the mismatch that made it necessary.
+**I1 and I2 are both gone.** I2 hid a unit whose price the player could
+otherwise have been saving toward, which is a worse failure than showing a bad
+buy — and with D11's payback numbers replaced by a live marginal rate (D21)
+there is no ranked list left for it to protect. I1 died of ill-definition: once
+an unfed monkey stops contributing to its multiplier (D19), `net` at the
+whitepaper's end state is −1.44/s with everyone fed and +0.59/s with the
+technologists idle, so the gate's answer depended on a multiplier state it never
+named. Its stated purpose — "a purchase that drives net to zero strands the run"
+— no longer holds either: an unaffordable monkey goes idle and stops eating, so
+the economy recovers by itself.
 
 ---
 
@@ -83,8 +93,16 @@ tradeoff survives on its own — see §5.
 An unassigned worker has no `AssignedTo`. The pool is the query
 `With<Worker>, Without<AssignedTo>`.
 
-**D8 — Structures may be under-staffed and produce proportionally, and their
-wages scale the same way.**
+**D8 — *Deleted* (support increment).**
+Carts are now crewed by exactly three monkeys or they do not run: a cart may only
+be bought when three spare workers exist, and if they do not, its price includes
+buying them. Partial staffing, the sampled crew fraction, and `delivery_scale`
+all go with it. What the rule bought — a retired vehicle not becoming a permanent
+tax — is bought more simply by there being no such thing as a half-crewed cart.
+The original text follows.
+
+~~Structures may be under-staffed and produce proportionally, and their
+wages scale the same way.~~
 A 1-of-3 crewed cart produces at ⅓ *and costs ⅓ of its wage*. Production-only
 scaling makes a retired vehicle a permanent tax, which matters more once
 vehicles are a ladder. Every cart performs the nominal full-cart segment work;
@@ -147,7 +165,11 @@ an invented horizon. The research track gets its own readout in the full
 product; in the MVP the Technologist simply appears in the shop with a research
 figure and no payback number.
 
-**D15 — Purchases are gated on a wage reserve.**
+**D15 — *Deleted* (support increment).** See D19: nothing drains continuously
+any more, so there is nothing left to reserve against. The original text follows,
+because the *reasoning* about lumpy income is still the reason D20 exists.
+
+~~Purchases are gated on a wage reserve.~~
 ```
 reserve = 2 × max(0, wages − pool_income) × cart_cycle / cart_count
 ```
@@ -196,7 +218,15 @@ spending down to exactly zero buys a wage holiday until the next delivery. At
 `W ≈ 7` the forgiven amount exceeds the price of the monkey that caused it. Debt
 is allowed to happen instead; it is rare and small, exactly as §6 intends.
 
-**D16 — Cart cycle phase is randomised after assignment on spawn.**
+**D16 — *Mostly deleted* (support increment).** The jitter existed to protect the
+D15 reserve, and D15 is gone; measured against remaining-work progress the −38 →
+−255 dip is 0.000 either way. Boarding staggers carts naturally, since three
+workers finish their trips at different times. What survives is the *save-restore*
+phase for workers, which is presentation, and the deterministic index-derived
+stagger on support shifts — which is `worker::Lane`'s trick, not randomness. The
+original text follows.
+
+~~Cart cycle phase is randomised after assignment on spawn.~~
 Carts bought in one burst otherwise synchronise. Measured, that deepens the
 treasury dip from −38 to −255 in the same economy. One line; prevents a
 punishment the player cannot see or diagnose. A new cart remains pending until
@@ -282,11 +312,114 @@ D16 still bind for them, and until they adopt a snack workers converge 5% under
 the §3 ceiling while carts converge on it. That asymmetry is this decision's one
 outstanding cost.
 
-**D17 — Assignment is auto-pull.**
+**D17 — *Deleted* (support increment).**
+Auto-pull existed to answer "which monkeys crew the cart?" every tick. With crew
+fixed at three and bought with the cart, the question is asked once, at purchase,
+and answered by boarding: the cart spawns as an empty box at the deposit and
+takes the next worker to finish its snack, first come, until it is full. The
+original text follows.
+
+~~Assignment is auto-pull.~~
 Cart slots beat the pool by 230–280% at every reachable world state, so the
 optimal policy is always "fill every slot, overflow to the pool." Manual
 assignment can only reproduce that with extra clicks or produce a worse result.
 D7 and D10's representation stays; the player-facing choice is removed.
+
+**D19 — Every monkey is post-paid, and an unpaid one goes idle.**
+*(Support increment.)*
+
+D18 gave harvesters a snack taken out of their own delivery. Support staff have
+no delivery, so they get the same deal against a bare **10-second shift**:
+`meal = wage × 10`, which is 1.0 for a Chef or Unpacker and 2.0 for a
+Technologist. A bare period rather than anything derived from the harvest cycle,
+because `meal / period` is then `wage` exactly with no multiplier in either
+factor — the property D18 needed a *fraction* to obtain for workers comes free
+here, since a shortened harvest cycle does not shorten a chef's shift.
+
+Ten seconds rather than a worker-length fifty. Nothing funds this meal at the
+moment it falls due, so the period sets the size of the lump landing on the
+larder; at 10 s a chef recovers from an empty larder in under two seconds at a
+modest pool, where 50 s would make the meal five times bigger and the recovery
+five times longer. Starvation *frequency* is set by how hard the player is
+spending. The period only sets how much it hurts.
+
+**An unfed monkey drops out of its multiplier sum**, greys, and retries every
+tick — `M = 1 + Σ *fed* units × bonus`. This is the same stall D18 gave a hungry
+worker, moved to the units that can actually reach it. It does not run away:
+a worker's meal can never exceed 1.5 of a 5-banana payload, so every pool worker
+contributes at least 0.07/s at the worst possible multiplier state while support
+drain falls to zero. Swept across ~300k reachable states, there is no
+configuration where net is positive with everyone fed and negative with one chef
+idle, so there is no bistable trap. What does happen is a partial equilibrium —
+at over-supported states the Technologist is idle 40–72% of the time, the rate
+stays positive, and the run stays alive.
+
+**Feeding order is Unpacker → Chef → Technologist**, and deliberately not
+declaration order. Under scarcity a fixed type order spends the last banana on
+the least valuable monkey: an Unpacker's marginal contribution is 3.6× a Chef's
+at the end state and 5.9× at twelve minutes, because by then the cart's unload
+segment dominates. Research is worth nothing to anything currently in flight, so
+it eats last. Fixed rather than recomputed from marginal value, because a fixed
+order is deterministic and cheap and starvation is meant to be the rare edge of
+the economy rather than a state worth optimising inside.
+
+**D20 — A harvester's meal is reserved out of the delivery that funds it.**
+*(Support increment.)*
+
+D18's solvency argument was "the credit strictly precedes the debit within a
+cycle and strictly exceeds it". That holds only if nothing else can spend the
+credit in between — and D19's support staff, who draw on the same larder and
+deliver nothing into it, can. The gap is small (2.5 s of a worker's 50 s trip)
+and it is real: measured, workers stalled **8.4%** of the time after a
+spend-to-zero shock at the whitepaper's end-state support bill.
+
+So `HarvestCycle` carries an `earmarked` field. At Unload the whole payload is
+delivered and credited — the counter still reads the arithmetic D18 wanted, +5
+then −1.5 — but only `payload − meal` enters the larder. The snack is then eaten
+out of the reservation and never touches the shared pool.
+
+Two claimants have to respect it for this to mean anything. Support staff do,
+through the larder. **The shop does too**, through `spendable = treasury −
+committed`: the quoted *price* does not move, since quoting a higher price is
+exactly the lie D18 was written to remove, but an encumbered balance cannot
+cover it.
+
+This is what makes the cart possible at all. A cart's meal is **37.9 bananas**
+against a 200-banana payload, and a cart that missed one would freeze holding
+that payload. At an empty pool — legal, since D8's deletion lets you spend your
+last three spare workers on the crew — the cart is the only harvester, so income
+would be identically zero and the treasury could never climb back to free it. An
+absorbing soft-lock whose only exit is 37 manual clicks with nothing on screen to
+explain it.
+
+*One designed mechanic dies here, and it is worth being explicit about it.*
+A worker can no longer go hungry: its food is reserved from its own delivery, and
+neither the player's spending nor the wage bill can reach it. D18 called stalling
+"the only place in the economy where overspending has a visible consequence".
+That consequence now lands on the support staff instead — which is a better
+teaching signal, because it points at the actual mistake: you hired staff you
+cannot feed. The grey pulse, the HUNGRY readout and the idle sprite all moved
+from `worker` to `support` rather than being deleted.
+
+**D21 — The shop shows a live marginal rate, not a static effect.**
+*(Support increment.)*
+
+D11 projected rates for harvesters only, on the grounds that a support unit's own
+banana delta is exactly `−wage` and carries no information. True, and beside the
+point: what a Chef is worth is not what it produces but what it makes everybody
+*else* produce. The shop's GAIN column is that number, recomputed every tick.
+
+The alternative was a static effect string — "TRAVEL +15%" — which is honest
+about the mechanism and useless for the comparison the table exists to support:
+three different units down one column, and a figure that means +12.6% throughput
+in a worker-heavy world and about +1% in a cart-heavy one. That is precisely the
+Amdahl rotation §5 calls the whole design, hidden behind a constant. A live rate
+shows a Chef at +4.2/min early and falling below its own wage once carts drain
+the pool, which is the bottleneck moving, rendered.
+
+The Technologist keeps `+1.0 RESEARCH/s` and a different colour. Being visibly
+the one row the ranking does not price is correct (D14); it should look
+intentional.
 
 ---
 

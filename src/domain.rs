@@ -172,9 +172,7 @@ impl Segment {
             // walks and is emptied at the same rate as an empty one.
             Segment::Pick => spec.crew * multipliers.tech / spec.t_pick,
             Segment::Unload => multipliers.unpack / spec.t_unload,
-            Segment::Snack => {
-                meal(spec, multipliers) / Segment::Snack.duration(spec, multipliers)
-            }
+            Segment::Snack => meal(spec, multipliers) / Segment::Snack.duration(spec, multipliers),
         }
     }
 
@@ -251,9 +249,9 @@ pub fn worker_throughput(multipliers: Multipliers) -> f64 {
     throughput(CycleSpec::WORKER, multipliers)
 }
 
-/// What a single worker earns and eats per round trip. Passed into
+/// What a single harvester earns and eats per round trip. Passed into
 /// [`HarvestCycle::advance`] rather than read from constants, so that the cycle
-/// stays driven by the entity's own [`Payload`] and [`Wage`] components (D2).
+/// stays driven by the entity's own [`CycleSpec`] (D2).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CycleTerms {
     pub payload: f64,
@@ -281,6 +279,23 @@ pub struct CycleOutput {
 pub struct HarvestCycle {
     segment: Segment,
     remaining: f64,
+    /// Bananas set aside at the moment of delivery to pay for the snack that
+    /// immediately follows it. Zero everywhere except between Unload and Snack.
+    ///
+    /// D18 argued that a harvester is solvent because "the credit strictly
+    /// precedes the debit within a cycle and strictly exceeds it". That holds
+    /// only if nothing else can spend the credit in between - and support staff,
+    /// who draw on the same larder but deliver nothing of their own, can. The
+    /// gap is small (2.5 s of a worker's 50 s trip) but it is real: measured,
+    /// workers stalled 8.4% of the time after a spend-to-zero shock at the
+    /// whitepaper's end-state support bill.
+    ///
+    /// Reserving the meal out of the delivery it is owed against closes the gap
+    /// by construction rather than by gate, and it is what makes the cart
+    /// possible at all: a cart's meal is 37.9 bananas, so a cart that missed one
+    /// would freeze holding a 200-banana payload, and at an empty pool the
+    /// treasury could never climb back to free it.
+    earmarked: f64,
 }
 
 impl HarvestCycle {
@@ -292,6 +307,7 @@ impl HarvestCycle {
             segment: Segment::ToGrove,
             // Multiplier-independent for the outbound leg: it is a distance.
             remaining: spec.distance,
+            earmarked: 0.0,
         }
     }
 
@@ -309,6 +325,9 @@ impl HarvestCycle {
                 return Self {
                     segment,
                     remaining: segment.nominal_work(spec, multipliers) * (1.0 - fraction),
+                    // A restored unit is placed, not paid: it earns nothing on
+                    // its first partial cycle, so it owes nothing either.
+                    earmarked: 0.0,
                 };
             }
             remaining_phase -= duration;
@@ -323,6 +342,13 @@ impl HarvestCycle {
         self.segment
     }
 
+    /// Bananas this unit has reserved against its own next meal. Summed across
+    /// the field, this is the slice of the treasury that support staff and the
+    /// shop must both leave alone.
+    pub fn earmarked(self) -> f64 {
+        self.earmarked
+    }
+
     /// How far through the current segment the worker is, in 0.0..=1.0.
     /// Rendering derives position from this, so the avatar is a pure function
     /// of simulation state.
@@ -332,12 +358,6 @@ impl HarvestCycle {
             return 1.0;
         }
         (1.0 - self.remaining / nominal).clamp(0.0, 1.0)
-    }
-
-    /// A worker that has finished eating everything it can afford and is waiting
-    /// for the larder to refill. Its cycle is frozen until then.
-    pub fn is_hungry(self) -> bool {
-        self.segment == Segment::Snack && self.remaining <= 0.0
     }
 
     /// Consume `dt` seconds of work, reporting what the worker delivered and ate.
@@ -397,26 +417,23 @@ impl HarvestCycle {
 
             match self.segment {
                 Segment::Unload => {
+                    // The whole payload is delivered and credited, so the
+                    // counter still reads the arithmetic D18 wanted (+5, then
+                    // -1.5). Only the *spendable* share enters the larder; the
+                    // meal is reserved on the unit until it eats it.
                     output.delivered += terms.payload;
-                    *larder += terms.payload;
+                    self.earmarked = terms.meal.min(terms.payload);
+                    *larder += terms.payload - self.earmarked;
                 }
                 Segment::Snack => {
-                    // Exactly, with no slack. `tolerance` above is in seconds
-                    // and belongs to the time budget; reusing it here would
-                    // compare a duration against a quantity of bananas and let
-                    // a worker eat a couple of nano-bananas it does not have -
-                    // enough to take the treasury negative and trip the
-                    // `debug_assert` in `Treasury::charge`. A worker that
-                    // misses its meal by 2e-9 simply waits one more tick.
-                    if *larder < terms.meal {
-                        // Nothing to eat. Hold the worker here - not on the
-                        // next leg - so the debt is still owed when food
-                        // arrives, and so the idle sprite reads as hunger.
-                        self.remaining = 0.0;
-                        break;
-                    }
-                    output.eaten += terms.meal;
-                    *larder -= terms.meal;
+                    // Eaten out of this unit's own reservation, never out of the
+                    // shared larder, so no amount of spending elsewhere can
+                    // stall a harvester that has just delivered. The meal is the
+                    // figure locked in at delivery rather than the one implied
+                    // by the current multipliers: it is paid for by that
+                    // delivery, so it is priced against it.
+                    output.eaten += self.earmarked;
+                    self.earmarked = 0.0;
                 }
                 _ => {}
             }
@@ -434,6 +451,270 @@ impl HarvestCycle {
         debug_assert!(guard < 64, "segment budget loop hit its iteration guard");
 
         output
+    }
+}
+
+// ─────────────────────────────────────────────────────────────── support
+
+/// Seconds between one support monkey's meals.
+///
+/// Support staff have no round trip to be paid out of, so unlike a harvester
+/// their meal needs a clock of its own. A bare period rather than anything
+/// derived from the harvest cycle: `meal / period` is then `wage` exactly, with
+/// no multiplier in either factor, so the published 0.10 and 0.20 per second
+/// stay true at every world state. This is the same property D18 needed a
+/// *fraction* to obtain for workers, and here it comes for free - a shortened
+/// harvest cycle does not shorten a chef's shift.
+///
+/// Short on purpose. Nothing funds this meal at the moment it falls due, so the
+/// period sets how big a lump lands on the larder: at 10 s a chef eats 1.0 and
+/// recovers from an empty larder in under two seconds at a modest pool, where a
+/// worker-length 50 s period would make it 5.0 and roughly five times as long.
+/// Starvation frequency is set by how hard the player is spending; the period
+/// only sets how much it hurts.
+pub const SUPPORT_MEAL_PERIOD: f64 = 10.0;
+
+/// Travel multiplier added per fed Chef.
+pub const CHEF_BONUS: f64 = 0.15;
+/// Unload multiplier added per fed Unpacker.
+pub const UNPACK_BONUS: f64 = 0.20;
+
+/// The three monkeys who never touch a banana tree.
+///
+/// D5: a support unit declares which *term* of the harvest cycle it shortens,
+/// not which entity it helps. That is why a cart bought later inherits the right
+/// support sensitivity without anybody deciding it should.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SupportRole {
+    Chef,
+    Unpacker,
+    Technologist,
+}
+
+impl SupportRole {
+    /// Declaration order, which is also the order the shop lists them in.
+    pub const ALL: [SupportRole; 3] = [
+        SupportRole::Chef,
+        SupportRole::Unpacker,
+        SupportRole::Technologist,
+    ];
+
+    /// The order the larder is offered around when it cannot cover everyone.
+    ///
+    /// Deliberately *not* [`SupportRole::ALL`]. Feeding by declaration order
+    /// spends the last banana on the least valuable monkey: measured, an
+    /// Unpacker's marginal contribution is 3.6x a Chef's at the whitepaper's end
+    /// state and 5.9x at twelve minutes, because by then the cart's unload
+    /// segment dominates everything else. A Technologist eats last because its
+    /// output is research, which nothing in flight depends on.
+    ///
+    /// Fixed rather than recomputed from marginal value: a fixed order is
+    /// deterministic and cheap, and starvation is meant to be the rare edge of
+    /// the economy rather than a state worth optimising inside.
+    pub const FEEDING_ORDER: [SupportRole; 3] = [
+        SupportRole::Unpacker,
+        SupportRole::Chef,
+        SupportRole::Technologist,
+    ];
+
+    /// Bananas per second (whitepaper §8).
+    pub fn wage(self) -> f64 {
+        match self {
+            SupportRole::Chef | SupportRole::Unpacker => 0.10,
+            SupportRole::Technologist => 0.20,
+        }
+    }
+
+    /// Bananas eaten per shift. Derived from the wage so the wage is the truth.
+    pub fn meal(self) -> f64 {
+        self.wage() * SUPPORT_MEAL_PERIOD
+    }
+
+    pub fn cost_base(self) -> f64 {
+        match self {
+            SupportRole::Chef => 25.0,
+            SupportRole::Unpacker => 30.0,
+            SupportRole::Technologist => 40.0,
+        }
+    }
+
+    pub fn cost_growth(self) -> f64 {
+        match self {
+            SupportRole::Chef | SupportRole::Unpacker => 1.30,
+            SupportRole::Technologist => 1.35,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SupportRole::Chef => "CHEF",
+            SupportRole::Unpacker => "UNPACKER",
+            SupportRole::Technologist => "TECHNOLOGIST",
+        }
+    }
+}
+
+/// No reachable economy comes near this; it exists for the same reason
+/// [`MAX_WORKERS`] does - a tampered save otherwise spawns that many entities in
+/// a single tick and is then re-persisted.
+pub const MAX_SUPPORT: u32 = 1_000;
+
+/// How many of each support role have been hired.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Staff {
+    chefs: u32,
+    unpackers: u32,
+    technologists: u32,
+}
+
+impl Staff {
+    pub fn from_saved(chefs: u32, unpackers: u32, technologists: u32) -> Option<Self> {
+        (chefs <= MAX_SUPPORT && unpackers <= MAX_SUPPORT && technologists <= MAX_SUPPORT)
+            .then_some(Self {
+                chefs,
+                unpackers,
+                technologists,
+            })
+    }
+
+    pub fn count(self, role: SupportRole) -> u32 {
+        match role {
+            SupportRole::Chef => self.chefs,
+            SupportRole::Unpacker => self.unpackers,
+            SupportRole::Technologist => self.technologists,
+        }
+    }
+
+    pub fn total(self) -> u32 {
+        SupportRole::ALL.iter().map(|role| self.count(*role)).sum()
+    }
+
+    /// Geometric per type, `cost = b·g^n`, exactly as [`Workforce::next_cost`]
+    /// and the oracle compute it.
+    pub fn next_cost(self, role: SupportRole) -> f64 {
+        role.cost_base() * role.cost_growth().powi(self.count(role) as i32)
+    }
+
+    pub fn hire(&mut self, role: SupportRole) {
+        let slot = match role {
+            SupportRole::Chef => &mut self.chefs,
+            SupportRole::Unpacker => &mut self.unpackers,
+            SupportRole::Technologist => &mut self.technologists,
+        };
+        *slot = (*slot + 1).min(MAX_SUPPORT);
+    }
+
+    pub fn restart(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// How many of each role are currently fed, and therefore working.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FedStaff {
+    pub chefs: u32,
+    pub unpackers: u32,
+    pub technologists: u32,
+}
+
+impl FedStaff {
+    pub fn count(self, role: SupportRole) -> u32 {
+        match role {
+            SupportRole::Chef => self.chefs,
+            SupportRole::Unpacker => self.unpackers,
+            SupportRole::Technologist => self.technologists,
+        }
+    }
+
+    pub fn add(&mut self, role: SupportRole) {
+        match role {
+            SupportRole::Chef => self.chefs += 1,
+            SupportRole::Unpacker => self.unpackers += 1,
+            SupportRole::Technologist => self.technologists += 1,
+        }
+    }
+
+    pub fn total(self) -> u32 {
+        self.chefs + self.unpackers + self.technologists
+    }
+}
+
+/// One support monkey's shift clock: work for [`SUPPORT_MEAL_PERIOD`], then eat.
+///
+/// Per-entity rather than a single counter per role, because units starve
+/// *independently* - the larder can cover two chefs and not the third - and a
+/// resource-level accumulator that modelled that would be a hand-rolled ECS.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct SupportCycle {
+    /// Seconds of shift left before the next meal falls due.
+    remaining: f64,
+    fed: bool,
+}
+
+impl SupportCycle {
+    /// A newly hired monkey starts fed and works a full shift before its first
+    /// meal falls due - the same post-paid deal a worker gets on its first trip.
+    ///
+    /// `phase` staggers the shift so that N monkeys of a role do not all eat on
+    /// the same tick. Derived from the hire index by the caller, exactly like
+    /// `worker::Lane`, so it is a deterministic offset and not D16's jitter.
+    pub fn starting(phase: f64) -> Self {
+        Self {
+            remaining: (SUPPORT_MEAL_PERIOD - phase.rem_euclid(SUPPORT_MEAL_PERIOD))
+                .clamp(0.0, SUPPORT_MEAL_PERIOD),
+            fed: true,
+        }
+    }
+
+    /// Unpaid, and therefore idle: it contributes nothing to its multiplier and
+    /// draws nothing from the larder until it is fed.
+    pub fn is_hungry(self) -> bool {
+        !self.fed
+    }
+
+    /// Spend `dt` seconds of shift, eating when one falls due. Returns what it
+    /// ate, which is either `meal` or nothing at all.
+    ///
+    /// A time budget with a carried remainder, for the reasons D13's
+    /// implementation note gives: `remaining -= dt` two hundred times over
+    /// accumulates a binary residual, and a shift that takes 201 ticks instead
+    /// of 200 puts the realised wage a fraction of a percent under the published
+    /// one. Work is measured in seconds here, so the rate is exactly 1.
+    pub fn advance(&mut self, dt: f64, meal: f64, larder: &mut f64) -> f64 {
+        debug_assert!(dt.is_finite() && dt >= 0.0);
+        let mut budget = dt;
+        let mut eaten = 0.0;
+        let mut guard = 0;
+
+        while budget > 0.0 && guard < 64 {
+            guard += 1;
+            let needed = self.remaining;
+            const TOLERANCE: f64 = SUPPORT_MEAL_PERIOD * 1e-9;
+            if needed > budget + TOLERANCE {
+                self.remaining -= budget;
+                break;
+            }
+
+            // Exactly, with no slack - the tolerance above is in seconds and
+            // belongs to the budget, not to a quantity of bananas.
+            if *larder < meal {
+                // Hold the clock at zero rather than restarting it. Resetting
+                // would hand an unpaid monkey a free shift, which is the "wage
+                // holiday" D18 refuses to allow.
+                self.remaining = 0.0;
+                self.fed = false;
+                break;
+            }
+
+            *larder -= meal;
+            eaten += meal;
+            self.fed = true;
+            budget = (budget - needed).max(0.0);
+            self.remaining = SUPPORT_MEAL_PERIOD;
+        }
+
+        debug_assert!(guard < 64, "support shift loop hit its iteration guard");
+        eaten
     }
 }
 
@@ -554,10 +835,12 @@ impl Workforce {
     }
 }
 
-/// Reset every piece of run state together, so the two cannot drift apart.
-pub fn restart_run(treasury: &mut Treasury, workforce: &mut Workforce) {
+/// Reset every piece of run state together, so they cannot drift apart. Every
+/// new resource that survives a run belongs here and nowhere else.
+pub fn restart_run(treasury: &mut Treasury, workforce: &mut Workforce, staff: &mut Staff) {
     treasury.restart();
     workforce.restart();
+    staff.restart();
 }
 
 // ──────────────────────────────────────────────────────────────── economy
@@ -566,81 +849,195 @@ pub fn restart_run(treasury: &mut Treasury, workforce: &mut Workforce) {
 /// derived from world state every tick rather than cached (I3').
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
 pub struct EconomySnapshot {
-    /// Steady-state expected rate, `Σ payload / cycle_time`, counting only
-    /// workers that are actually working. The realised rate depends on phase;
-    /// over any short window the two disagree, which is why the readout is
-    /// labelled an average.
+    /// Steady-state expected rate, `Σ payload / cycle_time`. The realised rate
+    /// depends on phase; over any short window the two disagree, which is why
+    /// the readout is labelled an average.
     pub gross_per_sec: f64,
     pub wages_per_sec: f64,
     pub net_per_sec: f64,
     pub workers: u32,
-    /// Workers stalled at the stall with a meal they cannot afford.
-    pub stalled: u32,
+    /// Support monkeys hired, across all three roles.
+    pub staff: u32,
+    /// Support monkeys who could not be fed, and are therefore contributing
+    /// nothing to their multiplier.
+    ///
+    /// Harvesters no longer appear here and cannot: since their meal is
+    /// reserved out of the delivery that funds it, nothing else can spend it.
+    /// Hunger is now exactly the condition of a monkey who depends on somebody
+    /// else's surplus, which is what support staff are.
+    pub hungry: u32,
 }
 
 impl EconomySnapshot {
-    /// `stalled` workers are excluded from *both* sides. A starving worker
-    /// harvests nothing, and it is not eating either - that is the whole point
-    /// of the stall - so counting it in the wage bill would be as wrong as
-    /// counting it in production.
+    /// Unfed support is excluded from *both* sides: an idle chef shortens
+    /// nobody's trip, and it is not eating either, so counting it in the wage
+    /// bill would be as wrong as counting its bonus in the rate.
     ///
-    /// Excluding it at all is the fix for a readout that used to lie: the
-    /// projection was a pure function of the worker *count*, so a wholly
-    /// stalled workforce reported `+6.0/min` indefinitely while producing
-    /// nothing, and no number on screen explained why the pile had stopped
-    /// growing. That is the same complaint that started this redesign.
-    pub fn project(workers: u32, stalled: u32, multipliers: Multipliers) -> Self {
-        let working = workers.saturating_sub(stalled) as f64;
-        let gross_per_sec = working * worker_throughput(multipliers);
-        let wages_per_sec = working * WORKER_WAGE;
+    /// That symmetry is the fix for a readout that used to lie. The projection
+    /// was once a pure function of head*count*, so a workforce that had stopped
+    /// working still reported `+6.0/min` while the pile sat still, and no number
+    /// on screen explained why.
+    pub fn project(workers: u32, staff: Staff, fed: FedStaff, multipliers: Multipliers) -> Self {
+        let gross_per_sec = workers as f64 * worker_throughput(multipliers);
+        let support_wages: f64 = SupportRole::ALL
+            .iter()
+            .map(|role| fed.count(*role) as f64 * role.wage())
+            .sum();
+        let wages_per_sec = workers as f64 * WORKER_WAGE + support_wages;
         Self {
             gross_per_sec,
             wages_per_sec,
             net_per_sec: gross_per_sec - wages_per_sec,
             workers,
-            stalled: stalled.min(workers),
+            staff: staff.total(),
+            hungry: staff.total().saturating_sub(fed.total()),
         }
     }
 }
 
-/// Everything the shop needs to render, and the single authority on whether a
-/// hire is legal.
+/// The bananas the player and the support staff may actually draw on: the
+/// balance, less every meal a harvester has already reserved against a delivery
+/// it has just made.
+///
+/// Reserving is what makes the economy solvent by construction rather than by
+/// gate, but it only works if *everything* that can spend respects the
+/// reservation. Support staff do so through the larder; the shop does so
+/// through here. Without this the player could buy a chef with a cart's
+/// 37.9-banana meal and freeze the cart holding a 200-banana payload - and at an
+/// empty pool the treasury could never climb back to free it.
+pub fn spendable(treasury: Treasury, committed: f64) -> f64 {
+    (treasury.bananas() - committed).max(0.0)
+}
+
+/// Bananas currently reserved by harvesters against meals they have earned but
+/// not yet eaten. Summed from the world every tick, never accumulated (I3').
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+pub struct Committed(pub f64);
+
+/// Which purchasable unit an offer is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitKind {
+    Worker,
+    Support(SupportRole),
+}
+
+/// Everything the shop needs to render one row, and the single authority on
+/// whether that purchase is legal.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HirePlan {
     /// The signing fee, and the whole of what the player must have on hand.
     pub cost: f64,
-    /// Bananas this worker will eat per round trip, for the shop to explain
-    /// itself with. Not a gate: it is paid out of the delivery it follows.
+    /// Bananas this unit will eat per meal, for the shop to explain itself
+    /// with. Never a gate: it is paid out of a delivery, or out of surplus.
     pub meal: f64,
-    /// Change in net rate if the hire goes through.
-    pub net_delta: f64,
+    /// Seconds between meals - a round trip for a harvester, a shift for
+    /// support. The shop needs it to label `meal` honestly, since the two units
+    /// eat on entirely different clocks.
+    pub meal_period: f64,
+    /// Bananas per minute the economy gains if this purchase goes through,
+    /// **net of what the new unit itself eats**, evaluated against the world as
+    /// it stands right now. D11's `projected_net_delta`, per minute.
+    ///
+    /// Net rather than gross, and the difference is the whole value of the
+    /// column. A sixth Chef at nine workers raises production by 5.5/min and
+    /// eats 6.0/min: gross it reads `+5.5` and looks like a good buy, net it
+    /// reads `-0.5` and is one. Showing gross here would reproduce, in a live
+    /// number, exactly the misleading-price failure D18 was written to remove.
+    ///
+    /// D11 projected rates for harvesters only, because a support unit's own
+    /// banana delta is exactly `-wage` and carries no information. This is the
+    /// other half of that expression: not what the unit produces, but what it
+    /// makes everybody else produce, less its own keep.
+    pub gain_per_min: f64,
     pub affordable: bool,
 }
 
-/// I1 (net stays strictly positive) and I5 (the player can pay).
+/// I5 (the player can pay), and nothing else.
 ///
 /// I5 used to add a wage reserve on top of the fee, because wages drained
 /// continuously and a fresh hire spent 50 seconds costing bananas before it
-/// earned any. Feeding a worker out of the delivery it just made removes that
-/// exposure entirely, so the fee *is* the requirement: `cost + reserve` was both
-/// a misleading price and a solution to a problem the cycle no longer has.
+/// earned any. Post-paid meals removed that exposure, so the fee *is* the
+/// requirement: `cost + reserve` was both a misleading price and a solution to a
+/// problem the cycle no longer has.
 ///
-/// The I1 gate is retained even though a worker's net delta is +0.07/s at every
-/// world state, so that later units are a value change rather than a rewrite of
-/// every call site.
-pub fn plan_hire(workforce: Workforce, treasury: Treasury, multipliers: Multipliers) -> HirePlan {
-    let cost = workforce.next_cost();
+/// **I1 is deliberately gone.** It required net to stay strictly positive after
+/// every purchase, on the grounds that a purchase driving net to zero strands
+/// the run. Two things retired it. Nothing strands any more - an unpayable
+/// support monkey goes idle and stops eating, so the economy recovers by itself.
+/// And once idleness feeds back into the multipliers, I1 stopped being
+/// well-defined: at the whitepaper's end state net is -1.44/s with every monkey
+/// fed and +0.59/s with the technologists idle, so the gate's answer depended on
+/// a multiplier state it never named.
+pub fn plan_hire(
+    kind: UnitKind,
+    workforce: Workforce,
+    staff: Staff,
+    fed: FedStaff,
+    treasury: Treasury,
+    committed: f64,
+    multipliers: Multipliers,
+) -> HirePlan {
+    // Hypothetical steady state with everything fed: this is "what would this
+    // purchase be worth", not "what is happening right now". A shop that priced
+    // a chef against a currently-starving kitchen would quote a number that
+    // buying the chef immediately falsifies.
+    let all_fed = FedStaff {
+        chefs: staff.count(SupportRole::Chef),
+        unpackers: staff.count(SupportRole::Unpacker),
+        technologists: staff.count(SupportRole::Technologist),
+    };
+    let before = EconomySnapshot::project(workforce.count(), staff, all_fed, multipliers);
 
-    // Hypothetical steady state, so no stalls: this is "what would this hire be
-    // worth", not "what is happening right now".
-    let before = EconomySnapshot::project(workforce.count(), 0, multipliers);
-    let after = EconomySnapshot::project(workforce.count() + 1, 0, multipliers);
+    let (cost, meal, meal_period, after) = match kind {
+        UnitKind::Worker => (
+            workforce.next_cost(),
+            meal(CycleSpec::WORKER, multipliers),
+            cycle_time(CycleSpec::WORKER, multipliers),
+            EconomySnapshot::project(workforce.count() + 1, staff, all_fed, multipliers),
+        ),
+        UnitKind::Support(role) => {
+            let mut hired = staff;
+            hired.hire(role);
+            let mut fed_after = all_fed;
+            fed_after.add(role);
+            (
+                staff.next_cost(role),
+                role.meal(),
+                SUPPORT_MEAL_PERIOD,
+                EconomySnapshot::project(
+                    workforce.count(),
+                    hired,
+                    fed_after,
+                    // A support hire changes the multipliers, which is the
+                    // whole point of buying one - so the projection has to be
+                    // taken against the multipliers it would create, not the
+                    // ones standing now.
+                    multipliers_for(fed_after, multipliers),
+                ),
+            )
+        }
+    };
 
+    let _ = fed;
     HirePlan {
         cost,
-        meal: meal(CycleSpec::WORKER, multipliers),
-        net_delta: after.net_per_sec - before.net_per_sec,
-        affordable: after.net_per_sec > 0.0 && treasury.bananas() >= cost,
+        meal,
+        meal_period,
+        gain_per_min: (after.net_per_sec - before.net_per_sec) * 60.0,
+        affordable: spendable(treasury, committed) >= cost,
+    }
+}
+
+/// D4: every multiplier is additive within its term, `M = 1 + count × bonus`,
+/// and only monkeys that are actually fed count towards it.
+///
+/// `research` carries the tech term through unchanged; it is the Technologist's
+/// output rather than its head count, and it arrives with the research ladder.
+pub fn multipliers_for(fed: FedStaff, research: Multipliers) -> Multipliers {
+    Multipliers {
+        speed: 1.0 + fed.chefs as f64 * CHEF_BONUS,
+        unpack: 1.0 + fed.unpackers as f64 * UNPACK_BONUS,
+        tech: research.tech,
     }
 }
 
@@ -657,6 +1054,19 @@ mod tests {
     }
 
     const SPEC: CycleSpec = CycleSpec::WORKER;
+
+    /// A hire plan against an economy with `workers` workers and no support.
+    fn worker_plan(workers: u32, bananas: f64, m: Multipliers) -> HirePlan {
+        plan_hire(
+            UnitKind::Worker,
+            Workforce::from_saved(workers).unwrap(),
+            Staff::default(),
+            FedStaff::default(),
+            Treasury::from_saved(bananas).unwrap(),
+            0.0,
+            m,
+        )
+    }
 
     fn terms(multipliers: Multipliers) -> CycleTerms {
         CycleTerms::new(SPEC, multipliers)
@@ -724,7 +1134,8 @@ mod tests {
             // And eating stays the same share of the trip, so a shortened cycle
             // does not turn into a life spent at the stall.
             assert!(
-                (Segment::Snack.duration(SPEC, m) / cycle_time(SPEC, m) - SNACK_FRACTION).abs() < 1e-15,
+                (Segment::Snack.duration(SPEC, m) / cycle_time(SPEC, m) - SNACK_FRACTION).abs()
+                    < 1e-15,
                 "{speed}"
             );
         }
@@ -833,7 +1244,9 @@ mod tests {
             }
 
             let realised = delivered / 600.0;
-            let projected = EconomySnapshot::project(workers, 0, m).gross_per_sec;
+            let projected =
+                EconomySnapshot::project(workers, Staff::default(), FedStaff::default(), m)
+                    .gross_per_sec;
             assert!(
                 (realised - projected).abs() / projected < 0.05,
                 "workers={workers} realised={realised} projected={projected}"
@@ -898,7 +1311,7 @@ mod tests {
 
         assert_eq!(fresh.segment(), Segment::ToGrove);
         assert_eq!(fresh.segment_fraction(SPEC, base()), 0.0);
-        assert!(!fresh.is_hungry());
+        assert_eq!(fresh.earmarked(), 0.0);
     }
 
     #[test]
@@ -906,17 +1319,31 @@ mod tests {
         let m = base();
 
         assert_eq!(HarvestCycle::from_phase(0.0, SPEC, m), fresh());
-        assert_eq!(HarvestCycle::from_phase(20.0, SPEC, m).segment(), Segment::Pick);
-        assert_eq!(HarvestCycle::from_phase(25.0, SPEC, m).segment(), Segment::ToDepot);
-        assert_eq!(HarvestCycle::from_phase(45.0, SPEC, m).segment(), Segment::Unload);
-        assert_eq!(HarvestCycle::from_phase(47.5, SPEC, m).segment(), Segment::Snack);
+        assert_eq!(
+            HarvestCycle::from_phase(20.0, SPEC, m).segment(),
+            Segment::Pick
+        );
+        assert_eq!(
+            HarvestCycle::from_phase(25.0, SPEC, m).segment(),
+            Segment::ToDepot
+        );
+        assert_eq!(
+            HarvestCycle::from_phase(45.0, SPEC, m).segment(),
+            Segment::Unload
+        );
+        assert_eq!(
+            HarvestCycle::from_phase(47.5, SPEC, m).segment(),
+            Segment::Snack
+        );
         assert_eq!(HarvestCycle::from_phase(50.0, SPEC, m), fresh());
 
         let halfway_home = HarvestCycle::from_phase(35.0, SPEC, m);
         assert_eq!(halfway_home.segment(), Segment::ToDepot);
         assert_eq!(halfway_home.segment_fraction(SPEC, m), 0.5);
         assert!(halfway_home.segment().holds_banana());
-        assert!(!halfway_home.is_hungry());
+        // Placed, not paid: a restored unit owes nothing on its first partial
+        // cycle because it earned nothing on it.
+        assert_eq!(halfway_home.earmarked(), 0.0);
     }
 
     // ──────────────────────────────────────────────────────────── feeding
@@ -941,36 +1368,63 @@ mod tests {
     }
 
     #[test]
-    fn a_worker_with_nothing_to_eat_stalls_instead_of_eating_on_credit() {
+    fn a_meal_is_reserved_at_delivery_so_nothing_else_can_spend_it() {
+        // D18 argued a harvester is solvent because the credit precedes the
+        // debit within its cycle. That only holds if nothing else can spend the
+        // credit in the 2.5 s in between - and support staff, who draw on the
+        // same larder and deliver nothing, can. Reserving the meal out of the
+        // delivery closes the gap by construction.
         let m = base();
         let mut cycle = fresh();
         let mut larder = 0.0;
 
-        // Run to the moment the delivery lands, then have the player spend it.
+        // Run to the tick the delivery lands on.
         for _ in 0..950 {
             cycle.advance(SIM_DT, SPEC, m, terms(m), &mut larder);
         }
         assert_eq!(cycle.segment(), Segment::Snack);
-        assert_eq!(larder, WORKER_PAYLOAD);
+        // Only the spendable share reached the larder; the meal is held back.
+        assert!((larder - (WORKER_PAYLOAD - meal(SPEC, m))).abs() < 1e-12);
+        assert!((cycle.earmarked() - meal(SPEC, m)).abs() < 1e-12);
+
+        // Now have every other claimant on the economy take everything there
+        // is. The reservation is not in the larder, so it cannot be taken.
         larder = 0.0;
 
-        // Two full cycles' worth of ticks with an empty larder.
-        for _ in 0..2_000 {
-            let output = cycle.advance(SIM_DT, SPEC, m, terms(m), &mut larder);
-            assert_eq!(output, CycleOutput::default());
+        let mut ate = 0.0;
+        for _ in 0..60 {
+            ate += cycle.advance(SIM_DT, SPEC, m, terms(m), &mut larder).eaten;
         }
-        assert!(cycle.is_hungry());
-        assert_eq!(larder, 0.0);
 
-        // Feeding it clears exactly the meal that was owed - the debt was
-        // deferred, never forgiven, so starving is a penalty and not a wage
-        // holiday - and the worker goes straight back to work.
-        larder = meal(SPEC, m);
-        let output = cycle.advance(SIM_DT, SPEC, m, terms(m), &mut larder);
-        assert_eq!(output.eaten, meal(SPEC, m));
-        assert_eq!(larder, 0.0);
+        assert!((ate - meal(SPEC, m)).abs() < 1e-12, "ate {ate}");
+        assert_eq!(cycle.earmarked(), 0.0);
+        // And it went straight back to work rather than stalling at the stall.
         assert_eq!(cycle.segment(), Segment::ToGrove);
-        assert!(!cycle.is_hungry());
+    }
+
+    #[test]
+    fn a_reservation_never_exceeds_the_delivery_that_funds_it() {
+        // The structural-solvency claim in one line: a unit can always afford
+        // its own meal, at every multiplier and for every tier. If this ever
+        // fails, the treasury can go negative and the cart can freeze holding a
+        // full payload.
+        for spec in [CycleSpec::WORKER] {
+            for speed in [1.0, 1.15, 2.5, 10.0] {
+                for unpack in [1.0, 2.0, 5.0] {
+                    let m = Multipliers {
+                        speed,
+                        unpack,
+                        ..Multipliers::default()
+                    };
+                    assert!(
+                        meal(spec, m) < spec.payload,
+                        "meal {} >= payload {} at {m:?}",
+                        meal(spec, m),
+                        spec.payload
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1062,14 +1516,17 @@ mod tests {
     }
 
     #[test]
-    fn restart_clears_treasury_and_workforce_together() {
+    fn restart_clears_every_piece_of_run_state_together() {
         let mut treasury = Treasury::from_saved(12.0).unwrap();
         let mut workforce = Workforce::from_saved(4).unwrap();
 
-        restart_run(&mut treasury, &mut workforce);
+        let mut staff = Staff::from_saved(2, 3, 1).unwrap();
+
+        restart_run(&mut treasury, &mut workforce, &mut staff);
 
         assert_eq!(treasury, Treasury::default());
         assert_eq!(workforce, Workforce::default());
+        assert_eq!(staff, Staff::default());
     }
 
     // ─────────────────────────────────────────── costs and gating
@@ -1111,58 +1568,128 @@ mod tests {
         // showing only the fee, which read as a bug. Post-paid meals make the
         // reserve unnecessary, so the price on the button is the price.
         let m = base();
-        let workforce = Workforce::default();
 
-        let plan = plan_hire(workforce, Treasury::from_saved(4.0).unwrap(), m);
+        let plan = worker_plan(0, 4.0, m);
         assert_eq!(plan.cost, 4.0);
         assert_eq!(plan.meal, 1.5);
         assert!(plan.affordable);
 
-        let short = plan_hire(workforce, Treasury::from_saved(3.9).unwrap(), m);
-        assert!(!short.affordable);
+        assert!(!worker_plan(0, 3.9, m).affordable);
     }
 
     #[test]
-    fn hiring_always_raises_net_so_invariant_i1_holds() {
+    fn a_reserved_meal_is_not_spendable_in_the_shop() {
+        // The other half of the reservation. Support staff respect it through
+        // the larder; the shop has to respect it here, or the player can buy a
+        // chef with a meal a monkey has already earned - and at an empty pool a
+        // cart that missed its 37.9-banana meal could never be freed.
         let m = base();
-        let per_worker = worker_throughput(m) - WORKER_WAGE;
-        assert!(per_worker > 0.0);
-
-        for hired in 0..40u32 {
-            let plan = plan_hire(
-                Workforce::from_saved(hired).unwrap(),
-                Treasury::from_saved(MAX_SAFE_BANANAS).unwrap(),
+        let treasury = Treasury::from_saved(4.0).unwrap();
+        let plan = |committed| {
+            plan_hire(
+                UnitKind::Worker,
+                Workforce::default(),
+                Staff::default(),
+                FedStaff::default(),
+                treasury,
+                committed,
                 m,
-            );
-            assert!((plan.net_delta - per_worker).abs() < 1e-12);
-            assert!(plan.affordable);
-        }
+            )
+        };
+
+        assert!(plan(0.0).affordable);
+        // 1.5 of those four bananas belong to a monkey that has just delivered.
+        assert!(!plan(1.5).affordable);
+        // The quoted price does not move - it is the *balance* that is
+        // encumbered, not the fee. Quoting a higher price is the lie D18 came
+        // from in the first place.
+        assert_eq!(plan(1.5).cost, 4.0);
+    }
+
+    #[test]
+    fn a_worker_is_worth_its_own_throughput_and_a_chef_is_worth_more_at_first() {
+        // The GAIN column's contract. A worker adds exactly what it harvests; a
+        // support monkey adds what it makes everybody *else* harvest, which is
+        // zero on an empty field and grows with the workforce it multiplies.
+        let m = base();
+
+        // Net of its own meal: +6.0/min harvested, -1.8/min eaten.
+        let worker = worker_plan(8, MAX_SAFE_BANANAS, m);
+        assert!(
+            (worker.gain_per_min - (worker_throughput(m) - WORKER_WAGE) * 60.0).abs() < 1e-9,
+            "{}",
+            worker.gain_per_min
+        );
+        assert!(
+            (worker.gain_per_min - 4.2).abs() < 1e-9,
+            "{}",
+            worker.gain_per_min
+        );
+
+        let chef_of = |workers| {
+            plan_hire(
+                UnitKind::Support(SupportRole::Chef),
+                Workforce::from_saved(workers).unwrap(),
+                Staff::default(),
+                FedStaff::default(),
+                Treasury::from_saved(MAX_SAFE_BANANAS).unwrap(),
+                0.0,
+                m,
+            )
+            .gain_per_min
+        };
+
+        // Nobody to feed, and it still eats: a Chef on an empty field is
+        // legibly, numerically a bad buy.
+        assert!((chef_of(0) + SupportRole::Chef.wage() * 60.0).abs() < 1e-9);
+        assert!(chef_of(0) < 0.0);
+        // And it scales with the pool it is multiplying, crossing into
+        // profitable somewhere in between - which is the bottleneck moving.
+        assert!(chef_of(8) > chef_of(4));
+        assert!(chef_of(16) > 0.0);
+        // A chef eats on a shift, not on a trip, and the shop has to say so.
+        let chef = plan_hire(
+            UnitKind::Support(SupportRole::Chef),
+            Workforce::from_saved(8).unwrap(),
+            Staff::default(),
+            FedStaff::default(),
+            Treasury::from_saved(MAX_SAFE_BANANAS).unwrap(),
+            0.0,
+            m,
+        );
+        assert_eq!(chef.cost, 25.0);
+        assert_eq!(chef.meal, 1.0);
+        assert_eq!(chef.meal_period, SUPPORT_MEAL_PERIOD);
     }
 
     #[test]
     fn snapshot_reports_gross_wages_and_net_together() {
-        let snapshot = EconomySnapshot::project(1, 0, base());
+        let snapshot = EconomySnapshot::project(1, Staff::default(), FedStaff::default(), base());
 
         assert!((snapshot.gross_per_sec - 0.1).abs() < 1e-15);
         assert!((snapshot.wages_per_sec - 0.03).abs() < 1e-15);
         assert!((snapshot.net_per_sec - 0.07).abs() < 1e-15);
         assert_eq!(
-            EconomySnapshot::project(0, 0, base()),
+            EconomySnapshot::project(0, Staff::default(), FedStaff::default(), base()),
             EconomySnapshot::default()
         );
 
-        // A stalled workforce reports what it is actually doing: nothing, and
-        // eating nothing while it does it.
-        let starving = EconomySnapshot::project(4, 4, base());
-        assert_eq!(starving.gross_per_sec, 0.0);
-        assert_eq!(starving.wages_per_sec, 0.0);
-        assert_eq!(starving.net_per_sec, 0.0);
-        assert_eq!(starving.stalled, 4);
+        // Idle support is excluded from both sides: it shortens nobody's trip
+        // and it is not eating either. Counting its wage while dropping its
+        // bonus would be exactly the asymmetric lie the readout used to tell.
+        let staff = Staff::from_saved(2, 0, 0).unwrap();
+        let starving = EconomySnapshot::project(4, staff, FedStaff::default(), base());
+        assert!((starving.wages_per_sec - 4.0 * WORKER_WAGE).abs() < 1e-15);
+        assert_eq!(starving.hungry, 2);
+        assert_eq!(starving.staff, 2);
 
-        // And a partly stalled one reports the fed fraction.
-        let half = EconomySnapshot::project(4, 2, base());
-        assert!((half.gross_per_sec - 0.2).abs() < 1e-15);
-        assert!((half.wages_per_sec - 0.06).abs() < 1e-15);
+        let fed = FedStaff {
+            chefs: 2,
+            ..FedStaff::default()
+        };
+        let paid = EconomySnapshot::project(4, staff, fed, base());
+        assert!((paid.wages_per_sec - (4.0 * WORKER_WAGE + 0.2)).abs() < 1e-15);
+        assert_eq!(paid.hungry, 0);
     }
 
     // ─────────────────────────────────────────── the settled trajectory
@@ -1207,38 +1734,189 @@ mod tests {
 
     #[test]
     fn buying_the_moment_the_shop_allows_it_never_goes_underwater() {
-        let m = base();
+        // Spending every banana the instant it arrives is a viable play, and it
+        // must stay solvent - including once support staff are drawing on the
+        // same larder without delivering anything into it.
         let mut treasury = Treasury::default();
         let mut workforce = Workforce::default();
+        let mut staff = Staff::default();
         let mut cycles: Vec<HarvestCycle> = Vec::new();
+        let mut shifts: Vec<(SupportRole, SupportCycle)> = Vec::new();
+        let mut multipliers = base();
         let mut worst = f64::INFINITY;
 
         // Seed the run the way a player does: by hand, up to the first gate.
         treasury.credit(4.0);
 
-        for _ in 0..(1_200.0 * SIM_HZ) as u32 {
-            let plan = plan_hire(workforce, treasury, m);
+        for tick in 0..(1_800.0 * SIM_HZ) as u32 {
+            let committed: f64 = cycles.iter().map(|cycle| cycle.earmarked()).sum();
+            let fed = FedStaff {
+                chefs: shifts
+                    .iter()
+                    .filter(|(role, cycle)| *role == SupportRole::Chef && !cycle.is_hungry())
+                    .count() as u32,
+                unpackers: shifts
+                    .iter()
+                    .filter(|(role, cycle)| *role == SupportRole::Unpacker && !cycle.is_hungry())
+                    .count() as u32,
+                technologists: 0,
+            };
+            multipliers = multipliers_for(fed, multipliers);
+
+            // Buy whatever is affordable, alternating so support actually gets
+            // bought rather than being priced out by a cheaper worker forever.
+            let kind = if tick % 3 == 0 {
+                UnitKind::Support(if tick % 2 == 0 {
+                    SupportRole::Chef
+                } else {
+                    SupportRole::Unpacker
+                })
+            } else {
+                UnitKind::Worker
+            };
+            let plan = plan_hire(
+                kind,
+                workforce,
+                staff,
+                fed,
+                treasury,
+                committed,
+                multipliers,
+            );
             if plan.affordable {
                 treasury.charge(plan.cost);
-                workforce.hire();
-                cycles.push(fresh());
+                match kind {
+                    UnitKind::Worker => {
+                        workforce.hire();
+                        cycles.push(HarvestCycle::starting(CycleSpec::WORKER));
+                    }
+                    UnitKind::Support(role) => {
+                        staff.hire(role);
+                        shifts.push((role, SupportCycle::starting(shifts.len() as f64 * 3.3)));
+                    }
+                }
             }
 
-            let mut larder = treasury.bananas();
+            let mut larder = treasury.bananas() - committed;
             let (mut delivered, mut eaten) = (0.0, 0.0);
             for cycle in &mut cycles {
-                let output = cycle.advance(SIM_DT, SPEC, m, terms(m), &mut larder);
+                let output = cycle.advance(
+                    SIM_DT,
+                    CycleSpec::WORKER,
+                    multipliers,
+                    CycleTerms::new(CycleSpec::WORKER, multipliers),
+                    &mut larder,
+                );
                 delivered += output.delivered;
                 eaten += output.eaten;
             }
+            // Support eats last, and only out of what is left unreserved.
+            for role in SupportRole::FEEDING_ORDER {
+                for (unit, shift) in &mut shifts {
+                    if *unit == role {
+                        eaten += shift.advance(SIM_DT, role.meal(), &mut larder);
+                    }
+                }
+            }
+
             treasury.credit(delivered);
             treasury.charge(eaten);
             worst = worst.min(treasury.bananas());
         }
 
         assert!(worst >= 0.0, "treasury dipped to {worst}");
-        // Spending every banana the instant it arrives is now a viable play,
-        // and it still reaches a real workforce inside twenty minutes.
         assert!(workforce.count() >= 8, "only {} hired", workforce.count());
+        assert!(staff.total() >= 1, "no support hired");
+    }
+
+    #[test]
+    fn support_eats_exactly_its_wage_per_second_over_a_long_run() {
+        // The clock must not drift. `remaining -= dt` two hundred times leaves a
+        // binary residual, and a shift that takes 201 ticks instead of 200 puts
+        // the realised wage a fraction of a percent under the published one -
+        // silently, and only visible as an economy that is slightly cheaper to
+        // run than the shop claims.
+        for role in SupportRole::ALL {
+            let mut shift = SupportCycle::starting(0.0);
+            let mut larder = 1e9;
+            let seconds = 10_000.0;
+
+            let mut eaten = 0.0;
+            for _ in 0..(seconds * SIM_HZ) as u32 {
+                eaten += shift.advance(SIM_DT, role.meal(), &mut larder);
+            }
+
+            let want = role.wage() * seconds;
+            assert!(
+                (eaten - want).abs() < role.meal(),
+                "{role:?} ate {eaten}, expected {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unfed_support_monkey_holds_its_debt_instead_of_getting_a_free_shift() {
+        // Resetting the clock on a failed meal would hand an idle monkey a free
+        // ten seconds, which is the "wage holiday" D18 refuses to allow: spend
+        // to exactly zero and your staff work for nothing.
+        let role = SupportRole::Chef;
+        let mut shift = SupportCycle::starting(0.0);
+        let mut larder = 0.0;
+
+        // A full shift with an empty larder.
+        for _ in 0..(SUPPORT_MEAL_PERIOD * SIM_HZ) as u32 {
+            assert_eq!(shift.advance(SIM_DT, role.meal(), &mut larder), 0.0);
+        }
+        assert!(shift.is_hungry());
+
+        // Another full shift changes nothing: the debt is still owed.
+        for _ in 0..(SUPPORT_MEAL_PERIOD * SIM_HZ) as u32 {
+            assert_eq!(shift.advance(SIM_DT, role.meal(), &mut larder), 0.0);
+        }
+        assert!(shift.is_hungry());
+
+        // Feed it and it goes straight back to work, having paid in full.
+        larder = role.meal();
+        assert_eq!(shift.advance(SIM_DT, role.meal(), &mut larder), role.meal());
+        assert_eq!(larder, 0.0);
+        assert!(!shift.is_hungry());
+    }
+
+    #[test]
+    fn the_larder_feeds_unpackers_before_chefs_before_technologists() {
+        // Under scarcity a fixed type order spends the last banana on the least
+        // valuable monkey unless the order is chosen. An Unpacker's marginal
+        // contribution is measured at 3.6x a Chef's at the end state; research
+        // is worth nothing to anything currently in flight, so it eats last.
+        assert_eq!(
+            SupportRole::FEEDING_ORDER,
+            [
+                SupportRole::Unpacker,
+                SupportRole::Chef,
+                SupportRole::Technologist
+            ]
+        );
+
+        // One chef, one unpacker, and food for exactly one of them.
+        let mut chef = SupportCycle::starting(0.0);
+        let mut unpacker = SupportCycle::starting(0.0);
+        let mut larder = SupportRole::Unpacker.meal();
+
+        for _ in 0..(SUPPORT_MEAL_PERIOD * SIM_HZ) as u32 + 2 {
+            for role in SupportRole::FEEDING_ORDER {
+                match role {
+                    SupportRole::Unpacker => {
+                        unpacker.advance(SIM_DT, role.meal(), &mut larder);
+                    }
+                    SupportRole::Chef => {
+                        chef.advance(SIM_DT, role.meal(), &mut larder);
+                    }
+                    SupportRole::Technologist => {}
+                }
+            }
+        }
+
+        assert!(!unpacker.is_hungry(), "the unpacker should have eaten");
+        assert!(chef.is_hungry(), "the chef should have gone without");
     }
 }

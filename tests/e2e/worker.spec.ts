@@ -17,7 +17,6 @@ type Monkey = {
   y: number;
   segment: "to-grove" | "pick" | "to-depot" | "unload" | "snack";
   carrying: boolean;
-  hungry: boolean;
 };
 type GameState = {
   ready: boolean;
@@ -26,6 +25,16 @@ type GameState = {
   nextCost: number;
   meal: number;
   canHire: boolean;
+  committed: number;
+  storeExpanded: boolean;
+  staff: Array<{
+    role: string;
+    owned: number;
+    hungry: number;
+    nextCost: number;
+    gainPerMin: number;
+    canHire: boolean;
+  }>;
   grossPerSec: number;
   wagesPerSec: number;
   netPerSec: number;
@@ -36,6 +45,10 @@ type GameState = {
   deposit: Point;
   buttons: {
     hireWorker: Point;
+    hireChef: Point;
+    hireUnpacker: Point;
+    hireTechnologist: Point;
+    toggleStore: Point;
     restart: Point;
     confirmRestart: Point;
   };
@@ -244,7 +257,6 @@ test.describe("worker monkey", () => {
         monkey.segment,
       );
       expect(monkey.carrying).toBe(shouldCarry);
-      expect(monkey.hungry).toBe(false);
       await page.waitForTimeout(100);
     }
 
@@ -375,9 +387,6 @@ test.describe("worker monkey", () => {
     // restored worker must still be placed somewhere in its cycle rather than
     // reset to the phase-zero stall position every time.
     expect(resumedOffStall).toBe(true);
-    await expect
-      .poll(async () => (await state(page)).monkeys[0].hungry, { timeout: 5_000 })
-      .toBe(false);
     await expect
       .poll(async () => (await state(page)).bananas, {
         timeout: (CYCLE_SECONDS / FAST + 15) * 1000,

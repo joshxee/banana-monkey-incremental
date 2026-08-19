@@ -7,7 +7,18 @@ Every design decision from the review is baked in here:
   * one speed multiplier applies to ALL travel, carts included (D6 deleted)
   * technologists produce no bananas and are never ranked against harvesters
   * harvesters are paid out of the delivery they just made, not continuously
+  * support staff are post-paid too, on a bare 10-second shift (D19)
+  * a harvester's meal is reserved out of the delivery that funds it (D20), so
+    there is no wage reserve and no I1/I2 gate left to model
   * assignment is auto-pull: cart slots are always filled first
+    -- NOTE: superseded by D8/D17's deletion; the cart increment owes this file
+    a fixed crew of three and a cart snack. Until then `cart_cycle` is three
+    addends where the game will have four, a 5% divergence in cart rate.
+
+D19 changes no steady-state rate: a wage of 0.10/s is 0.10/s whether it is
+drained continuously or eaten in 1.0-banana lumps every ten seconds. What it
+changes is what happens when the larder runs dry, which is a transient this
+model does not represent - it assumes every monkey is fed.
 
 The `simulate` function models an OPTIMAL PLAYER. Its technologist policy is a
 stand-in for human judgement, not a mechanic the game implements.
@@ -220,47 +231,59 @@ def _income_sources(s, p):
     return out
 
 
-def continuous_salary(s, p):
-    """The part of the wage bill that is NOT funded by a delivery.
+# `continuous_salary` and `wage_reserve` are DELETED (D15, D19).
+#
+# The reserve hedged a timing mismatch: wages fell due continuously while income
+# arrived in lumps. D18 removed the mismatch for workers and D19 removes it for
+# everyone, so there is nothing left to hedge. The reserve's own history is worth
+# keeping in mind if a future unit is ever paid continuously again - it took two
+# attempts to get right, and the near-miss (a *blended* mean gap) looked correct
+# and under-reserved by 38.5 against a measured -66.0 dip.
+#
+# What replaces it is not a reserve but an encumbrance: see D20. A harvester's
+# meal is held on the harvester between delivery and snack, and the shop spends
+# `bananas - committed` rather than `bananas`. The quoted price does not move,
+# which is the whole point.
 
-    A pool worker snacks at the stall immediately after unloading, so its meal
-    is paid for out of a delivery that has already landed and is a fraction of
-    it: that salary can never take the treasury below where it stood before the
-    delivery. Everyone else - support staff, and cart crews until the cart
-    increment adopts the same rule - is still on a continuous drain.
+
+def unfunded_salary(s, p):
+    """The part of the wage bill that no delivery is holding money for.
+
+    A pool worker's meal is reserved out of the delivery it just made (D20), so
+    it never draws on the general pot. Support staff have no delivery of their
+    own and eat out of surplus (D19); cart crews will join the workers once the
+    cart increment gives carts a snack, and until then they are here too.
+
+    Modelled as a continuous drain even though D19 pays support in 1.0-banana
+    lumps every ten seconds. The rate is identical and the lumpiness only makes
+    the measured dip slightly pessimistic, which is the safe direction.
     """
     return salary(s, p) - (s.W - s.A) * p.w_salary
 
 
-def wage_reserve(s, p):
-    """Continuously-drained wages falling due across the longest gap between
-    deliveries, less the income that keeps arriving during it.
+def committed(s, p):
+    """Bananas reserved by harvesters against meals they have earned but not yet
+    eaten (D20).
 
-    This used to reserve against the whole wage bill, which for a cart-free
-    economy came to a flat 2.85 bananas on top of a 4.0 signing fee - a shop
-    that quoted one price and demanded another. Post-paid harvester meals remove
-    the exposure at its source rather than padding the price to cover it, so
-    only `continuous_salary` needs reserving and a pure-worker economy needs
-    nothing at all.
+    Expected value across the field rather than an instantaneous sum, because
+    this model has no per-entity phase: a unit spends `w_snack` of its cycle
+    holding its reservation, so on average that fraction of the payroll is
+    encumbered at any moment.
     """
-    drained = continuous_salary(s, p)
-    if drained <= 0.0:
-        return 0.0
-    sources = _income_sources(s, p)
-    if not sources:
-        return 0.0
-    gap = max(g for g, _ in sources)
-    covered = sum(rate for g, rate in sources if g < gap)
-    # x2 safety factor: the gap between deliveries is a random variable, and
-    # the mean under-covers roughly half the time.
-    return 2.0 * max(0.0, drained - covered) * gap
+    pool = s.W - s.A
+    held = pool * p.w_salary * sum(worker_cycle(s, p)) / (1.0 - p.w_snack)
+    # Carts owe this too, once they adopt a snack. Until then they hold nothing.
+    return held * p.w_snack
 
 
 def affordable(kind, bananas, s, p):
-    """I1 (wages payable) and the reserve gate. Separate from I2 (worth it)."""
-    if net(hypothetical(kind, s, p), p) <= 0:
-        return False
-    return bananas >= cost(kind, s, p) + wage_reserve(s, p)
+    """I5-prime, and nothing else.
+
+    I1 (net stays positive) and I2 (only offer what pays) are both gone - see
+    the architecture doc's invariant table. What is left is: can the player
+    actually pay, out of money that is theirs to spend.
+    """
+    return bananas - committed(s, p) >= cost(kind, s, p)
 
 
 # ──────────────────────────────────────────────────── optimal-player model
@@ -320,9 +343,11 @@ def simulate(p, horizon=60 * 60, patience=150.0, max_buys=500, gated=True):
             break
         chosen = None
         for payback, kind, c, d in cand:
-            if net(hypothetical(kind, s, p), p) <= 0:
-                continue                                    # I1 gate
-            gate = c + (wage_reserve(s, p) if gated else 0.0)
+            # The I1 gate used to sit here and is deleted. An optimal player
+            # still declines a purchase that inverts net, but that is judgement,
+            # not a rule the game enforces - so it belongs in the policy, which
+            # is what `cand` already is.
+            gate = c + (committed(s, p) if gated else 0.0)
             if bananas >= gate:
                 chosen = (payback, kind, c, 0.0)
                 break
@@ -386,7 +411,7 @@ def discrete_run(s, p, duration=1200.0, dt=0.05, start=0.0,
 
     bananas, lo, t, delivered = start, start, 0.0, 0.0
     # Only the units that are not fed by a delivery drain continuously.
-    drain = continuous_salary(s, p)
+    drain = unfunded_salary(s, p)
     # A worker unloads at Tw - w_snack and eats at Tw, so the two events are
     # separated on the clock even though they belong to the same trip.
     unload_at, w_meal = Tw - worker_cycle(s, p)[3], worker_meal(s, p)

@@ -2,6 +2,7 @@ mod domain;
 mod game;
 mod hud;
 mod persistence;
+mod support;
 mod worker;
 
 use bevy::{
@@ -41,6 +42,7 @@ fn main() {
     let restored_workers = run.workforce.count();
     app.insert_resource(run.treasury)
         .insert_resource(run.workforce)
+        .insert_resource(run.staff)
         .insert_resource(worker::RestoreWorkers::new(restored_workers))
         .add_plugins(HarvestGamePlugin)
         .run();

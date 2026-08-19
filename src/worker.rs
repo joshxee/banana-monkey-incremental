@@ -10,14 +10,10 @@
 //! write `Transform`, so capping avatars at a fixed pool later is a change to
 //! *which* entities they iterate, not a rendering rewrite.
 
-use std::f32::consts::TAU;
-
 use bevy::prelude::*;
 
 use crate::{
-    domain::{
-        CycleSpec, HarvestCycle, Multipliers, Segment, Workforce, cycle_time,
-    },
+    domain::{CycleSpec, HarvestCycle, Multipliers, Segment, Workforce, cycle_time},
     game::SceneLayout,
 };
 
@@ -97,8 +93,6 @@ pub struct JustHired {
 }
 
 const HIRE_HIGHLIGHT_SECONDS: f32 = 0.6;
-/// Slow enough to read as distress rather than as a strobe.
-const HUNGRY_PULSE_HZ: f32 = 0.8;
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pose {
@@ -118,6 +112,16 @@ pub(crate) struct WorkerArt {
 }
 
 impl WorkerArt {
+    /// The idle sheet, shared with `support`: every monkey in the game is this
+    /// spritesheet, and the roles are told apart by what they stand next to.
+    pub(crate) fn idle_image(&self) -> Handle<Image> {
+        self.idle_image.clone()
+    }
+
+    pub(crate) fn idle_layout(&self) -> Handle<TextureAtlasLayout> {
+        self.idle_layout.clone()
+    }
+
     /// Image, layout and index must move together. Carrying index 12 from the
     /// 18-frame idle sheet into the 8-frame run sheet is out of range.
     fn apply(&self, sprite: &mut Sprite, pose: Pose, index: usize) {
@@ -348,15 +352,12 @@ pub fn position_workers(
         // the player has to be able to see why the rate died. Idling at the
         // stall alone is ambiguous - unloading looks the same.
         //
-        // Signalled by a slow *pulse* toward cold grey, not by darkening. A
-        // static darken shares a channel with the depth cue above, and loses:
-        // a hungry front-row worker at 0.72 came out brighter than a healthy
-        // back-row one at 0.82, so the two meanings were 12% apart and
-        // ambiguous. Nothing else in the scene pulses.
-        if cycle.is_hungry() {
-            let pulse = 0.5 + 0.5 * (time.elapsed_secs() * HUNGRY_PULSE_HZ * TAU).sin();
-            tint = tint.lerp(Vec3::new(0.34, 0.36, 0.46), 0.45 + 0.35 * pulse);
-        }
+        // A worker no longer has a hungry state to signal. Its meal is reserved
+        // out of the delivery it has just made, so neither the player's spending
+        // nor the support wage bill can reach it, and the stall it used to show
+        // is unreachable by construction. The pulse moved to `support`, where
+        // monkeys really do live on somebody else's surplus - see
+        // `HarvestCycle::earmarked`.
         if let Some(mut hired) = hired {
             hired.remaining -= time.delta_secs();
             if hired.remaining <= 0.0 {
@@ -396,7 +397,9 @@ pub fn animate_workers(
         let next_pose = if walking { Pose::Run } else { Pose::Idle };
 
         let index = if walking {
-            (cycle.segment_fraction(CycleSpec::WORKER, *multipliers) as f32 * RUN_FRAMES_PER_LEG) as usize % RUN_FRAMES
+            (cycle.segment_fraction(CycleSpec::WORKER, *multipliers) as f32 * RUN_FRAMES_PER_LEG)
+                as usize
+                % RUN_FRAMES
         } else {
             (elapsed * IDLE_FPS as f64) as usize % IDLE_FRAMES
         };
@@ -417,10 +420,8 @@ pub fn animate_workers(
             if let Ok(mut visibility) = carried.get_mut(child) {
                 // Held through the snack too: that banana is the meal, and
                 // seeing it in hand is what connects the counter's dip to the
-                // monkey that caused it. Not while starving, though - a hungry
-                // monkey holding a banana contradicts the reason it has
-                // stopped, and the empty hands are half the tell.
-                let wanted = if segment.holds_banana() && !cycle.is_hungry() {
+                // monkey that caused it.
+                let wanted = if segment.holds_banana() {
                     Visibility::Inherited
                 } else {
                     Visibility::Hidden

@@ -13,6 +13,16 @@ type GameState = {
   nextCost: number;
   meal: number;
   canHire: boolean;
+  committed: number;
+  storeExpanded: boolean;
+  staff: Array<{
+    role: string;
+    owned: number;
+    hungry: number;
+    nextCost: number;
+    gainPerMin: number;
+    canHire: boolean;
+  }>;
   grossPerSec: number;
   wagesPerSec: number;
   netPerSec: number;
@@ -21,7 +31,6 @@ type GameState = {
     y: number;
     segment: "to-grove" | "pick" | "to-depot" | "unload" | "snack";
     carrying: boolean;
-    hungry: boolean;
   }>;
   interaction: "idle" | "dragging" | "keyboard-harvest";
   menu: "closed" | "open" | "confirm-restart";
@@ -35,6 +44,10 @@ type GameState = {
   buttons: {
     menu: Point;
     hireWorker: Point;
+    hireChef: Point;
+    hireUnpacker: Point;
+    hireTechnologist: Point;
+    toggleStore: Point;
     resume: Point;
     restart: Point;
     confirmRestart: Point;

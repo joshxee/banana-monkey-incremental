@@ -19,7 +19,10 @@
 use bevy::prelude::*;
 
 use crate::{
-    domain::{EconomySnapshot, Multipliers, Treasury, Workforce, plan_hire, worker_throughput},
+    domain::{
+        Committed, EconomySnapshot, FedStaff, Multipliers, SUPPORT_MEAL_PERIOD, Staff, SupportRole,
+        Treasury, UnitKind, Workforce, plan_hire,
+    },
     game::{
         BROWN, BROWN_LIGHT, ButtonAction, CREAM, Feedback, GOLD, INK, MUTED, MenuState, SceneLayout,
     },
@@ -109,6 +112,19 @@ pub(crate) struct CounterText;
 #[derive(Component)]
 pub(crate) struct RatePanel;
 
+/// The scrolling list inside the drawer. Separate from [`StoreRoot`] so the
+/// grip stays pinned while the rows move under it.
+#[derive(Component)]
+pub(crate) struct StoreScroll;
+
+#[derive(Component)]
+pub(crate) struct StoreGrip;
+
+/// Whether the drawer is pulled up. Persisted with the run, so a player who
+/// opened it stays opened.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StoreExpanded(pub bool);
+
 /// The row a rate line lives in, so a line can be hidden label and all.
 #[derive(Component, Clone, Copy)]
 pub(crate) struct RateLineRow(pub(crate) RateLine);
@@ -132,9 +148,21 @@ pub(crate) enum RateLine {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Unit {
     Worker,
+    Support(SupportRole),
 }
 
 impl Unit {
+    /// Fixed, and deliberately not sorted by price. Ascending cost is not a
+    /// stable order - a worker passes the Chef's 25 base after thirteen hires -
+    /// so a price-sorted table would re-sort itself under the player's finger
+    /// in a panel that gets tapped repeatedly. Declaration order it is.
+    const ROWS: [Unit; 4] = [
+        Unit::Worker,
+        Unit::Support(SupportRole::Chef),
+        Unit::Support(SupportRole::Unpacker),
+        Unit::Support(SupportRole::Technologist),
+    ];
+
     /// Singular, because the row reads as a spec sheet for one of them: the
     /// count is a column in the row, not part of the heading.
     fn name(self) -> &'static str {
@@ -142,6 +170,14 @@ impl Unit {
             // "WORKER", not "MONKEY": chefs, unpackers and technologists are
             // all monkeys too.
             Unit::Worker => "WORKER",
+            Unit::Support(role) => role.name(),
+        }
+    }
+
+    fn kind(self) -> UnitKind {
+        match self {
+            Unit::Worker => UnitKind::Worker,
+            Unit::Support(role) => UnitKind::Support(role),
         }
     }
 }
@@ -152,9 +188,17 @@ impl Unit {
 pub(crate) enum UnitStat {
     /// Signing fee, on the hire button.
     Price,
-    /// What one of them harvests, per minute.
-    Farming,
-    /// What one of them eats, per round trip.
+    /// Bananas per minute the economy gains from one more of them, right now.
+    ///
+    /// Was "FARMING", which only a harvester has. A static effect string
+    /// ("TRAVEL +15%") would have been honest about the mechanism and useless
+    /// for the comparison this table exists to support: three different units
+    /// down one column, and a figure that means +12.6% throughput in a
+    /// worker-heavy world and about +1% in a cart-heavy one. The live marginal
+    /// rate is one unit for every row, and it visibly decays as a role stops
+    /// being the bottleneck.
+    Gain,
+    /// What one of them eats, per trip or per shift.
     Feeding,
     Owned,
 }
@@ -398,9 +442,58 @@ fn spawn_store(commands: &mut Commands) {
             StoreRoot,
         ))
         .with_children(|store| {
-            spawn_store_header(store);
-            spawn_unit_row(store, Unit::Worker, ButtonAction::HireWorker);
+            spawn_store_grip(store);
+            store
+                .spawn((
+                    StoreScroll,
+                    Node {
+                        width: percent(100),
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        row_gap: px(6),
+                        // A definite bound is what makes the region scrollable
+                        // rather than merely clipped; `apply_store_layout`
+                        // writes it from the drawer's current height.
+                        min_height: px(0),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                ))
+                .with_children(|list| {
+                    spawn_store_header(list);
+                    for unit in Unit::ROWS {
+                        spawn_unit_row(list, unit);
+                    }
+                });
         });
+}
+
+/// The drawer's handle: a gold bar that reads as something to pull.
+///
+/// The store has no fully closed state. It rests at the height of the dirt it
+/// is dug into, which is the one size that cannot cover the grass, the walking
+/// route or the deposit - so the player can always see and buy *something* -
+/// and pulls up to two thirds when they want to read the whole table. A drawer
+/// that could close entirely would hide the only progression surface in a game
+/// that opens as a manual clicker.
+fn spawn_store_grip(store: &mut ChildSpawnerCommands) {
+    store.spawn((
+        Button,
+        ButtonAction::ToggleStore,
+        StoreGrip,
+        Node {
+            width: px(74),
+            height: px(14),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            flex_shrink: 0.0,
+            border: UiRect::all(px(2)),
+            border_radius: BorderRadius::all(px(7)),
+            ..default()
+        },
+        BackgroundColor(BROWN_LIGHT),
+        BorderColor::all(GOLD),
+    ));
 }
 
 /// Column widths, shared by the header and every unit line. Fixed rather than
@@ -408,7 +501,10 @@ fn spawn_store(commands: &mut Commands) {
 /// the one thing a comparison table must not do.
 const COL_NAME: f32 = 104.0;
 const COL_HIRE: f32 = 84.0;
-const COL_FARMING: f32 = 70.0;
+/// Wide enough for a signed four-digit-and-a-decimal rate plus its unit:
+/// "-12.0/min" wrapped at 70 and broke after the slash, which reads as two
+/// numbers stacked rather than one rate.
+const COL_FARMING: f32 = 80.0;
 const COL_EATS: f32 = 74.0;
 const COL_OWNED: f32 = 46.0;
 const COL_GAP: f32 = 10.0;
@@ -457,7 +553,7 @@ fn spawn_store_header(store: &mut ChildSpawnerCommands) {
             for (label, width, optional) in [
                 ("UNIT", COL_NAME, false),
                 ("HIRE", COL_HIRE, false),
-                ("FARMING", COL_FARMING, false),
+                ("GAIN", COL_FARMING, false),
                 ("EATS", COL_EATS, true),
                 ("OWNED", COL_OWNED, false),
             ] {
@@ -482,7 +578,7 @@ fn spawn_store_header(store: &mut ChildSpawnerCommands) {
 }
 
 /// One unit: one line, columns aligned with the header above it.
-fn spawn_unit_row(store: &mut ChildSpawnerCommands, unit: Unit, action: ButtonAction) {
+fn spawn_unit_row(store: &mut ChildSpawnerCommands, unit: Unit) {
     store
         .spawn((
             Node {
@@ -509,7 +605,7 @@ fn spawn_unit_row(store: &mut ChildSpawnerCommands, unit: Unit, action: ButtonAc
 
             row.spawn((
                 Button,
-                action,
+                ButtonAction::Hire(unit.kind()),
                 HireButton(unit),
                 TableCell(COL_HIRE),
                 Node {
@@ -537,7 +633,7 @@ fn spawn_unit_row(store: &mut ChildSpawnerCommands, unit: Unit, action: ButtonAc
                 )],
             ));
 
-            spawn_unit_cell(row, unit, UnitStat::Farming, COL_FARMING, false);
+            spawn_unit_cell(row, unit, UnitStat::Gain, COL_FARMING, false);
             spawn_unit_cell(row, unit, UnitStat::Feeding, COL_EATS, true);
             spawn_unit_cell(row, unit, UnitStat::Owned, COL_OWNED, false);
         });
@@ -561,6 +657,8 @@ fn spawn_unit_cell(
             Text::new("-"),
             TextFont::from_font_size(14.0),
             TextColor(CREAM),
+            // A rate is one token. Allowed to wrap it breaks after the slash.
+            TextLayout::linebreak(LineBreak::NoWrap),
             UnitField { unit, stat },
         )],
     ));
@@ -602,6 +700,9 @@ fn spawn_rate_line(
                         Text::new("+0.0/min"),
                         TextFont::from_font_size(14.0),
                         TextColor(colour),
+                        // A rate is one token. Allowed to wrap it breaks after
+                        // the slash, which reads as two numbers.
+                        TextLayout::linebreak(LineBreak::NoWrap),
                         line,
                     ),
                     (
@@ -858,25 +959,45 @@ pub fn apply_responsive_hud(
     // "+6.0/" over "min", which reads as two different numbers.
     set_if_changed(
         &mut banner.padding,
-        UiRect::axes(px(if cell < MENU_BUTTON_WIDTH { 10.0 } else { 18.0 }), px(10.0)),
+        UiRect::axes(
+            px(if cell < MENU_BUTTON_WIDTH { 10.0 } else { 18.0 }),
+            px(10.0),
+        ),
     );
 }
 
-/// Fit the store to the dirt it is dug into.
+/// Fit the drawer to the dirt it is dug into, or to two thirds of the screen
+/// when the player has pulled it up.
 ///
-/// The store may not grow up onto the grass: a shop panel overlapping the
-/// ground line reads as a rendering fault, and it would cover the monkeys the
-/// player is there to watch. Landscape is the binding case - 390 px of height
-/// leaves the dirt 86 px - and a full row needs about 100, so below
-/// `COMPACT_DIRT` the panel drops its heading and shortens its buttons instead
-/// of spilling over the edge.
-#[allow(clippy::type_complexity)]
+/// At rest the store may not grow up onto the grass: a shop panel overlapping
+/// the ground line reads as a rendering fault, and it would cover the monkeys
+/// the player is there to watch. `DIRT_FRACTION` is derived from the same
+/// `ground_top` the scene is laid out against, so the two cannot drift.
+///
+/// That resting height fits two to three rows, which is fewer than the table
+/// has. The rest are reached by scrolling, or by pulling the drawer up - a
+/// deliberate act the player can undo, and the one state that is allowed to
+/// cover the scene. Landscape is the binding case: 390 px of height leaves the
+/// dirt 86 px, and a full row needs about 100, so below `COMPACT_DIRT` the panel
+/// drops its heading and shortens its buttons rather than spilling over.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn apply_store_layout(
     layout: Res<SceneLayout>,
+    expanded: Res<StoreExpanded>,
     mut store: Single<
         &mut Node,
         (
             With<StoreRoot>,
+            Without<StoreHeading>,
+            Without<OptionalColumn>,
+            Without<StoreScroll>,
+        ),
+    >,
+    mut scroll: Single<
+        &mut Node,
+        (
+            With<StoreScroll>,
+            Without<StoreRoot>,
             Without<StoreHeading>,
             Without<OptionalColumn>,
         ),
@@ -887,31 +1008,112 @@ pub fn apply_store_layout(
             With<StoreHeading>,
             Without<StoreRoot>,
             Without<OptionalColumn>,
+            Without<StoreScroll>,
         ),
     >,
     mut cells: Query<
         (&TableCell, Option<&OptionalColumn>, &mut Node),
-        (Without<StoreRoot>, Without<StoreHeading>),
+        (
+            Without<StoreRoot>,
+            Without<StoreHeading>,
+            Without<StoreScroll>,
+        ),
     >,
+    // Measured rather than assumed. The first version of this hard-coded a row
+    // pitch and a header height read off a screenshot's *baselines*, which are
+    // not box heights - the header came out 9 px short and the "peek" below
+    // grew into two thirds of a row of legible text, which is exactly the
+    // mid-row fold the quantising was added to prevent.
+    heading_size: Single<&ComputedNode, With<StoreHeading>>,
+    row_sizes: Query<&ComputedNode, With<Unit>>,
 ) {
     /// Below this much soil the header row is the first thing to go. A unit
-    /// line is self-describing enough without it - "6.0/min", "1.5/trip" - and
+    /// line is self-describing enough without it - "+6.0/min", "1.5/trip" - and
     /// it buys back a whole unit's worth of height in landscape.
     const COMPACT_DIRT: f32 = 120.0;
+    /// How much of the screen the drawer covers when pulled up. Two thirds
+    /// leaves the sky and the tops of both zones visible, so the scene is still
+    /// recognisably there behind the shop.
+    const EXPANDED_FRACTION: f32 = 2.0 / 3.0;
+    /// The grip's height plus its border, which the scroll region does not get.
+    const GRIP_HEIGHT: f32 = 18.0;
+    /// Fallbacks for the first frame, before anything has been measured.
+    const ROW_FALLBACK: f32 = 34.0;
+    const HEADER_FALLBACK: f32 = 14.0;
+    /// How much of the next row to leave showing under the clip.
+    ///
+    /// The store is soil-on-soil with no scrollbar, so a list that ends flush
+    /// with the panel edge looks finished rather than scrollable. A sliver of
+    /// the next row's gold button border is the universal "there is more" tell,
+    /// and it is the reason the height below is quantised at all: clipped to an
+    /// arbitrary fraction, the fold lands through the middle of a row's text
+    /// and reads as a rendering fault instead of an affordance.
+    const PEEK: f32 = 11.0;
 
     let dirt = layout.viewport.y * DIRT_FRACTION;
-    let compact = dirt < COMPACT_DIRT;
+    let target = if expanded.0 {
+        (layout.viewport.y * EXPANDED_FRACTION).max(dirt)
+    } else {
+        dirt
+    };
+    let compact = target < COMPACT_DIRT;
     let pad = bar_padding(layout.viewport.x);
+    let vertical = if compact { 4.0 } else { 10.0 };
+    let gap = if compact { 4.0 } else { 6.0 };
 
-    set_if_changed(&mut store.max_height, px(dirt));
-    set_if_changed(
-        &mut store.padding,
-        UiRect::axes(px(pad), px(if compact { 4.0 } else { 10.0 })),
-    );
-    set_if_changed(&mut store.row_gap, px(if compact { 4.0 } else { 6.0 }));
+    // Floor *and* ceiling. The store is dug into the dirt, so its gold top edge
+    // is the cut line through the soil and has to sit exactly on the ground
+    // line - if the panel shrinks to fit a short list it slides down and
+    // uncovers the serrated grass-to-dirt seam in the background art, which
+    // reads as a torn sprite. The floor keeps it pinned; the ceiling is what
+    // stops it climbing onto the grass.
+    set_if_changed(&mut store.min_height, px(dirt));
+    set_if_changed(&mut store.max_height, px(target));
+    set_if_changed(&mut store.padding, UiRect::axes(px(pad), px(vertical)));
+    set_if_changed(&mut store.row_gap, px(gap));
+    // A definite bound is what makes the region scroll rather than merely clip.
+    // Quantised to whole rows plus a peek, so the fold never cuts through text.
+    let measured = |size: f32, fallback: f32| if size > 0.0 { size } else { fallback };
+    let row_height = measured(
+        row_sizes
+            .iter()
+            .map(|node| node.size().y * node.inverse_scale_factor)
+            .fold(0.0, f32::max),
+        ROW_FALLBACK,
+    ) + gap;
+    let header_height = if compact {
+        0.0
+    } else {
+        measured(
+            heading_size.size().y * heading_size.inverse_scale_factor,
+            HEADER_FALLBACK,
+        ) + gap
+    };
+
+    let available = (target - GRIP_HEIGHT - vertical * 2.0).max(0.0);
+    let body = (available - header_height).max(0.0);
+    let whole_rows = (body / row_height).floor().max(1.0);
+    let list = header_height
+        + if whole_rows * row_height + PEEK <= body {
+            // Room for a clean peek at the next row.
+            whole_rows * row_height + PEEK
+        } else {
+            whole_rows * row_height
+        };
+    // A *definite* height, not a maximum. `max_height` lets the node size to its
+    // content and overflow, in which case the only thing still clipping is the
+    // panel's own `clip_y` - at the panel edge, through the middle of whatever
+    // row happens to be there. Capped at the content so a short list does not
+    // leave a band of empty soil under it.
+    let content = header_height + Unit::ROWS.len() as f32 * row_height;
+    set_if_changed(&mut scroll.height, px(list.min(available).min(content)));
     set_if_changed(
         &mut heading.display,
-        if compact { Display::None } else { Display::Flex },
+        if compact {
+            Display::None
+        } else {
+            Display::Flex
+        },
     );
 
     // Drop the EATS column when the full table will not fit, then scale what is
@@ -927,6 +1129,37 @@ pub fn apply_store_layout(
             if shown { Display::Flex } else { Display::None },
         );
         set_if_changed(&mut node.width, px((cell.0 * scale).floor()));
+    }
+}
+
+/// Wheel and drag scrolling for the drawer.
+///
+/// The store is soil-on-soil with no scrollbar, so without this the rows below
+/// the fold are unreachable on desktop - and the resting height shows only two
+/// of them in landscape.
+pub fn scroll_store(
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    mut scroll: Single<(&mut ScrollPosition, &ComputedNode), With<StoreScroll>>,
+) {
+    /// A wheel notch in `Line` mode carries a small number of lines, not pixels.
+    const LINE_HEIGHT: f32 = 22.0;
+
+    let delta: f32 = wheel
+        .read()
+        .map(|event| match event.unit {
+            bevy::input::mouse::MouseScrollUnit::Line => event.y * LINE_HEIGHT,
+            bevy::input::mouse::MouseScrollUnit::Pixel => event.y,
+        })
+        .sum();
+    if delta == 0.0 {
+        return;
+    }
+
+    let (position, node) = &mut *scroll;
+    let overflow = (node.content_size().y - node.size().y).max(0.0);
+    let next = (position.y - delta).clamp(0.0, overflow);
+    if position.y != next {
+        position.y = next;
     }
 }
 
@@ -970,8 +1203,10 @@ pub fn sync_readout(
     );
 
     // Before the first hire there is no production to explain, and three zeroed
-    // lines would be noise on an otherwise clean opening screen.
-    let show = workforce.count() > 0;
+    // lines would be noise on an otherwise clean opening screen. Staff count as
+    // a hire: a player who hand-harvests their way to a Chef before a Worker
+    // has a wage bill and nothing else on screen that would say so.
+    let show = workforce.count() > 0 || snapshot.staff > 0;
     set_if_changed(
         &mut panel.display,
         if show { Display::Flex } else { Display::None },
@@ -983,14 +1218,19 @@ pub fn sync_readout(
     for (row, mut node) in &mut rows {
         // Every line is permanent except HUNGRY, which appears only when it has
         // something to say. "HUNGRY 0/5" on a healthy run would be noise.
-        let shown = !matches!(row.0, RateLine::Hungry) || snapshot.stalled > 0;
+        let shown = !matches!(row.0, RateLine::Hungry) || snapshot.hungry > 0;
         set_if_changed(
             &mut node.display,
             if shown { Display::Flex } else { Display::None },
         );
     }
 
+    // Three steps, not two. The rates were sized when a lone worker read
+    // "+6.0/min"; a staffed economy reads "+85.7/min", which is wide enough to
+    // wrap inside a 390 px banner and break as "+85.7/" over "min".
     let rate_font = if layout.viewport.x < TINY_WIDTH {
+        11.0
+    } else if layout.viewport.x < NARROW_WIDTH {
         12.0
     } else {
         14.0
@@ -998,12 +1238,16 @@ pub fn sync_readout(
     for (line, mut text, mut font) in &mut lines {
         set_if_changed(&mut font.font_size, FontSize::Px(rate_font));
         if let RateLine::Hungry = line {
-            // A count, not a rate - and the only line that is allowed to
-            // disappear, because "HUNGRY 0" would be noise on a healthy run.
+            // A count of *support* monkeys, not of harvesters. A harvester's
+            // meal is reserved out of the delivery that funds it, so nothing
+            // else can spend it and it cannot go hungry; the monkeys who live
+            // on somebody else's surplus are the ones who can. Without this
+            // line an idle chef would read as an unexplained slowdown, because
+            // its whole output is a number inside somebody else's cycle time.
             set_if_changed(
                 &mut text.0,
-                if snapshot.stalled > 0 {
-                    format!("{}/{}", snapshot.stalled, snapshot.workers)
+                if snapshot.hungry > 0 {
+                    format!("{}/{}", snapshot.hungry, snapshot.staff)
                 } else {
                     String::new()
                 },
@@ -1024,52 +1268,74 @@ pub fn sync_readout(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn sync_shop(
     treasury: Res<Treasury>,
     workforce: Res<Workforce>,
+    staff: Res<Staff>,
+    fed: Res<FedStaff>,
+    committed: Res<Committed>,
     multipliers: Res<Multipliers>,
     mut fields: Query<(&UnitField, &mut Text, &mut TextColor)>,
-    mut buttons: Query<(&HireButton, &Interaction, &mut BackgroundColor, &mut BorderColor)>,
+    mut buttons: Query<(
+        &HireButton,
+        &Interaction,
+        &mut BackgroundColor,
+        &mut BorderColor,
+    )>,
 ) {
-    let plan = plan_hire(*workforce, *treasury, *multipliers);
+    let plan_for = |unit: Unit| {
+        plan_hire(
+            unit.kind(),
+            *workforce,
+            *staff,
+            *fed,
+            *treasury,
+            committed.0,
+            *multipliers,
+        )
+    };
 
     for (field, mut text, mut colour) in &mut fields {
-        let affordable = match field.unit {
-            Unit::Worker => plan.affordable,
-        };
+        let plan = plan_for(field.unit);
         // The price greys out with its button, rather than staying gold on a
         // dimmed fill and reading as mud.
         set_if_changed(
             &mut colour.0,
             match field.stat {
-                UnitStat::Price if affordable => GOLD,
+                UnitStat::Price if plan.affordable => GOLD,
                 UnitStat::Price => STORE_LABEL,
                 _ => CREAM,
             },
         );
-        let value = match field.unit {
-            Unit::Worker => match field.stat {
-                UnitStat::Price => format!("{:.1}", plan.cost),
-                // Per minute, like the readout. Per second, a worker reads
-                // 0.10 and a meal reads 0.03, and three numbers that all round
-                // to nothing are worse than no numbers at all.
-                UnitStat::Farming => {
-                    format!("{:.1}/min", worker_throughput(*multipliers) * 60.0)
+        let owned = match field.unit {
+            Unit::Worker => workforce.count(),
+            Unit::Support(role) => staff.count(role),
+        };
+        let value = match field.stat {
+            UnitStat::Price => format!("{:.1}", plan.cost),
+            // Per minute, like the readout. Per second a worker reads 0.10 and
+            // a meal reads 0.03, and three numbers that all round to nothing
+            // are worse than no numbers at all.
+            UnitStat::Gain => format!("{:+.1}/min", plan.gain_per_min),
+            // Per trip for a harvester, per shift for support. The two eat on
+            // entirely different clocks and a shared "/min" would hide that a
+            // worker's meal is a lump out of a delivery while a chef's is a
+            // standing charge.
+            UnitStat::Feeding => {
+                if plan.meal_period == SUPPORT_MEAL_PERIOD {
+                    format!("{:.1}/{:.0}s", plan.meal, SUPPORT_MEAL_PERIOD)
+                } else {
+                    format!("{:.1}/trip", plan.meal)
                 }
-                // Per trip, not per minute: this is the lump the counter
-                // visibly gives back a couple of seconds after each delivery,
-                // so quoting it as a rate would hide the thing it explains.
-                UnitStat::Feeding => format!("{:.1}/trip", plan.meal),
-                UnitStat::Owned => workforce.count().to_string(),
-            },
+            }
+            UnitStat::Owned => owned.to_string(),
         };
         set_if_changed(&mut text.0, value);
     }
 
     for (button, interaction, mut background, mut border) in &mut buttons {
-        let affordable = match button.0 {
-            Unit::Worker => plan.affordable,
-        };
+        let affordable = plan_for(button.0).affordable;
         // Affordability outranks hover: a button the player cannot press must
         // not light up under the cursor.
         //
@@ -1175,9 +1441,7 @@ mod tests {
         // and below this the value wraps mid-number - "+6.0/" over "min".
         const BANNER_MIN_WIDTH: f32 = 140.0;
 
-        for width in [
-            320.0, 390.0, 599.0, 600.0, 700.0, 844.0, 1280.0, 1920.0,
-        ] {
+        for width in [320.0, 390.0, 599.0, 600.0, 700.0, 844.0, 1280.0, 1920.0] {
             let pad = bar_padding(width);
             let gap = if width < NARROW_WIDTH {
                 BAR_GAP_NARROW

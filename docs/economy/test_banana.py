@@ -10,7 +10,8 @@ from collections import Counter
 from banana_model import (
     Params, State, KINDS, HARVESTERS, clone, assign, hypothetical,
     worker_cycle, cart_cycle, worker_throughput, cart_throughput, crewed,
-    gross, salary, net, cost, projected_delta, available, wage_reserve,
+    gross, salary, net, cost, projected_delta, available, committed,
+    unfunded_salary,
     affordable, offers, simulate, discrete_run, cart_delivery_trace,
     tech_level, m_tech, session_end, world_at,
     m_speed, m_unpack, research_rate)
@@ -29,25 +30,23 @@ def check(name, cond, detail=""):
 
 # ─────────────────────────────────────────────────────────────── invariants
 
-def t_I1_net_positive_after_every_purchase():
-    bad = [e for e in RUN if e["net"] <= 0 and e["n"] > 0]
-    check("I1   net rate strictly positive after every purchase", not bad,
-          f"{len(bad)} non-positive states")
+# I1 and I2 are deleted, and their tests with them. The pair used to assert that
+# net stayed positive after every purchase and that no negative-delta offer was
+# ever shown. Neither survives D19: an unfed monkey stops contributing to its
+# multiplier, so "net" at a given world state depends on who is currently eating,
+# and the gate had no way to name which state it meant. What replaced them is
+# I5-prime, below - the player can always pay, out of money that is theirs.
 
 
-def t_I1_gate_blocks_unaffordable_wages():
-    """A technologist bought into a one-monkey economy would invert net."""
-    tiny = State(W=1)
-    assign(tiny, P)
-    check("I1   wage gate rejects a purchase that would invert net",
-          not affordable("technologist", 1e9, tiny, P),
-          f"net after = {net(hypothetical('technologist', tiny, P), P):.3f}")
-
-
-def t_I2_offers_are_positive_delta():
-    bad = [e for e in RUN
-           if e["n"] > 0 and e["kind"] in HARVESTERS and e["payback"] <= 0]
-    check("I2   every ranked offer had positive projected delta", not bad)
+def t_I5_purchase_needs_unencumbered_bananas():
+    """A banana a monkey has already earned is not available to spend."""
+    s = world_at(RUN, 24)
+    held = committed(s, P)
+    price = cost("chef", s, P)
+    check("I5   a purchase clears against the unencumbered balance",
+          affordable("chef", price + held, s, P)
+          and not affordable("chef", price + held - 0.01, s, P),
+          f"price {price:.1f}, committed {held:.2f}")
 
 
 def t_I3_rate_is_pure_in_counts():
@@ -231,13 +230,58 @@ def t_chefs_accelerate_research():
 
 # ─────────────────────────────────────────────────────────── spiky delivery
 
-def t_wage_reserve_covers_the_dip():
-    worlds = [world_at(RUN, 24), world_at(RUN, 50)]
-    for s in worlds:
+def t_workers_alone_never_dip_from_a_cold_start():
+    """The reserve existed to cover a dip. D20 removes the dip instead: a
+    worker's meal is reserved out of the delivery that funds it, so nothing
+    can spend it in between and the treasury cannot fall below where it stood
+    before that delivery landed. From zero bananas, with any workforce."""
+    for w in (1, 4, 15, 40):
+        s = State(W=w)
         lo, _ = discrete_run(s, P)
-        check(f"SPIK wage reserve covers the dip at K={s.K}",
-              wage_reserve(s, P) >= -lo * 0.8,
-              f"reserve {wage_reserve(s, P):.1f} vs dip {lo:.1f}")
+        check(f"SPIK {w} workers from zero never go underwater",
+              lo >= -1e-9, f"dipped to {lo:.4f}")
+
+
+def t_support_drains_but_only_at_its_own_wage():
+    """Support staff have no delivery of their own, so they *do* draw the
+    treasury down between harvests - that is D19's deal, and starving is how it
+    resolves. What must not happen is support reaching a worker's reserved
+    meal: the dip has to be explained entirely by the support payroll, with
+    nothing extra leaking out of the harvest cycle.
+
+    The counterfactual is the test. Deducting the same payroll from a
+    worker-only run has to produce the same floor; if the harvest cycle were
+    leaking, the real run would be deeper."""
+    s = world_at(RUN, 24)
+    s.K, s.A = 0, 0                                 # workers and support only
+    lo, _ = discrete_run(s, P)
+
+    bare = State(W=s.W)
+    bare_lo, _ = discrete_run(bare, P)
+    # The longest a worker delivery can be away, which is the whole exposure.
+    gap = sum(worker_cycle(s, P)) / max(s.W - s.A, 1)
+    payroll = unfunded_salary(s, P) * (gap + sum(worker_cycle(s, P)))
+
+    check("SPIK the dip is the support payroll and nothing more",
+          bare_lo - payroll <= lo <= 0.0,
+          f"dipped to {lo:.2f}, payroll bound {bare_lo - payroll:.2f}")
+
+
+def t_the_remaining_dip_is_exactly_what_the_carts_owe():
+    """Carts still drain continuously, so they still dip. This is the one
+    outstanding cost of the support increment, and it closes when the cart
+    increment gives carts the same snack every other harvester has.
+
+    Bounded by the unfunded wage bill across the longest gap between
+    deliveries - which is the old reserve formula, now used as a *description*
+    of a known divergence rather than as a gate the player pays for."""
+    for s in [world_at(RUN, 24), world_at(RUN, 50)]:
+        lo, _ = discrete_run(s, P)
+        gap = sum(cart_cycle(s, P)) / max(s.K, 1)
+        bound = unfunded_salary(s, P) * gap * 2.0
+        check(f"SPIK the dip at K={s.K} is bounded by the unfunded wage bill",
+              -bound <= lo <= 0.0,
+              f"dipped to {lo:.1f}, bound {-bound:.1f}")
 
 
 def t_reserve_does_not_strangle_pacing():
