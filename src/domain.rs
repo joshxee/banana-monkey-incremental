@@ -20,8 +20,8 @@ pub const GROVE_DISTANCE: f64 = 100.0;
 pub const T_PICK: f64 = 1.00;
 /// Seconds per banana, at the depot.
 pub const T_UNLOAD: f64 = 0.50;
-/// Bananas per second, per worker (D2: this is a per-unit figure, and the
-/// [`Wage`] component is what each worker's meal is actually derived from).
+/// Bananas per second, per worker (D2: this is a per-unit figure, and
+/// [`CycleSpec::wage`] is what each worker's meal is actually derived from).
 pub const WORKER_WAGE: f64 = 0.03;
 /// Share of a worker's round trip spent eating at the stall, immediately after
 /// unloading. At the base parameters this is 2.5 s of a 50 s cycle.
@@ -51,6 +51,52 @@ pub const SIM_HZ: f64 = 20.0;
 pub const MAX_SAFE_BANANAS: f64 = 9_007_199_254_740_991.0;
 
 // ───────────────────────────────────────────────────────────── multipliers
+
+/// Everything that distinguishes one harvester from another, in one place.
+///
+/// D2 put wages on a per-unit component so tiers tune independently; this is
+/// that decision widened to every parameter the cycle reads. A harvester tier is
+/// then a `const` here rather than a branch inside the cycle, and
+/// [`HarvestCycle`] never learns which kind of unit it is driving.
+///
+/// `crew` is the one term that is not simply "the worker number, but bigger": a
+/// cart's crew picks in parallel, so it divides the picking time only. Travel
+/// and unloading are properties of the vehicle, not of how many monkeys are
+/// aboard - which is exactly the asymmetry that makes Chefs and Unpackers pull
+/// in different directions (whitepaper §5).
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct CycleSpec {
+    /// Bananas delivered per completed round trip.
+    pub payload: f64,
+    /// Metres per second, before `M_speed`.
+    pub speed: f64,
+    /// Metres to the grove, one way.
+    pub distance: f64,
+    /// Seconds per banana, at the grove.
+    pub t_pick: f64,
+    /// Seconds per banana, at the depot.
+    pub t_unload: f64,
+    /// Share of the round trip spent eating, immediately after unloading.
+    pub snack_fraction: f64,
+    /// Bananas per second. The meal is derived from this and the cycle time, so
+    /// this figure stays true at every multiplier.
+    pub wage: f64,
+    /// Monkeys picking in parallel. 1 on foot.
+    pub crew: f64,
+}
+
+impl CycleSpec {
+    pub const WORKER: Self = Self {
+        payload: WORKER_PAYLOAD,
+        speed: WORKER_SPEED,
+        distance: GROVE_DISTANCE,
+        t_pick: T_PICK,
+        t_unload: T_UNLOAD,
+        snack_fraction: SNACK_FRACTION,
+        wage: WORKER_WAGE,
+        crew: 1.0,
+    };
+}
 
 /// D4: every multiplier is additive within its term, `M = 1 + count × bonus`.
 ///
@@ -109,31 +155,36 @@ impl Segment {
     /// pick, unload or eat. D13 stores progress as remaining work rather than
     /// elapsed time, so a multiplier bought mid-trip speeds up the remainder of
     /// every journey already in flight without teleporting anyone.
-    pub fn nominal_work(self, multipliers: Multipliers) -> f64 {
+    pub fn nominal_work(self, spec: CycleSpec, multipliers: Multipliers) -> f64 {
         match self {
-            Segment::ToGrove | Segment::ToDepot => GROVE_DISTANCE,
-            Segment::Pick | Segment::Unload => WORKER_PAYLOAD,
-            Segment::Snack => meal(multipliers),
+            Segment::ToGrove | Segment::ToDepot => spec.distance,
+            Segment::Pick | Segment::Unload => spec.payload,
+            Segment::Snack => meal(spec, multipliers),
         }
     }
 
     /// Work consumed per second at the current multipliers.
-    pub fn rate(self, multipliers: Multipliers) -> f64 {
+    pub fn rate(self, spec: CycleSpec, multipliers: Multipliers) -> f64 {
         match self {
-            Segment::ToGrove | Segment::ToDepot => WORKER_SPEED * multipliers.speed,
-            Segment::Pick => multipliers.tech / T_PICK,
-            Segment::Unload => multipliers.unpack / T_UNLOAD,
-            Segment::Snack => meal(multipliers) / Segment::Snack.duration(multipliers),
+            Segment::ToGrove | Segment::ToDepot => spec.speed * multipliers.speed,
+            // The crew picks in parallel, so it divides the picking time. It
+            // deliberately does not touch travel or unloading: a full cart
+            // walks and is emptied at the same rate as an empty one.
+            Segment::Pick => spec.crew * multipliers.tech / spec.t_pick,
+            Segment::Unload => multipliers.unpack / spec.t_unload,
+            Segment::Snack => {
+                meal(spec, multipliers) / Segment::Snack.duration(spec, multipliers)
+            }
         }
     }
 
-    pub fn duration(self, multipliers: Multipliers) -> f64 {
+    pub fn duration(self, spec: CycleSpec, multipliers: Multipliers) -> f64 {
         match self {
             // Taken from the cycle rather than derived from work over rate. A
             // snack's nominal work is the meal, and the meal is defined against
             // the cycle time, so deriving this one the usual way would recurse.
-            Segment::Snack => cycle_time(multipliers) - work_time(multipliers),
-            _ => self.nominal_work(multipliers) / self.rate(multipliers),
+            Segment::Snack => cycle_time(spec, multipliers) - work_time(spec, multipliers),
+            _ => self.nominal_work(spec, multipliers) / self.rate(spec, multipliers),
         }
     }
 
@@ -161,11 +212,11 @@ impl Segment {
 
 /// Seconds a worker spends actually working: the doc's three addends, with
 /// travel split into two legs.
-pub fn work_time(multipliers: Multipliers) -> f64 {
+pub fn work_time(spec: CycleSpec, multipliers: Multipliers) -> f64 {
     Segment::ORDER
         .iter()
         .filter(|segment| !matches!(segment, Segment::Snack))
-        .map(|segment| segment.duration(multipliers))
+        .map(|segment| segment.duration(spec, multipliers))
         .sum()
 }
 
@@ -176,8 +227,8 @@ pub fn work_time(multipliers: Multipliers) -> f64 {
 /// Inflating the working time by the feeding share, rather than summing every
 /// segment, is what keeps [`Segment::Snack`] a constant fraction of the trip
 /// without `duration` recursing into itself.
-pub fn cycle_time(multipliers: Multipliers) -> f64 {
-    work_time(multipliers) / (1.0 - SNACK_FRACTION)
+pub fn cycle_time(spec: CycleSpec, multipliers: Multipliers) -> f64 {
+    work_time(spec, multipliers) / (1.0 - spec.snack_fraction)
 }
 
 /// Bananas one worker eats per round trip.
@@ -186,13 +237,18 @@ pub fn cycle_time(multipliers: Multipliers) -> f64 {
 /// `0.03 /s` stays true at every multiplier. A Chef that halves the cycle halves
 /// the meal with it; if the meal were a constant, buying Chefs would silently
 /// double the cost of labour and undo their own benefit.
-pub fn meal(multipliers: Multipliers) -> f64 {
-    WORKER_WAGE * cycle_time(multipliers)
+pub fn meal(spec: CycleSpec, multipliers: Multipliers) -> f64 {
+    spec.wage * cycle_time(spec, multipliers)
 }
 
-/// Steady-state bananas per second for a single worker.
+/// Steady-state bananas per second for a single harvester.
+pub fn throughput(spec: CycleSpec, multipliers: Multipliers) -> f64 {
+    spec.payload / cycle_time(spec, multipliers)
+}
+
+/// Steady-state bananas per second for a single worker on foot.
 pub fn worker_throughput(multipliers: Multipliers) -> f64 {
-    WORKER_PAYLOAD / cycle_time(multipliers)
+    throughput(CycleSpec::WORKER, multipliers)
 }
 
 /// What a single worker earns and eats per round trip. Passed into
@@ -205,10 +261,10 @@ pub struct CycleTerms {
 }
 
 impl CycleTerms {
-    pub fn for_worker(payload: f64, wage: f64, multipliers: Multipliers) -> Self {
+    pub fn new(spec: CycleSpec, multipliers: Multipliers) -> Self {
         Self {
-            payload,
-            meal: wage * cycle_time(multipliers),
+            payload: spec.payload,
+            meal: meal(spec, multipliers),
         }
     }
 }
@@ -227,31 +283,32 @@ pub struct HarvestCycle {
     remaining: f64,
 }
 
-impl Default for HarvestCycle {
-    fn default() -> Self {
+impl HarvestCycle {
+    /// A unit standing at the stall, about to walk out. There is deliberately
+    /// no `Default`: the outbound leg's remaining work is the route length,
+    /// which is a property of the unit's [`CycleSpec`] and not a constant.
+    pub fn starting(spec: CycleSpec) -> Self {
         Self {
             segment: Segment::ToGrove,
             // Multiplier-independent for the outbound leg: it is a distance.
-            remaining: GROVE_DISTANCE,
+            remaining: spec.distance,
         }
     }
-}
 
-impl HarvestCycle {
     /// Construct a cycle at an elapsed-time phase without advancing it.
     /// Advancing here would emit delivery or meal output while merely placing
     /// an avatar on the route.
-    pub fn from_phase(phase: f64, multipliers: Multipliers) -> Self {
-        let cycle = cycle_time(multipliers);
+    pub fn from_phase(phase: f64, spec: CycleSpec, multipliers: Multipliers) -> Self {
+        let cycle = cycle_time(spec, multipliers);
         let mut remaining_phase = phase.rem_euclid(cycle);
 
         for segment in Segment::ORDER {
-            let duration = segment.duration(multipliers);
+            let duration = segment.duration(spec, multipliers);
             if remaining_phase < duration {
                 let fraction = (remaining_phase / duration).clamp(0.0, 1.0);
                 return Self {
                     segment,
-                    remaining: segment.nominal_work(multipliers) * (1.0 - fraction),
+                    remaining: segment.nominal_work(spec, multipliers) * (1.0 - fraction),
                 };
             }
             remaining_phase -= duration;
@@ -259,7 +316,7 @@ impl HarvestCycle {
 
         // Floating-point subtraction can land exactly on the exclusive upper
         // bound. Treat that boundary as phase zero.
-        Self::default()
+        Self::starting(spec)
     }
 
     pub fn segment(self) -> Segment {
@@ -269,8 +326,8 @@ impl HarvestCycle {
     /// How far through the current segment the worker is, in 0.0..=1.0.
     /// Rendering derives position from this, so the avatar is a pure function
     /// of simulation state.
-    pub fn segment_fraction(self, multipliers: Multipliers) -> f64 {
-        let nominal = self.segment.nominal_work(multipliers);
+    pub fn segment_fraction(self, spec: CycleSpec, multipliers: Multipliers) -> f64 {
+        let nominal = self.segment.nominal_work(spec, multipliers);
         if nominal <= 0.0 {
             return 1.0;
         }
@@ -305,6 +362,7 @@ impl HarvestCycle {
     pub fn advance(
         &mut self,
         dt: f64,
+        spec: CycleSpec,
         multipliers: Multipliers,
         terms: CycleTerms,
         larder: &mut f64,
@@ -318,7 +376,7 @@ impl HarvestCycle {
 
         while budget > 0.0 && guard < 64 {
             guard += 1;
-            let rate = self.segment.rate(multipliers);
+            let rate = self.segment.rate(spec, multipliers);
             if !(rate > 0.0 && rate.is_finite()) {
                 debug_assert!(false, "segment rate must be positive and finite");
                 break;
@@ -331,7 +389,7 @@ impl HarvestCycle {
             // residual costs a whole extra tick at every boundary. The
             // tolerance is a billionth of the segment's duration - about 20
             // nanoseconds.
-            let tolerance = self.segment.duration(multipliers) * 1e-9;
+            let tolerance = self.segment.duration(spec, multipliers) * 1e-9;
             if needed > budget + tolerance {
                 self.remaining -= rate * budget;
                 break;
@@ -365,7 +423,7 @@ impl HarvestCycle {
 
             budget = (budget - needed).max(0.0);
             self.segment = self.segment.next();
-            self.remaining = self.segment.nominal_work(multipliers);
+            self.remaining = self.segment.nominal_work(spec, multipliers);
         }
 
         // The guard is a safety net against a zero rate, not a work limit. If
@@ -378,19 +436,6 @@ impl HarvestCycle {
         output
     }
 }
-
-// ────────────────────────────────────────────────────────────────── wages
-
-/// D2: wages are a per-unit component, not a global formula, so tiers tune
-/// independently and a future non-harvesting unit cannot be silently omitted
-/// from the wage bill.
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
-pub struct Wage(pub f64);
-
-/// What a worker delivers per completed cycle. `delivery_scale` is 1.0 for
-/// workers; carts will sample a crew fraction here (D8).
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
-pub struct Payload(pub f64);
 
 // ────────────────────────────────────────────────────────────── treasury
 
@@ -593,7 +638,7 @@ pub fn plan_hire(workforce: Workforce, treasury: Treasury, multipliers: Multipli
 
     HirePlan {
         cost,
-        meal: meal(multipliers),
+        meal: meal(CycleSpec::WORKER, multipliers),
         net_delta: after.net_per_sec - before.net_per_sec,
         affordable: after.net_per_sec > 0.0 && treasury.bananas() >= cost,
     }
@@ -611,22 +656,28 @@ mod tests {
         Multipliers::default()
     }
 
+    const SPEC: CycleSpec = CycleSpec::WORKER;
+
     fn terms(multipliers: Multipliers) -> CycleTerms {
-        CycleTerms::for_worker(WORKER_PAYLOAD, WORKER_WAGE, multipliers)
+        CycleTerms::new(SPEC, multipliers)
+    }
+
+    fn fresh() -> HarvestCycle {
+        HarvestCycle::starting(SPEC)
     }
 
     /// One tick against a bottomless larder.
     fn tick(cycle: &mut HarvestCycle, multipliers: Multipliers) -> CycleOutput {
         let mut larder = FULL_LARDER;
-        cycle.advance(SIM_DT, multipliers, terms(multipliers), &mut larder)
+        cycle.advance(SIM_DT, SPEC, multipliers, terms(multipliers), &mut larder)
     }
 
     /// Wind a fresh cycle forward to an arbitrary phase, the way the simulation
     /// would: there is no way to construct one mid-route out of thin air.
     fn at_phase(phase: f64, multipliers: Multipliers) -> HarvestCycle {
-        let mut cycle = HarvestCycle::default();
+        let mut cycle = fresh();
         let mut larder = FULL_LARDER;
-        cycle.advance(phase, multipliers, terms(multipliers), &mut larder);
+        cycle.advance(phase, SPEC, multipliers, terms(multipliers), &mut larder);
         cycle
     }
 
@@ -636,24 +687,24 @@ mod tests {
     fn segment_durations_match_the_whitepaper() {
         let m = base();
 
-        assert_eq!(Segment::ToGrove.duration(m), 20.0);
-        assert_eq!(Segment::Pick.duration(m), 5.0);
-        assert_eq!(Segment::ToDepot.duration(m), 20.0);
-        assert_eq!(Segment::Unload.duration(m), 2.5);
-        assert_eq!(Segment::Snack.duration(m), 2.5);
-        assert_eq!(work_time(m), 47.5);
-        assert_eq!(cycle_time(m), 50.0);
+        assert_eq!(Segment::ToGrove.duration(SPEC, m), 20.0);
+        assert_eq!(Segment::Pick.duration(SPEC, m), 5.0);
+        assert_eq!(Segment::ToDepot.duration(SPEC, m), 20.0);
+        assert_eq!(Segment::Unload.duration(SPEC, m), 2.5);
+        assert_eq!(Segment::Snack.duration(SPEC, m), 2.5);
+        assert_eq!(work_time(SPEC, m), 47.5);
+        assert_eq!(cycle_time(SPEC, m), 50.0);
         // Every segment must still add up to the trip, even though the cycle is
         // derived from the working time rather than summed from the parts.
-        let summed: f64 = Segment::ORDER.iter().map(|s| s.duration(m)).sum();
-        assert!((summed - cycle_time(m)).abs() < 1e-12);
+        let summed: f64 = Segment::ORDER.iter().map(|s| s.duration(SPEC, m)).sum();
+        assert!((summed - cycle_time(SPEC, m)).abs() < 1e-12);
         // Travel is 80% of a worker's life; that asymmetry is what makes Chefs
         // worth buying later (whitepaper §2).
         assert_eq!(worker_throughput(m), 0.1);
         // A worker eats 1.5 of the 5 it brings home, which is the published
         // 0.03/s expressed per trip instead of per second.
-        assert_eq!(meal(m), 1.5);
-        assert!((meal(m) / cycle_time(m) - WORKER_WAGE).abs() < 1e-15);
+        assert_eq!(meal(SPEC, m), 1.5);
+        assert!((meal(SPEC, m) / cycle_time(SPEC, m) - WORKER_WAGE).abs() < 1e-15);
     }
 
     #[test]
@@ -667,13 +718,13 @@ mod tests {
                 ..Multipliers::default()
             };
             assert!(
-                (meal(m) / cycle_time(m) - WORKER_WAGE).abs() < 1e-15,
+                (meal(SPEC, m) / cycle_time(SPEC, m) - WORKER_WAGE).abs() < 1e-15,
                 "{speed}"
             );
             // And eating stays the same share of the trip, so a shortened cycle
             // does not turn into a life spent at the stall.
             assert!(
-                (Segment::Snack.duration(m) / cycle_time(m) - SNACK_FRACTION).abs() < 1e-15,
+                (Segment::Snack.duration(SPEC, m) / cycle_time(SPEC, m) - SNACK_FRACTION).abs() < 1e-15,
                 "{speed}"
             );
         }
@@ -705,7 +756,7 @@ mod tests {
         // the tick that exactly completes the work, which is what the inclusive
         // `needed <= budget` comparison buys.
         let m = base();
-        let mut cycle = HarvestCycle::default();
+        let mut cycle = fresh();
         let (mut delivered_on, mut ate_on) = (None, None);
 
         for t in 1..=1_050 {
@@ -727,7 +778,7 @@ mod tests {
         // The naive `remaining <= 0.0` test overshoots Pick, Unload and Snack
         // by one tick each on binary residual alone.
         let m = base();
-        let mut cycle = HarvestCycle::default();
+        let mut cycle = fresh();
         let mut boundaries = Vec::new();
 
         for t in 1..=1_000 {
@@ -755,7 +806,7 @@ mod tests {
         // Discarding the leftover would lose dt/2 per boundary: 0.125s per
         // cycle, a throughput error that grows as multipliers shorten it.
         let m = base();
-        let mut cycle = HarvestCycle::default();
+        let mut cycle = fresh();
         let mut delivered = 0.0;
 
         for _ in 0..20_000 {
@@ -794,33 +845,33 @@ mod tests {
     fn a_multiplier_bought_mid_trip_speeds_up_the_remainder() {
         // D13's whole point: remaining work is invariant under a multiplier
         // change, so nobody teleports and nobody loses ground.
-        let mut cycle = HarvestCycle::default();
+        let mut cycle = fresh();
         let mut larder = FULL_LARDER;
-        cycle.advance(10.0, base(), terms(base()), &mut larder);
-        assert_eq!(cycle.segment_fraction(base()), 0.5);
+        cycle.advance(10.0, SPEC, base(), terms(base()), &mut larder);
+        assert_eq!(cycle.segment_fraction(SPEC, base()), 0.5);
 
         let chefs = Multipliers {
             speed: 2.0,
             ..base()
         };
-        cycle.advance(5.0, chefs, terms(chefs), &mut larder);
+        cycle.advance(5.0, SPEC, chefs, terms(chefs), &mut larder);
 
         assert_eq!(cycle.segment(), Segment::Pick);
-        assert_eq!(cycle.segment_fraction(chefs), 0.0);
+        assert_eq!(cycle.segment_fraction(SPEC, chefs), 0.0);
     }
 
     #[test]
     fn winding_a_cycle_forward_lands_in_the_right_segment() {
         let m = base();
 
-        assert_eq!(at_phase(0.0, m), HarvestCycle::default());
+        assert_eq!(at_phase(0.0, m), fresh());
         assert_eq!(at_phase(10.0, m).segment(), Segment::ToGrove);
-        assert_eq!(at_phase(10.0, m).segment_fraction(m), 0.5);
+        assert_eq!(at_phase(10.0, m).segment_fraction(SPEC, m), 0.5);
         assert_eq!(at_phase(22.0, m).segment(), Segment::Pick);
         assert_eq!(at_phase(30.0, m).segment(), Segment::ToDepot);
         assert_eq!(at_phase(46.0, m).segment(), Segment::Unload);
         assert_eq!(at_phase(48.0, m).segment(), Segment::Snack);
-        assert_eq!(at_phase(50.0, m), HarvestCycle::default());
+        assert_eq!(at_phase(50.0, m), fresh());
     }
 
     #[test]
@@ -843,10 +894,10 @@ mod tests {
     fn every_worker_starts_at_the_stall_facing_the_grove() {
         // A new monkey always walks out of the stall, which is the purchase's
         // visible consequence. Only restored workers receive a phase.
-        let fresh = HarvestCycle::default();
+        let fresh = fresh();
 
         assert_eq!(fresh.segment(), Segment::ToGrove);
-        assert_eq!(fresh.segment_fraction(base()), 0.0);
+        assert_eq!(fresh.segment_fraction(SPEC, base()), 0.0);
         assert!(!fresh.is_hungry());
     }
 
@@ -854,16 +905,16 @@ mod tests {
     fn phase_constructor_uses_elapsed_time_segment_boundaries() {
         let m = base();
 
-        assert_eq!(HarvestCycle::from_phase(0.0, m), HarvestCycle::default());
-        assert_eq!(HarvestCycle::from_phase(20.0, m).segment(), Segment::Pick);
-        assert_eq!(HarvestCycle::from_phase(25.0, m).segment(), Segment::ToDepot);
-        assert_eq!(HarvestCycle::from_phase(45.0, m).segment(), Segment::Unload);
-        assert_eq!(HarvestCycle::from_phase(47.5, m).segment(), Segment::Snack);
-        assert_eq!(HarvestCycle::from_phase(50.0, m), HarvestCycle::default());
+        assert_eq!(HarvestCycle::from_phase(0.0, SPEC, m), fresh());
+        assert_eq!(HarvestCycle::from_phase(20.0, SPEC, m).segment(), Segment::Pick);
+        assert_eq!(HarvestCycle::from_phase(25.0, SPEC, m).segment(), Segment::ToDepot);
+        assert_eq!(HarvestCycle::from_phase(45.0, SPEC, m).segment(), Segment::Unload);
+        assert_eq!(HarvestCycle::from_phase(47.5, SPEC, m).segment(), Segment::Snack);
+        assert_eq!(HarvestCycle::from_phase(50.0, SPEC, m), fresh());
 
-        let halfway_home = HarvestCycle::from_phase(35.0, m);
+        let halfway_home = HarvestCycle::from_phase(35.0, SPEC, m);
         assert_eq!(halfway_home.segment(), Segment::ToDepot);
-        assert_eq!(halfway_home.segment_fraction(m), 0.5);
+        assert_eq!(halfway_home.segment_fraction(SPEC, m), 0.5);
         assert!(halfway_home.segment().holds_banana());
         assert!(!halfway_home.is_hungry());
     }
@@ -876,28 +927,28 @@ mod tests {
         // credit strictly precedes the debit and strictly exceeds it, so the
         // larder cannot be lower after a cycle than it was before.
         let m = base();
-        let mut cycle = HarvestCycle::default();
+        let mut cycle = fresh();
         let mut larder = 0.0;
         let mut worst = f64::INFINITY;
 
         for _ in 0..1_000 {
-            cycle.advance(SIM_DT, m, terms(m), &mut larder);
+            cycle.advance(SIM_DT, SPEC, m, terms(m), &mut larder);
             worst = worst.min(larder);
         }
 
         assert!(worst >= 0.0, "larder dipped to {worst}");
-        assert!((larder - (WORKER_PAYLOAD - meal(m))).abs() < 1e-12);
+        assert!((larder - (WORKER_PAYLOAD - meal(SPEC, m))).abs() < 1e-12);
     }
 
     #[test]
     fn a_worker_with_nothing_to_eat_stalls_instead_of_eating_on_credit() {
         let m = base();
-        let mut cycle = HarvestCycle::default();
+        let mut cycle = fresh();
         let mut larder = 0.0;
 
         // Run to the moment the delivery lands, then have the player spend it.
         for _ in 0..950 {
-            cycle.advance(SIM_DT, m, terms(m), &mut larder);
+            cycle.advance(SIM_DT, SPEC, m, terms(m), &mut larder);
         }
         assert_eq!(cycle.segment(), Segment::Snack);
         assert_eq!(larder, WORKER_PAYLOAD);
@@ -905,7 +956,7 @@ mod tests {
 
         // Two full cycles' worth of ticks with an empty larder.
         for _ in 0..2_000 {
-            let output = cycle.advance(SIM_DT, m, terms(m), &mut larder);
+            let output = cycle.advance(SIM_DT, SPEC, m, terms(m), &mut larder);
             assert_eq!(output, CycleOutput::default());
         }
         assert!(cycle.is_hungry());
@@ -914,9 +965,9 @@ mod tests {
         // Feeding it clears exactly the meal that was owed - the debt was
         // deferred, never forgiven, so starving is a penalty and not a wage
         // holiday - and the worker goes straight back to work.
-        larder = meal(m);
-        let output = cycle.advance(SIM_DT, m, terms(m), &mut larder);
-        assert_eq!(output.eaten, meal(m));
+        larder = meal(SPEC, m);
+        let output = cycle.advance(SIM_DT, SPEC, m, terms(m), &mut larder);
+        assert_eq!(output.eaten, meal(SPEC, m));
         assert_eq!(larder, 0.0);
         assert_eq!(cycle.segment(), Segment::ToGrove);
         assert!(!cycle.is_hungry());
@@ -933,7 +984,7 @@ mod tests {
 
         for _ in 0..(600.0 * SIM_HZ) as u32 {
             for cycle in &mut cycles {
-                cycle.advance(SIM_DT, m, terms(m), &mut larder);
+                cycle.advance(SIM_DT, SPEC, m, terms(m), &mut larder);
             }
             worst = worst.min(larder);
         }
@@ -1124,13 +1175,13 @@ mod tests {
         // is meant to read as.
         let m = base();
         let mut treasury = Treasury::default();
-        let mut cycle = HarvestCycle::default();
+        let mut cycle = fresh();
         let mut seen = Vec::new();
         let checkpoints = [400u32, 949, 950, 999, 1_000, 2_000];
 
         for t in 1..=2_000u32 {
             let mut larder = treasury.bananas();
-            let output = cycle.advance(SIM_DT, m, terms(m), &mut larder);
+            let output = cycle.advance(SIM_DT, SPEC, m, terms(m), &mut larder);
             treasury.credit(output.delivered);
             treasury.charge(output.eaten);
             if checkpoints.contains(&t) {
@@ -1170,13 +1221,13 @@ mod tests {
             if plan.affordable {
                 treasury.charge(plan.cost);
                 workforce.hire();
-                cycles.push(HarvestCycle::default());
+                cycles.push(fresh());
             }
 
             let mut larder = treasury.bananas();
             let (mut delivered, mut eaten) = (0.0, 0.0);
             for cycle in &mut cycles {
-                let output = cycle.advance(SIM_DT, m, terms(m), &mut larder);
+                let output = cycle.advance(SIM_DT, SPEC, m, terms(m), &mut larder);
                 delivered += output.delivered;
                 eaten += output.eaten;
             }

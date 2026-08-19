@@ -16,8 +16,7 @@ use bevy::prelude::*;
 
 use crate::{
     domain::{
-        HarvestCycle, Multipliers, Payload, Segment, WORKER_PAYLOAD, WORKER_WAGE, Wage, Workforce,
-        cycle_time,
+        CycleSpec, HarvestCycle, Multipliers, Segment, Workforce, cycle_time,
     },
     game::SceneLayout,
 };
@@ -224,17 +223,17 @@ pub fn spawn_missing_workers(
         let cycle = if was_restored {
             restored.remaining -= 1;
             HarvestCycle::from_phase(
-                restored.rng.f64() * cycle_time(*multipliers),
+                restored.rng.f64() * cycle_time(CycleSpec::WORKER, *multipliers),
+                CycleSpec::WORKER,
                 *multipliers,
             )
         } else {
-            HarvestCycle::default()
+            HarvestCycle::starting(CycleSpec::WORKER)
         };
         let mut worker = commands.spawn((
             Worker,
             cycle,
-            Payload(WORKER_PAYLOAD),
-            Wage(WORKER_WAGE),
+            CycleSpec::WORKER,
             Lane(index as u32),
             Pose::Run,
             Sprite {
@@ -295,7 +294,7 @@ pub fn position_workers(
     >,
 ) {
     for (entity, cycle, lane, hired, mut transform, mut sprite) in &mut workers {
-        let progress = cycle.segment_fraction(*multipliers) as f32;
+        let progress = cycle.segment_fraction(CycleSpec::WORKER, *multipliers) as f32;
         let (x, facing_right) = match cycle.segment() {
             Segment::ToGrove => (
                 layout.stall_stand + (layout.grove_stand - layout.stall_stand) * progress,
@@ -397,7 +396,7 @@ pub fn animate_workers(
         let next_pose = if walking { Pose::Run } else { Pose::Idle };
 
         let index = if walking {
-            (cycle.segment_fraction(*multipliers) as f32 * RUN_FRAMES_PER_LEG) as usize % RUN_FRAMES
+            (cycle.segment_fraction(CycleSpec::WORKER, *multipliers) as f32 * RUN_FRAMES_PER_LEG) as usize % RUN_FRAMES
         } else {
             (elapsed * IDLE_FPS as f64) as usize % IDLE_FRAMES
         };

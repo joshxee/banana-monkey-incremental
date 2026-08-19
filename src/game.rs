@@ -10,8 +10,8 @@ use bevy::{
 
 use crate::{
     domain::{
-        BANANAS_PER_HARVEST, CycleTerms, EconomySnapshot, HarvestCycle, Multipliers, Payload,
-        SIM_HZ, Treasury, Wage, Workforce, plan_hire, restart_run,
+        BANANAS_PER_HARVEST, CycleSpec, CycleTerms, EconomySnapshot, HarvestCycle, Multipliers,
+        SIM_HZ, Treasury, Workforce, plan_hire, restart_run,
     },
     hud, persistence,
     worker::{self, RestoredCycle, Worker},
@@ -821,15 +821,7 @@ fn advance_cycles(
     multipliers: Res<Multipliers>,
     treasury: Res<Treasury>,
     mut queue: ResMut<DeliveryQueue>,
-    mut workers: Query<
-        (
-            Entity,
-            &mut HarvestCycle,
-            &Payload,
-            &Wage,
-            Option<&RestoredCycle>,
-        ),
-    >,
+    mut workers: Query<(Entity, &mut HarvestCycle, &CycleSpec, Option<&RestoredCycle>)>,
     mut commands: Commands,
 ) {
     // f64 from the fixed clock. `delta_secs()` is f32, which would make the
@@ -847,18 +839,18 @@ fn advance_cycles(
         .sum();
     let mut larder = treasury.bananas() + pending;
 
-    for (entity, mut cycle, payload, wage, restored) in &mut workers {
+    for (entity, mut cycle, spec, restored) in &mut workers {
         // D2: what a unit earns and what it eats both come off its own
-        // components, never off a count times a constant.
+        // `CycleSpec`, never off a count times a constant.
         let terms = if restored.is_some() {
             CycleTerms {
                 payload: 0.0,
                 meal: 0.0,
             }
         } else {
-            CycleTerms::for_worker(payload.0, wage.0, *multipliers)
+            CycleTerms::new(*spec, *multipliers)
         };
-        let output = cycle.advance(dt, *multipliers, terms, &mut larder);
+        let output = cycle.advance(dt, *spec, *multipliers, terms, &mut larder);
 
         if restored.is_some() && cycle.segment() == crate::domain::Segment::ToGrove {
             commands.entity(entity).remove::<RestoredCycle>();
