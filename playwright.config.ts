@@ -35,7 +35,10 @@ export default defineConfig({
       `CARGO_TARGET_DIR=target/playwright-e2e-${port} trunk serve --features test-hooks --dist ${runRoot}/trunk-dist --port ${port} --no-autoreload=true --watch src --watch assets --watch Cargo.toml --watch index.html --watch diagnostics.js`,
     url: `http://127.0.0.1:${port}`,
     reuseExistingServer: false,
-    timeout: 600_000,
+    // A cold GitHub-hosted runner can spend over ten minutes compiling Bevy
+    // before trunk serves the first page. Keep this below the job's 60-minute
+    // budget while leaving room for the full browser suite afterward.
+    timeout: 1_200_000,
   },
   projects: [
     {
