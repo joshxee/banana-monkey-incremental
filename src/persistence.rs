@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Research, Staff, Treasury, Workforce};
+use crate::domain::{Carts, Research, Staff, Treasury, Workforce};
 
 const SAVE_VERSION: u32 = 3;
 // The storage key is a namespace, not a schema version: it deliberately stays
@@ -23,6 +23,7 @@ pub struct SavedRun {
     pub workforce: Workforce,
     pub staff: Staff,
     pub research: Research,
+    pub carts: Carts,
 }
 
 /// Read just enough to route to the right schema. Untagged deserialisation
@@ -61,6 +62,11 @@ struct SaveV3 {
     /// rebalanced growth factor would leave a level its points do not justify,
     /// and nothing would notice.
     research: f64,
+    carts: u32,
+    /// Monkeys aboard, across every cart. One extra number, and it is what
+    /// stops a reload either gifting a half-boarded cart its missing crew or
+    /// stealing the wait the player has already served.
+    crewed: u32,
 }
 
 impl From<SaveV1> for SaveV3 {
@@ -73,6 +79,8 @@ impl From<SaveV1> for SaveV3 {
             unpackers: 0,
             technologists: 0,
             research: 0.0,
+            carts: 0,
+            crewed: 0,
         }
     }
 }
@@ -87,6 +95,8 @@ impl From<SaveV2> for SaveV3 {
             unpackers: 0,
             technologists: 0,
             research: 0.0,
+            carts: 0,
+            crewed: 0,
         }
     }
 }
@@ -119,6 +129,8 @@ fn encode(run: SavedRun) -> String {
         unpackers: run.staff.count(SupportRole::Unpacker),
         technologists: run.staff.count(SupportRole::Technologist),
         research: run.research.points(),
+        carts: run.carts.owned(),
+        crewed: run.carts.crewed(),
     })
     .expect("valid run state always serializes")
 }
@@ -142,6 +154,7 @@ fn decode(raw: &str) -> Option<SavedRun> {
         // then re-persisted, so the tab never recovers.
         staff: Staff::from_saved(data.chefs, data.unpackers, data.technologists)?,
         research: Research::from_saved(data.research)?,
+        carts: Carts::from_saved(data.carts, data.crewed)?,
     })
 }
 
@@ -241,14 +254,19 @@ mod tests {
             workforce: Workforce::from_saved(workers).unwrap(),
             staff: Staff::from_saved(c, u, x).unwrap(),
             research: Research::from_saved(r).unwrap(),
+            carts: Carts::default(),
         }
     }
 
     #[test]
     fn save_round_trip_preserves_the_run() {
-        let saved = researched(123.0, 7, 2, 3, 1, 145.5);
+        let mut saved = researched(123.0, 7, 2, 3, 1, 145.5);
+        // Two carts running and a third halfway through boarding.
+        saved.carts = Carts::from_saved(3, 7).unwrap();
 
         assert_eq!(decode(&encode(saved)), Some(saved));
+        assert_eq!(decode(&encode(saved)).unwrap().carts.running(), 2);
+        assert_eq!(decode(&encode(saved)).unwrap().carts.berths_open(), 2);
         // The level has to come back with the points that bought it: level 0
         // costs 60 and level 1 costs 132, so 145.5 has bought exactly one.
         assert_eq!(saved.research.level(), 1);
@@ -294,7 +312,7 @@ mod tests {
         );
         assert_eq!(
             decode(
-                r#"{"version":3,"bananas":3,"workers":1,"chefs":1,"unpackers":1,"technologists":1,"research":-1}"#
+                r#"{"version":3,"bananas":3,"workers":1,"chefs":1,"unpackers":1,"technologists":1,"research":-1,"carts":0,"crewed":0}"#
             ),
             None
         );
@@ -326,12 +344,21 @@ mod tests {
         // loop of its own.
         let staffed_payload = |c: &str| {
             format!(
-                r#"{{"version":3,"bananas":1,"workers":0,"chefs":{c},"unpackers":0,"technologists":0,"research":0}}"#
+                r#"{{"version":3,"bananas":1,"workers":0,"chefs":{c},"unpackers":0,"technologists":0,"research":0,"carts":0,"crewed":0}}"#
             )
         };
         assert_eq!(decode(&staffed_payload("-1")), None);
         assert_eq!(decode(&staffed_payload("4000000000")), None);
         assert!(decode(&staffed_payload("3")).is_some());
+        // A crew larger than the berths it could sit in is a tampered save.
+        let crewed = |carts: u32, crewed: u32| {
+            format!(
+                r#"{{"version":3,"bananas":1,"workers":9,"chefs":0,"unpackers":0,"technologists":0,"research":0,"carts":{carts},"crewed":{crewed}}}"#
+            )
+        };
+        assert!(decode(&crewed(2, 6)).is_some());
+        assert_eq!(decode(&crewed(2, 7)), None);
+        assert_eq!(decode(&crewed(0, 1)), None);
     }
 
     #[test]

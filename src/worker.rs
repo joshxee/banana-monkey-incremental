@@ -13,7 +13,9 @@
 use bevy::prelude::*;
 
 use crate::{
-    domain::{CycleSpec, HarvestCycle, Multipliers, Segment, Workforce, cycle_time},
+    domain::{
+        CART_CREW, Carts, CycleSpec, HarvestCycle, Multipliers, Segment, Workforce, cycle_time,
+    },
     game::SceneLayout,
 };
 
@@ -43,11 +45,38 @@ const LANE_STEP_TEXELS: f32 = 3.0;
 #[derive(Component)]
 pub struct Worker;
 
+/// A Net Cart on the route.
+///
+/// Deliberately not given a depth lane. All three worker lanes are spent, and a
+/// fourth would lift a sprite 18 texels off the ground line in a 16-texel grass
+/// band, standing it on the sky. The cart separates by drawing *in front*
+/// instead, which is what a vehicle should do anyway: workers pass behind it
+/// rather than through it, and its dwell at the depot is offset along the route
+/// so it does not park on top of the unloading queue.
+#[derive(Component)]
+pub struct Cart;
+
 /// Prevents a random resume phase from creating income or wages before the
 /// worker has completed its first post-resume cycle. The carried banana remains
 /// presentation state through the existing segment rules.
 #[derive(Component)]
 pub(crate) struct RestoredCycle;
+
+/// The next lane index to hand out. Monotonic, so an index is never reused.
+#[derive(Resource, Debug, Default)]
+pub struct NextLane(u32);
+
+impl NextLane {
+    fn take(&mut self) -> u32 {
+        let index = self.0;
+        self.0 = self.0.wrapping_add(1);
+        index
+    }
+
+    pub fn restart(&mut self) {
+        self.0 = 0;
+    }
+}
 
 /// A worker's hire index. Depth row and along-route stagger are both derived
 /// from it, so both stay stable across a reload without storing either.
@@ -158,12 +187,13 @@ impl RestoreWorkers {
     }
 }
 
-/// Give every hired worker an avatar, whether the workforce grew because of a
+/// Give every worker *in the pool* an avatar, whether the pool grew because of a
 /// purchase or because a save was loaded.
 ///
-/// Growth only. Nothing shrinks the workforce except a restart, which despawns
-/// every worker outright; if a unit ever becomes sellable, the excess has to be
-/// despawned here or the stale avatars keep delivering and eating.
+/// The pool is the workforce less everyone aboard a cart, so it can now shrink -
+/// boarding takes monkeys off the route. `board_carts` is the only thing that
+/// despawns them, and it decrements the same number this reads, so the two
+/// cannot disagree about how many should be on screen.
 ///
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_missing_workers(
@@ -174,13 +204,15 @@ pub fn spawn_missing_workers(
     asset_server: Res<AssetServer>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
     mut restored: ResMut<RestoreWorkers>,
+    mut next_lane: ResMut<NextLane>,
+    carts: Res<Carts>,
     existing: Query<Entity, With<Worker>>,
 ) {
-    let target = workforce.count() as usize;
+    let target = workforce.count().saturating_sub(carts.crewed()) as usize;
     let current = existing.iter().count();
     debug_assert!(
         current <= target,
-        "workforce shrank without despawning avatars"
+        "the pool shrank without despawning avatars"
     );
     if current >= target {
         return;
@@ -222,7 +254,13 @@ pub fn spawn_missing_workers(
         }
     };
 
-    for index in current..target {
+    for _ in current..target {
+        // A monotonic hand-out, never `existing.count()`. Boarding despawns
+        // workers, so a count-derived index gets reused: hire a replacement and
+        // it lands in the same lane at the same stagger as the monkey that left,
+        // which is exactly the pixel-identical overlap `stagger_texels` exists
+        // to prevent.
+        let index = next_lane.take();
         let was_restored = restored.remaining > 0;
         let cycle = if was_restored {
             restored.remaining -= 1;
@@ -238,7 +276,7 @@ pub fn spawn_missing_workers(
             Worker,
             cycle,
             CycleSpec::WORKER,
-            Lane(index as u32),
+            Lane(index),
             Pose::Run,
             Sprite {
                 image: art.run_image.clone(),
@@ -502,6 +540,206 @@ mod tests {
         for tick in 0..5_000 {
             let index = ((tick as f32 * 0.01) * IDLE_FPS) as usize % IDLE_FRAMES;
             assert!(index < IDLE_FRAMES);
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────── carts
+
+/// Spawn a box for every cart bought, and give the crewed ones a cycle.
+///
+/// A cart is only advanced once it is full: `Segment::Pick`'s rate is
+/// `crew × M_tech / t_pick`, so an empty box has a picking rate of zero, and
+/// `HarvestCycle::advance` would divide a remaining distance by nothing. The
+/// `Boarding` marker is what keeps it out of the advance query - a clamp would
+/// hide the same bug behind a plausible number.
+pub fn spawn_missing_carts(
+    mut commands: Commands,
+    carts: Res<Carts>,
+    art: Option<Res<WorkerArt>>,
+    existing: Query<Entity, With<Cart>>,
+) {
+    let Some(art) = art else {
+        return;
+    };
+    let current = existing.iter().count() as u32;
+    for index in current..carts.owned() {
+        commands
+            .spawn((
+                Cart,
+                Boarding,
+                CycleSpec::CART,
+                HarvestCycle::starting(CycleSpec::CART),
+                CartIndex(index),
+                Sprite::from_color(CART_BOX, CART_BOX_TEXELS),
+                Transform::default(),
+            ))
+            .with_children(|cart| {
+                // Riders are *children* of the box, which buys two things: their
+                // position and scale come from the parent for free, and a
+                // restart that despawns the cart takes them with it. Spawned
+                // separately they outlived it, and the next cart bought found
+                // its seats already occupied by ghosts.
+                //
+                // Three of them, always. A cart is crewed by exactly three
+                // monkeys or it does not run, so the sprite count is not a
+                // staffing readout - it is a fill gauge while boarding, and the
+                // whole crew afterwards.
+                for seat in 0..CART_CREW {
+                    let offset = (seat as f32 - (CART_CREW as f32 - 1.0) * 0.5) * SEAT_STEP_TEXELS;
+                    cart.spawn((
+                        CartSeat { cart: index, seat },
+                        Sprite {
+                            image: art.idle_image(),
+                            texture_atlas: Some(TextureAtlas {
+                                layout: art.idle_layout(),
+                                index: 0,
+                            }),
+                            flip_x: true,
+                            ..default()
+                        },
+                        // Sitting in the box: feet behind its front wall, heads
+                        // clear of the top. Local texels, so the parent's world
+                        // scale applies without this having to know it.
+                        Transform::from_xyz(offset, FRAME_SIZE as f32 * 0.30, -0.001),
+                        Visibility::Hidden,
+                    ));
+                }
+            });
+    }
+}
+
+/// A cart that is still filling up.
+#[derive(Component)]
+pub struct Boarding;
+
+/// Which cart this is, so seats can find their box without a parent lookup.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CartIndex(pub(crate) u32);
+
+/// One rider's seat on one cart.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CartSeat {
+    cart: u32,
+    seat: u32,
+}
+
+/// The box, in source texels. Wide enough to seat three monkeys shoulder to
+/// shoulder, low enough that their heads clear the top - the whole read is
+/// "three monkeys in a box", so the box must not swallow them.
+const CART_BOX_TEXELS: Vec2 = Vec2::new(52.0, 15.0);
+const CART_BOX: Color = Color::srgb(0.55, 0.33, 0.14);
+/// Seat spacing inside the box.
+const SEAT_STEP_TEXELS: f32 = 15.0;
+
+/// Fill the boarding cart from the pool.
+///
+/// Only workers standing at the stall board, and boarding happens in its own
+/// stage *before* the cycles advance - so a boarded monkey never harvests and
+/// never eats on the tick it leaves, which is what makes "it costs a trip, not a
+/// fee" true by construction rather than by bookkeeping.
+///
+/// First come, no reservation: the cart takes whoever finishes next. Carts fill
+/// in purchase order, so the player never ends up with two carts stuck at 2/3.
+pub fn board_carts(
+    mut commands: Commands,
+    mut carts: ResMut<Carts>,
+    at_stall: Query<(Entity, &HarvestCycle), With<Worker>>,
+) {
+    let mut berths = carts.berths_open();
+    if berths == 0 {
+        return;
+    }
+
+    for (entity, cycle) in &at_stall {
+        if berths == 0 {
+            break;
+        }
+        // Snack is the moment a worker is standing still at the stall having
+        // just been paid - the one point in the cycle where it owes nothing and
+        // is carrying nothing.
+        if cycle.segment() != Segment::Snack {
+            continue;
+        }
+        commands.entity(entity).despawn();
+        carts.board();
+        berths -= 1;
+    }
+}
+
+/// Take the `Boarding` marker off a cart once its crew is complete, so it joins
+/// the advance query and starts its first trip.
+pub fn launch_crewed_carts(
+    mut commands: Commands,
+    carts: Res<Carts>,
+    boarding: Query<(Entity, &CartIndex), With<Boarding>>,
+) {
+    for (entity, index) in &boarding {
+        if carts.crewed() >= (index.0 + 1) * CART_CREW {
+            commands.entity(entity).remove::<Boarding>();
+        }
+    }
+}
+
+/// Position every cart, and reveal the riders that have boarded.
+///
+/// Only the box is placed: the seats are its children, so their offsets and
+/// scale follow for free. All this loop decides is how many of them are visible.
+pub fn position_carts(
+    layout: Res<SceneLayout>,
+    multipliers: Res<Multipliers>,
+    carts_res: Res<Carts>,
+    mut carts: Query<(&HarvestCycle, Option<&Boarding>, &mut Transform), With<Cart>>,
+    mut seats: Query<(&CartSeat, &mut Visibility)>,
+) {
+    let scale = layout.world_scale();
+
+    for (cycle, boarding, mut transform) in &mut carts {
+        let progress = cycle.segment_fraction(CycleSpec::CART, *multipliers) as f32;
+        // Its own bay at each end, on the *inside* of the route: pushed left at
+        // the depot and right at the grove, so the cart never parks on the
+        // unloading queue and never reverses into the palm.
+        let dwell = layout.cart_offset();
+        let (grove, stall) = (layout.grove_stand + dwell, layout.stall_stand - dwell);
+        let x = if boarding.is_some() {
+            // An unlaunched cart waits at the depot, visibly filling up.
+            stall
+        } else {
+            match cycle.segment() {
+                Segment::ToGrove => stall + (grove - stall) * progress,
+                Segment::Pick => grove,
+                Segment::ToDepot => grove + (stall - grove) * progress,
+                Segment::Unload | Segment::Snack => stall,
+            }
+        };
+
+        transform.translation = Vec3::new(
+            layout.snap(x),
+            layout.snap(layout.ground_top() + CART_BOX_TEXELS.y * 0.5 * scale),
+            // In front of every monkey on foot. A vehicle they walk behind
+            // rather than through - which is the only separation available,
+            // since all three depth lanes are spent.
+            1.5,
+        );
+        transform.scale = Vec3::splat(scale);
+    }
+
+    for (seat, mut visibility) in &mut seats {
+        // A seat fills only once its monkey has actually climbed aboard, so an
+        // empty box visibly gains riders one at a time. That filling is the only
+        // feedback during the boarding wait, and the wait is the longest dead
+        // stretch in the game.
+        let aboard = carts_res
+            .crewed()
+            .saturating_sub(seat.cart * CART_CREW)
+            .min(CART_CREW);
+        let wanted = if seat.seat < aboard {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != wanted {
+            *visibility = wanted;
         }
     }
 }

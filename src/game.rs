@@ -10,13 +10,14 @@ use bevy::{
 
 use crate::{
     domain::{
-        BANANAS_PER_HARVEST, Committed, CycleSpec, CycleTerms, EconomySnapshot, EconomyState,
-        FedStaff, HarvestCycle, Multipliers, Research, SIM_HZ, Staff, SupportCycle, SupportRole,
-        Treasury, UnitKind, Workforce, multipliers_for, plan_hire, research_per_sec, restart_run,
+        BANANAS_PER_HARVEST, Carts, Committed, CycleSpec, CycleTerms, EconomySnapshot,
+        EconomyState, FedStaff, HarvestCycle, Multipliers, Research, SIM_HZ, Staff, SupportCycle,
+        SupportRole, Treasury, UnitKind, Workforce, cart_crew_shortfall, multipliers_for,
+        plan_hire, research_per_sec, restart_run,
     },
     hud, persistence,
     support::{self, SupportUnit},
-    worker::{self, RestoredCycle, Worker},
+    worker::{self, Cart, RestoredCycle, Worker},
 };
 
 const BANANA_FRAMES: usize = 12;
@@ -89,6 +90,8 @@ impl Plugin for HarvestGamePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SceneLayout>()
             .init_resource::<Multipliers>()
+            .init_resource::<Carts>()
+            .init_resource::<worker::NextLane>()
             .init_resource::<Staff>()
             .init_resource::<Research>()
             .init_resource::<FedStaff>()
@@ -137,9 +140,17 @@ impl Plugin for HarvestGamePlugin {
                         .chain()
                         .in_set(Sim::Purchase),
                     (
+                        // Chained: boarding removes workers from the pool, and
+                        // `spawn_missing_workers` reads that pool to decide how
+                        // many avatars there should be. Unordered, a boarded
+                        // monkey is despawned and respawned in the same tick.
+                        worker::board_carts,
                         worker::spawn_missing_workers,
+                        worker::spawn_missing_carts,
+                        worker::launch_crewed_carts,
                         support::spawn_missing_support,
                     )
+                        .chain()
                         .in_set(Sim::Spawn),
                     recompute_multipliers.in_set(Sim::Multipliers),
                     advance_cycles.in_set(Sim::Advance),
@@ -178,6 +189,7 @@ impl Plugin for HarvestGamePlugin {
                 Update,
                 (
                     worker::position_workers,
+                    worker::position_carts,
                     worker::animate_workers,
                     support::sync_support_avatars,
                     support::sync_support_badges,
@@ -367,6 +379,18 @@ impl SceneLayout {
         self.world_scale
     }
 
+    /// How far along the route a cart stands from where the walking monkeys do.
+    ///
+    /// All three depth lanes are spent, so a cart cannot sit *behind* the
+    /// workers - a fourth row lifts it 18 texels into a 16-texel grass band.
+    /// Separation is horizontal instead: the cart's dwell points are offset
+    /// back along the route, so its hundred-second unload happens beside the
+    /// queue rather than on top of it, and it draws in front so workers pass
+    /// behind the vehicle rather than through it.
+    pub(crate) fn cart_offset(self) -> f32 {
+        self.zone_size * 0.30
+    }
+
     /// Where each support role stands, as a ground-plane x and a depth row.
     ///
     /// All three are stations around the deposit rather than points on the
@@ -468,6 +492,8 @@ enum DeliveryKind {
     Manual,
     /// A worker unloaded its payload.
     Worker,
+    /// A cart unloaded its payload - two hundred bananas at once.
+    Cart,
     /// A worker ate its wage, out of the delivery it just made.
     Snack,
     /// A support monkey ate its wage, out of whatever surplus there was.
@@ -815,6 +841,7 @@ fn apply_purchases(
     mut requests: ResMut<HireRequests>,
     mut treasury: ResMut<Treasury>,
     mut workforce: ResMut<Workforce>,
+    mut carts: ResMut<Carts>,
     mut staff: ResMut<Staff>,
     mut dirty: ResMut<PersistenceDirty>,
     research: Res<Research>,
@@ -827,6 +854,7 @@ fn apply_purchases(
             kind,
             EconomyState {
                 workforce: *workforce,
+                carts: *carts,
                 staff: *staff,
                 fed: *fed,
                 research: *research,
@@ -844,6 +872,17 @@ fn apply_purchases(
         match kind {
             UnitKind::Worker => workforce.hire(),
             UnitKind::Support(role) => staff.hire(role),
+            UnitKind::Cart => {
+                // Any crew the player was short of is hired with the cart and
+                // boards immediately - they are standing at the stall already.
+                // The rest of the berths fill from the pool as workers finish
+                // their trips, which is what `board_carts` does.
+                let hires = cart_crew_shortfall(*workforce, *carts);
+                for _ in 0..hires {
+                    workforce.hire();
+                }
+                carts.buy(hires);
+            }
         }
         dirty.mark_immediate();
     }
@@ -857,25 +896,35 @@ fn apply_restart(
     mut commands: Commands,
     mut treasury: ResMut<Treasury>,
     mut workforce: ResMut<Workforce>,
+    mut carts: ResMut<Carts>,
     mut staff: ResMut<Staff>,
     mut research: ResMut<Research>,
     mut queue: ResMut<DeliveryQueue>,
     mut requests: ResMut<HireRequests>,
     mut dirty: ResMut<PersistenceDirty>,
     mut restored: ResMut<worker::RestoreWorkers>,
+    mut next_lane: ResMut<worker::NextLane>,
     workers: Query<Entity, With<Worker>>,
     support: Query<Entity, With<SupportUnit>>,
+    vehicles: Query<Entity, With<Cart>>,
     floaters: Query<Entity, With<Floater>>,
 ) {
     if !std::mem::take(&mut request.0) {
         return;
     }
 
-    restart_run(&mut treasury, &mut workforce, &mut staff, &mut research);
+    restart_run(
+        &mut treasury,
+        &mut workforce,
+        &mut carts,
+        &mut staff,
+        &mut research,
+    );
     restored.clear();
+    next_lane.restart();
     queue.entries.clear();
     requests.0.clear();
-    for entity in workers.iter().chain(&support) {
+    for entity in workers.iter().chain(&support).chain(&vehicles) {
         commands.entity(entity).despawn();
     }
     // Otherwise up to 0.9 s of "+5" keeps rising over a stall that just went
@@ -894,6 +943,29 @@ fn apply_restart(
 /// the treasury structurally non-negative - a worker that cannot afford its meal
 /// stalls instead of overdrawing - and it is why the shop can quote a bare
 /// signing fee with no wage reserve bolted on.
+/// Every harvester on foot: the pool, and whether it is a restored placement.
+type PoolQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static mut HarvestCycle,
+        &'static CycleSpec,
+        Option<&'static RestoredCycle>,
+    ),
+    (With<Worker>, Without<Cart>),
+>;
+
+/// Every cart that is actually running. `Without` on both sides is what makes
+/// Bevy accept two mutable `HarvestCycle` queries in one system: it cannot
+/// prove `With<Worker>` and `With<Cart>` are disjoint on its own.
+type CartQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut HarvestCycle, &'static CycleSpec),
+    (With<Cart>, Without<Worker>, Without<worker::Boarding>),
+>;
+
 #[allow(clippy::too_many_arguments)]
 fn advance_cycles(
     time: Res<Time<Fixed>>,
@@ -902,12 +974,8 @@ fn advance_cycles(
     mut research: ResMut<Research>,
     treasury: Res<Treasury>,
     mut queue: ResMut<DeliveryQueue>,
-    mut workers: Query<(
-        Entity,
-        &mut HarvestCycle,
-        &CycleSpec,
-        Option<&RestoredCycle>,
-    )>,
+    mut workers: PoolQuery,
+    mut carts: CartQuery,
     mut support: Query<(&SupportRole, &mut SupportCycle)>,
     mut commands: Commands,
 ) {
@@ -947,6 +1015,32 @@ fn advance_cycles(
             queue.entries.push(Delivery {
                 amount: output.delivered,
                 kind: DeliveryKind::Worker,
+            });
+        }
+        if output.eaten > 0.0 {
+            queue.entries.push(Delivery {
+                amount: output.eaten,
+                kind: DeliveryKind::Snack,
+            });
+        }
+    }
+
+    // Carts run the same cycle with different constants, and are paid the same
+    // way: their meal is reserved out of the two hundred bananas they have just
+    // delivered. Only fully crewed carts are in this query - an empty box has a
+    // picking rate of zero.
+    for (mut cycle, spec) in &mut carts {
+        let output = cycle.advance(
+            dt,
+            *spec,
+            *multipliers,
+            CycleTerms::new(*spec, *multipliers),
+            &mut larder,
+        );
+        if output.delivered > 0.0 {
+            queue.entries.push(Delivery {
+                amount: output.delivered,
+                kind: DeliveryKind::Cart,
             });
         }
         if output.eaten > 0.0 {
@@ -1005,7 +1099,7 @@ fn settle(
                 treasury.credit(delivery.amount);
                 dirty.mark_immediate();
             }
-            DeliveryKind::Worker => {
+            DeliveryKind::Worker | DeliveryKind::Cart => {
                 treasury.credit(delivery.amount);
                 // Not immediate: these arrive `W / 50` times a second, so the
                 // immediate path would put the save write rate back on the
@@ -1022,7 +1116,7 @@ fn settle(
         if delivery.kind.is_income() {
             feedback.success = Some(Timer::new(
                 Duration::from_secs_f32(match delivery.kind {
-                    DeliveryKind::Worker => DELIVERY_PULSE_SECONDS,
+                    DeliveryKind::Worker | DeliveryKind::Cart => DELIVERY_PULSE_SECONDS,
                     _ => SUCCESS_PULSE_SECONDS,
                 }),
                 TimerMode::Once,
@@ -1061,8 +1155,10 @@ fn recompute_multipliers(
 /// Stage 7. Counted from the world rather than from the resources, because a
 /// hired monkey is not necessarily a working one, and reporting a rate the
 /// world is not producing is what the readout used to get wrong.
+#[allow(clippy::too_many_arguments)]
 fn snapshot_economy(
     workforce: Res<Workforce>,
+    carts: Res<Carts>,
     staff: Res<Staff>,
     fed: Res<FedStaff>,
     multipliers: Res<Multipliers>,
@@ -1073,7 +1169,7 @@ fn snapshot_economy(
     // Summed from the world every tick rather than accumulated, so it cannot
     // drift out of step with the meals actually outstanding (I3').
     committed.0 = cycles.iter().map(|cycle| cycle.earmarked()).sum();
-    *snapshot = EconomySnapshot::project(workforce.count(), *staff, *fed, *multipliers);
+    *snapshot = EconomySnapshot::project(workforce.count(), *carts, *staff, *fed, *multipliers);
 }
 
 /// Three sources, three sizes, three colours - readable without reading. The
@@ -1083,6 +1179,9 @@ fn spawn_floater(commands: &mut Commands, layout: &SceneLayout, delivery: Delive
     let origin = layout.stall_glow_anchor();
     let (label, size, colour) = match delivery.kind {
         DeliveryKind::Worker => (format!("+{:.0}", delivery.amount), 34.0, GOLD),
+        // Bigger, because it is forty times the size and lands once every three
+        // minutes. A cart delivery is the loudest event in the economy.
+        DeliveryKind::Cart => (format!("+{:.0}", delivery.amount), 44.0, GOLD),
         DeliveryKind::Manual => (format!("+{:.0}", delivery.amount), 26.0, CREAM),
         // Both wages read the same, because to the player they are the same
         // event: a monkey being paid. The snack happens at the stall and the
@@ -1651,6 +1750,7 @@ fn persist_changes(
     workforce: Res<Workforce>,
     staff: Res<Staff>,
     research: Res<Research>,
+    carts: Res<Carts>,
 ) {
     dirty.since_last_save += time.delta_secs();
     if !dirty.pending {
@@ -1670,6 +1770,7 @@ fn persist_changes(
         workforce: *workforce,
         staff: *staff,
         research: *research,
+        carts: *carts,
     };
     match persistence::store_run(run) {
         Ok(()) => {
@@ -1883,6 +1984,7 @@ struct TestButtons {
     hire_chef: TestPoint,
     hire_unpacker: TestPoint,
     hire_technologist: TestPoint,
+    hire_cart: TestPoint,
     toggle_store: TestPoint,
     resume: TestPoint,
     logs: TestPoint,
@@ -1937,6 +2039,15 @@ struct TestState {
     research: f64,
     research_level: u32,
     research_per_sec: f64,
+    carts: u32,
+    /// Monkeys aboard, across every cart.
+    crewed: u32,
+    /// Carts with a full crew, and therefore actually running.
+    carts_running: u32,
+    cart_cost: f64,
+    cart_can_hire: bool,
+    /// Workers still walking the route: hired, less everyone aboard a cart.
+    pool: u32,
     store_expanded: bool,
     buttons: TestButtons,
 }
@@ -1958,6 +2069,7 @@ struct EconomyView<'w> {
     multipliers: Res<'w, Multipliers>,
     snapshot: Res<'w, EconomySnapshot>,
     research: Res<'w, Research>,
+    carts: Res<'w, Carts>,
     store_expanded: Res<'w, hud::StoreExpanded>,
 }
 
@@ -1988,6 +2100,7 @@ fn sync_web_test_state(
         multipliers,
         snapshot,
         research,
+        carts,
         store_expanded,
     } = economy;
 
@@ -2004,7 +2117,7 @@ fn sync_web_test_state(
 
     // One slot per button, so four hire buttons cannot collapse onto each
     // other and leave the suite clicking whichever row happened to be last.
-    let mut button_centers = [Vec2::ZERO; 11];
+    let mut button_centers = [Vec2::ZERO; 12];
     for (action, node, transform) in &buttons {
         let index = match action {
             ButtonAction::OpenMenu => 0,
@@ -2012,6 +2125,7 @@ fn sync_web_test_state(
             ButtonAction::Hire(UnitKind::Support(SupportRole::Chef)) => 2,
             ButtonAction::Hire(UnitKind::Support(SupportRole::Unpacker)) => 3,
             ButtonAction::Hire(UnitKind::Support(SupportRole::Technologist)) => 4,
+            ButtonAction::Hire(UnitKind::Cart) => 11,
             ButtonAction::ToggleStore => 5,
             ButtonAction::Resume => 6,
             ButtonAction::Diagnostics => 7,
@@ -2024,6 +2138,7 @@ fn sync_web_test_state(
 
     let world = EconomyState {
         workforce: *workforce,
+        carts: *carts,
         staff: *staff,
         fed: *fed,
         research: *research,
@@ -2113,6 +2228,12 @@ fn sync_web_test_state(
         research: research.points(),
         research_level: research.level(),
         research_per_sec: research_per_sec(*fed, *multipliers),
+        carts: carts.owned(),
+        crewed: carts.crewed(),
+        carts_running: carts.running(),
+        cart_cost: plan_for(UnitKind::Cart).cost,
+        cart_can_hire: plan_for(UnitKind::Cart).affordable,
+        pool: workforce.count().saturating_sub(carts.crewed()),
         store_expanded: store_expanded.0,
         buttons: TestButtons {
             menu: point(button_centers[0]),
@@ -2121,6 +2242,7 @@ fn sync_web_test_state(
             hire_unpacker: point(button_centers[3]),
             hire_technologist: point(button_centers[4]),
             toggle_store: point(button_centers[5]),
+            hire_cart: point(button_centers[11]),
             resume: point(button_centers[6]),
             logs: point(button_centers[7]),
             restart: point(button_centers[8]),

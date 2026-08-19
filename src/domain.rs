@@ -40,6 +40,22 @@ pub const SNACK_FRACTION: f64 = 0.05;
 pub const WORKER_COST_BASE: f64 = 4.0;
 pub const WORKER_COST_GROWTH: f64 = 1.15;
 
+/// Bananas a full cart carries per round trip.
+pub const CART_PAYLOAD: f64 = 200.0;
+/// Metres per second. Three times a monkey on foot, which is why a cart barely
+/// travels and instead spends its life being emptied (whitepaper §5).
+pub const CART_SPEED: f64 = 15.0;
+/// Bananas per second for the whole vehicle, crew included. Its three monkeys
+/// stop drawing their individual worker wage while they are aboard.
+pub const CART_WAGE: f64 = 0.20;
+/// Monkeys a cart needs, and the only number of monkeys a cart ever has.
+pub const CART_CREW: u32 = 3;
+pub const CART_COST_BASE: f64 = 70.0;
+pub const CART_COST_GROWTH: f64 = 1.70;
+/// No reachable economy comes near this; it bounds the spawn loop and keeps
+/// `1.70^n` finite.
+pub const MAX_CARTS: u32 = 500;
+
 /// Bananas the player earns per manual harvest.
 pub const BANANAS_PER_HARVEST: f64 = 1.0;
 
@@ -86,6 +102,25 @@ pub struct CycleSpec {
 }
 
 impl CycleSpec {
+    /// The Net Cart. Same state machine, different constants - which is the
+    /// entire reason this struct exists.
+    ///
+    /// `crew: 3` divides the picking time only: three monkeys pick in parallel,
+    /// but the vehicle walks and is emptied at one rate whoever is aboard. That
+    /// asymmetry is not a rule anybody wrote; it falls out of payload and speed,
+    /// and it is what makes Chefs a worker's buy and Unpackers a cart's
+    /// (whitepaper §5).
+    pub const CART: Self = Self {
+        payload: CART_PAYLOAD,
+        speed: CART_SPEED,
+        distance: GROVE_DISTANCE,
+        t_pick: T_PICK,
+        t_unload: T_UNLOAD,
+        snack_fraction: SNACK_FRACTION,
+        wage: CART_WAGE,
+        crew: CART_CREW as f64,
+    };
+
     pub const WORKER: Self = Self {
         payload: WORKER_PAYLOAD,
         speed: WORKER_SPEED,
@@ -857,11 +892,13 @@ impl Workforce {
 pub fn restart_run(
     treasury: &mut Treasury,
     workforce: &mut Workforce,
+    carts: &mut Carts,
     staff: &mut Staff,
     research: &mut Research,
 ) {
     treasury.restart();
     workforce.restart();
+    carts.restart();
     staff.restart();
     research.restart();
 }
@@ -900,13 +937,28 @@ impl EconomySnapshot {
     /// was once a pure function of head*count*, so a workforce that had stopped
     /// working still reported `+6.0/min` while the pile sat still, and no number
     /// on screen explained why.
-    pub fn project(workers: u32, staff: Staff, fed: FedStaff, multipliers: Multipliers) -> Self {
-        let gross_per_sec = workers as f64 * worker_throughput(multipliers);
+    pub fn project(
+        workers: u32,
+        carts: Carts,
+        staff: Staff,
+        fed: FedStaff,
+        multipliers: Multipliers,
+    ) -> Self {
+        // Crewed monkeys have left the route, so they neither harvest on foot
+        // nor draw a worker's wage - the cart pays for them out of its own
+        // delivery. A monkey waiting in a half-crewed cart is in neither pool:
+        // it is not harvesting, and nothing is feeding it. That is the price of
+        // boarding, and it is bounded by one worker cycle.
+        let pool = workers.saturating_sub(carts.crewed()) as f64;
+        let running = carts.running() as f64;
+
+        let gross_per_sec = pool * worker_throughput(multipliers)
+            + running * throughput(CycleSpec::CART, multipliers);
         let support_wages: f64 = SupportRole::ALL
             .iter()
             .map(|role| fed.count(*role) as f64 * role.wage())
             .sum();
-        let wages_per_sec = workers as f64 * WORKER_WAGE + support_wages;
+        let wages_per_sec = pool * WORKER_WAGE + running * CART_WAGE + support_wages;
         Self {
             gross_per_sec,
             wages_per_sec,
@@ -930,6 +982,67 @@ impl EconomySnapshot {
 /// empty pool the treasury could never climb back to free it.
 pub fn spendable(treasury: Treasury, committed: f64) -> f64 {
     (treasury.bananas() - committed).max(0.0)
+}
+
+/// Carts owned, and how many monkeys are aboard them.
+///
+/// D8 and D17 are both deleted here. A cart is crewed by exactly three monkeys
+/// or it does not run: buying one takes three spare workers, and if the player
+/// has fewer the price includes hiring the difference. There is no partial
+/// staffing, no sampled crew fraction and no assignment policy - the question
+/// "who crews this cart" is asked once, at purchase, and answered by boarding.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Carts {
+    owned: u32,
+    /// Monkeys aboard, across every cart. At most one cart is ever partly
+    /// crewed, because they fill in purchase order.
+    crewed: u32,
+}
+
+impl Carts {
+    pub fn from_saved(owned: u32, crewed: u32) -> Option<Self> {
+        // A crew that exceeds the berths it could sit in is a tampered save.
+        (owned <= MAX_CARTS && crewed <= owned * CART_CREW).then_some(Self { owned, crewed })
+    }
+
+    pub fn owned(self) -> u32 {
+        self.owned
+    }
+
+    /// Monkeys aboard, and therefore out of the walking pool.
+    pub fn crewed(self) -> u32 {
+        self.crewed
+    }
+
+    /// Carts with a full crew. Only these run - an empty box at the depot
+    /// produces nothing and, crucially, is never advanced: a cycle with a crew
+    /// of zero has a picking rate of zero, which would divide by nothing.
+    pub fn running(self) -> u32 {
+        self.crewed / CART_CREW
+    }
+
+    /// Berths still waiting to be filled on the cart currently boarding.
+    pub fn berths_open(self) -> u32 {
+        self.owned * CART_CREW - self.crewed
+    }
+
+    pub fn next_cost(self) -> f64 {
+        CART_COST_BASE * CART_COST_GROWTH.powi(self.owned as i32)
+    }
+
+    pub fn buy(&mut self, boarding_now: u32) {
+        self.owned = (self.owned + 1).min(MAX_CARTS);
+        self.crewed = (self.crewed + boarding_now).min(self.owned * CART_CREW);
+    }
+
+    /// One more monkey has climbed aboard.
+    pub fn board(&mut self) {
+        self.crewed = (self.crewed + 1).min(self.owned * CART_CREW);
+    }
+
+    pub fn restart(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// Cumulative research, and the levels it has bought.
@@ -1012,6 +1125,7 @@ pub struct Committed(pub f64);
 pub enum UnitKind {
     Worker,
     Support(SupportRole),
+    Cart,
 }
 
 /// Everything the shop needs to render one row, and the single authority on
@@ -1071,6 +1185,7 @@ pub struct HirePlan {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EconomyState {
     pub workforce: Workforce,
+    pub carts: Carts,
     pub staff: Staff,
     pub fed: FedStaff,
     pub research: Research,
@@ -1083,6 +1198,7 @@ pub struct EconomyState {
 pub fn plan_hire(kind: UnitKind, state: EconomyState) -> HirePlan {
     let EconomyState {
         workforce,
+        carts,
         staff,
         fed,
         research,
@@ -1099,15 +1215,46 @@ pub fn plan_hire(kind: UnitKind, state: EconomyState) -> HirePlan {
         unpackers: staff.count(SupportRole::Unpacker),
         technologists: staff.count(SupportRole::Technologist),
     };
-    let before = EconomySnapshot::project(workforce.count(), staff, all_fed, multipliers);
+    let before = EconomySnapshot::project(workforce.count(), carts, staff, all_fed, multipliers);
 
     let (cost, meal, meal_period, after) = match kind {
         UnitKind::Worker => (
             workforce.next_cost(),
             meal(CycleSpec::WORKER, multipliers),
             cycle_time(CycleSpec::WORKER, multipliers),
-            EconomySnapshot::project(workforce.count() + 1, staff, all_fed, multipliers),
+            EconomySnapshot::project(workforce.count() + 1, carts, staff, all_fed, multipliers),
         ),
+        UnitKind::Cart => {
+            let hires = cart_crew_shortfall(workforce, carts);
+            let mut hired = workforce;
+            for _ in 0..hires {
+                hired.hire();
+            }
+            let mut bought = carts;
+            // The monkeys bought *with* the cart board at once: they are already
+            // standing at the stall, so there is nothing for them to walk back
+            // from. That is what makes "pay more, start sooner" a real trade
+            // rather than a pure penalty.
+            bought.buy(hires);
+            (
+                cart_price(workforce, carts),
+                meal(CycleSpec::CART, multipliers),
+                cycle_time(CycleSpec::CART, multipliers),
+                // Projected at full crew: this is what the purchase is worth
+                // once it is running, not what the boarding gap costs. The
+                // boarding wait is real and shown on the cart itself.
+                EconomySnapshot::project(
+                    hired.count(),
+                    Carts {
+                        owned: bought.owned(),
+                        crewed: bought.owned() * CART_CREW,
+                    },
+                    staff,
+                    all_fed,
+                    multipliers,
+                ),
+            )
+        }
         UnitKind::Support(role) => {
             let mut hired = staff;
             hired.hire(role);
@@ -1119,6 +1266,7 @@ pub fn plan_hire(kind: UnitKind, state: EconomyState) -> HirePlan {
                 SUPPORT_MEAL_PERIOD,
                 EconomySnapshot::project(
                     workforce.count(),
+                    carts,
                     hired,
                     fed_after,
                     // A support hire changes the multipliers, which is the
@@ -1134,13 +1282,41 @@ pub fn plan_hire(kind: UnitKind, state: EconomyState) -> HirePlan {
     };
 
     let _ = fed;
+    // The one hard gate left in the economy. Everything else is "can you pay";
+    // this is "does this exist yet".
+    let unlocked = kind != UnitKind::Cart || research.level() >= CART_TECH_REQUIREMENT;
     HirePlan {
         cost,
         meal,
         meal_period,
         gain_per_min: (after.net_per_sec - before.net_per_sec) * 60.0,
-        affordable: spendable(treasury, committed) >= cost,
+        affordable: unlocked && spendable(treasury, committed) >= cost,
     }
+}
+
+/// How many workers the player is short of a full cart crew.
+pub fn cart_crew_shortfall(workforce: Workforce, carts: Carts) -> u32 {
+    let spare = workforce.count().saturating_sub(carts.crewed());
+    CART_CREW.saturating_sub(spare.min(CART_CREW))
+}
+
+/// What a cart actually costs, including any crew the player does not have.
+///
+/// A cart cannot run under-crewed, so a shop that quoted 70 and then refused
+/// the sale for want of monkeys would be the same lie D18 removed. Instead the
+/// price absorbs the difference: the button says what the player will pay.
+///
+/// Worth knowing, and worth showing somewhere eventually: the bundled workers
+/// go on the geometric ladder, so buying three at once raises the *next*
+/// worker's price by 1.15³ ≈ 52%.
+pub fn cart_price(workforce: Workforce, carts: Carts) -> f64 {
+    let mut price = carts.next_cost();
+    let mut ladder = workforce;
+    for _ in 0..cart_crew_shortfall(workforce, carts) {
+        price += ladder.next_cost();
+        ladder.hire();
+    }
+    price
 }
 
 /// D4: every multiplier is additive within its term, `M = 1 + count × bonus`,
@@ -1173,6 +1349,7 @@ mod tests {
     fn world(workers: u32, staff: Staff, bananas: f64, m: Multipliers) -> EconomyState {
         EconomyState {
             workforce: Workforce::from_saved(workers).unwrap(),
+            carts: Carts::default(),
             staff,
             fed: FedStaff::default(),
             research: Research::default(),
@@ -1365,9 +1542,14 @@ mod tests {
             }
 
             let realised = delivered / 600.0;
-            let projected =
-                EconomySnapshot::project(workers, Staff::default(), FedStaff::default(), m)
-                    .gross_per_sec;
+            let projected = EconomySnapshot::project(
+                workers,
+                Carts::default(),
+                Staff::default(),
+                FedStaff::default(),
+                m,
+            )
+            .gross_per_sec;
             assert!(
                 (realised - projected).abs() / projected < 0.05,
                 "workers={workers} realised={realised} projected={projected}"
@@ -1529,7 +1711,7 @@ mod tests {
         // its own meal, at every multiplier and for every tier. If this ever
         // fails, the treasury can go negative and the cart can freeze holding a
         // full payload.
-        for spec in [CycleSpec::WORKER] {
+        for spec in [CycleSpec::WORKER, CycleSpec::CART] {
             for speed in [1.0, 1.15, 2.5, 10.0] {
                 for unpack in [1.0, 2.0, 5.0] {
                     let m = Multipliers {
@@ -1643,13 +1825,21 @@ mod tests {
 
         let mut staff = Staff::from_saved(2, 3, 1).unwrap();
         let mut research = Research::from_saved(500.0).unwrap();
+        let mut carts = Carts::from_saved(2, 6).unwrap();
 
-        restart_run(&mut treasury, &mut workforce, &mut staff, &mut research);
+        restart_run(
+            &mut treasury,
+            &mut workforce,
+            &mut carts,
+            &mut staff,
+            &mut research,
+        );
 
         assert_eq!(treasury, Treasury::default());
         assert_eq!(workforce, Workforce::default());
         assert_eq!(staff, Staff::default());
         assert_eq!(research, Research::default());
+        assert_eq!(carts, Carts::default());
     }
 
     // ─────────────────────────────────────────── costs and gating
@@ -1774,13 +1964,25 @@ mod tests {
 
     #[test]
     fn snapshot_reports_gross_wages_and_net_together() {
-        let snapshot = EconomySnapshot::project(1, Staff::default(), FedStaff::default(), base());
+        let snapshot = EconomySnapshot::project(
+            1,
+            Carts::default(),
+            Staff::default(),
+            FedStaff::default(),
+            base(),
+        );
 
         assert!((snapshot.gross_per_sec - 0.1).abs() < 1e-15);
         assert!((snapshot.wages_per_sec - 0.03).abs() < 1e-15);
         assert!((snapshot.net_per_sec - 0.07).abs() < 1e-15);
         assert_eq!(
-            EconomySnapshot::project(0, Staff::default(), FedStaff::default(), base()),
+            EconomySnapshot::project(
+                0,
+                Carts::default(),
+                Staff::default(),
+                FedStaff::default(),
+                base()
+            ),
             EconomySnapshot::default()
         );
 
@@ -1788,7 +1990,8 @@ mod tests {
         // and it is not eating either. Counting its wage while dropping its
         // bonus would be exactly the asymmetric lie the readout used to tell.
         let staff = Staff::from_saved(2, 0, 0).unwrap();
-        let starving = EconomySnapshot::project(4, staff, FedStaff::default(), base());
+        let starving =
+            EconomySnapshot::project(4, Carts::default(), staff, FedStaff::default(), base());
         assert!((starving.wages_per_sec - 4.0 * WORKER_WAGE).abs() < 1e-15);
         assert_eq!(starving.hungry, 2);
         assert_eq!(starving.staff, 2);
@@ -1797,7 +2000,7 @@ mod tests {
             chefs: 2,
             ..FedStaff::default()
         };
-        let paid = EconomySnapshot::project(4, staff, fed, base());
+        let paid = EconomySnapshot::project(4, Carts::default(), staff, fed, base());
         assert!((paid.wages_per_sec - (4.0 * WORKER_WAGE + 0.2)).abs() < 1e-15);
         assert_eq!(paid.hungry, 0);
     }
@@ -1888,6 +2091,7 @@ mod tests {
                 kind,
                 EconomyState {
                     workforce,
+                    carts: Carts::default(),
                     staff,
                     fed,
                     research: Research::default(),
@@ -1899,6 +2103,10 @@ mod tests {
             if plan.affordable {
                 treasury.charge(plan.cost);
                 match kind {
+                    // The solvency sweep is deliberately cart-free: a cart's
+                    // meal is reserved out of its own 200-banana delivery by the
+                    // same mechanism, and mixing them in would only re-test it.
+                    UnitKind::Cart => unreachable!("this sweep buys no carts"),
                     UnitKind::Worker => {
                         workforce.hire();
                         cycles.push(HarvestCycle::starting(CycleSpec::WORKER));
@@ -1940,6 +2148,180 @@ mod tests {
         assert!(worst >= 0.0, "treasury dipped to {worst}");
         assert!(workforce.count() >= 8, "only {} hired", workforce.count());
         assert!(staff.total() >= 1, "no support hired");
+    }
+
+    #[test]
+    fn the_cart_cycle_matches_the_whitepaper() {
+        let m = base();
+        let cart = CycleSpec::CART;
+
+        // Whitepaper §5: 200 bananas, crew of 3, 15 m/s.
+        assert!((Segment::ToGrove.duration(cart, m) * 2.0 - 13.333_333_333_333_334).abs() < 1e-9);
+        assert!((Segment::Pick.duration(cart, m) - 66.666_666_666_666_67).abs() < 1e-9);
+        assert!((Segment::Unload.duration(cart, m) - 100.0).abs() < 1e-9);
+        assert!((work_time(cart, m) - 180.0).abs() < 1e-9);
+        // The snack is a uniform inflation of all three, so the segment shares
+        // §5 reports are untouched by it.
+        assert!((cycle_time(cart, m) - 189.473_684_210_526_3).abs() < 1e-9);
+        assert!((meal(cart, m) - 37.894_736_842_105_26).abs() < 1e-9);
+
+        // A cart barely travels and instead sits at the depot being emptied,
+        // which is the whole reason Chefs are a worker's buy and Unpackers a
+        // cart's. Nobody wrote that rule; it follows from payload and speed.
+        let share = |segment: Segment| segment.duration(cart, m) / work_time(cart, m);
+        assert!(share(Segment::Unload) > 0.55);
+        assert!(share(Segment::ToGrove) * 2.0 < 0.08);
+    }
+
+    #[test]
+    fn chefs_are_for_walkers_and_unpackers_are_for_carts() {
+        // §5 in two numbers. Ten of each, against each harvester.
+        let m = base();
+        let chefs = multipliers_for(
+            FedStaff {
+                chefs: 10,
+                ..FedStaff::default()
+            },
+            Research::default(),
+        );
+        let unpackers = multipliers_for(
+            FedStaff {
+                unpackers: 10,
+                ..FedStaff::default()
+            },
+            Research::default(),
+        );
+
+        let gain = |spec, after| throughput(spec, after) / throughput(spec, m) - 1.0;
+
+        assert!(
+            gain(CycleSpec::WORKER, chefs) > 1.0,
+            "chefs should double a walker"
+        );
+        assert!(gain(CycleSpec::CART, chefs) < 0.10);
+        assert!(gain(CycleSpec::CART, unpackers) > 0.50);
+        assert!(gain(CycleSpec::WORKER, unpackers) < 0.10);
+    }
+
+    #[test]
+    fn a_cart_converges_to_the_same_per_monkey_ceiling_as_a_walker() {
+        // Whitepaper §3: with travel and unloading driven to zero, every harvest
+        // method converges to the same per-monkey ceiling, and feeding costs a
+        // flat 5% of it. D18 left this asymmetric - workers paid a snack and
+        // carts did not - and giving the cart the same snack closes it.
+        let m = Multipliers {
+            speed: 1e6,
+            unpack: 1e6,
+            ..Multipliers::default()
+        };
+        let ceiling = m.tech / T_PICK;
+
+        let walker = throughput(CycleSpec::WORKER, m);
+        let per_crew = throughput(CycleSpec::CART, m) / CART_CREW as f64;
+
+        assert!((walker / ceiling - (1.0 - SNACK_FRACTION)).abs() < 1e-4);
+        assert!((per_crew / ceiling - (1.0 - SNACK_FRACTION)).abs() < 1e-4);
+        assert!((walker - per_crew).abs() < 1e-4, "{walker} vs {per_crew}");
+    }
+
+    #[test]
+    fn a_cart_costs_its_missing_crew_and_never_rewinds_the_worker_ladder() {
+        let carts = Carts::default();
+
+        // No spare monkeys: the price is the cart plus three hires off the
+        // ladder. A shop that quoted 70 and then refused the sale for want of
+        // monkeys would be the same lie D18 removed.
+        let broke = Workforce::default();
+        assert_eq!(cart_crew_shortfall(broke, carts), 3);
+        let bundled = 70.0 + 4.0 + 4.0 * 1.15 + 4.0 * 1.15 * 1.15;
+        assert!((cart_price(broke, carts) - bundled).abs() < 1e-12);
+
+        // Three spare monkeys: just the cart.
+        let staffed = Workforce::from_saved(3).unwrap();
+        assert_eq!(cart_crew_shortfall(staffed, carts), 0);
+        assert_eq!(cart_price(staffed, carts), 70.0);
+
+        // Crewing does not give the worker ladder back. If it did, buying a
+        // cart would make the next worker 1.15³ cheaper - a discount for
+        // spending seventy bananas, which inverts the whole ladder.
+        let mut owned = Workforce::from_saved(8).unwrap();
+        let before = owned.next_cost();
+        let mut crewed = Carts::default();
+        crewed.buy(0);
+        crewed.board();
+        crewed.board();
+        crewed.board();
+        assert_eq!(crewed.crewed(), 3);
+        assert_eq!(owned.next_cost(), before);
+        // And a bundled purchase advances it, exactly as three separate hires
+        // would have.
+        owned.hire();
+        assert!(owned.next_cost() > before);
+    }
+
+    #[test]
+    fn a_cart_is_locked_until_the_first_research_level() {
+        let m = base();
+        let rich = Treasury::from_saved(MAX_SAFE_BANANAS).unwrap();
+        let plan = |research| {
+            plan_hire(
+                UnitKind::Cart,
+                EconomyState {
+                    workforce: Workforce::from_saved(8).unwrap(),
+                    carts: Carts::default(),
+                    staff: Staff::default(),
+                    fed: FedStaff::default(),
+                    research,
+                    treasury: rich,
+                    committed: 0.0,
+                    multipliers: m,
+                },
+            )
+        };
+
+        assert!(!plan(Research::default()).affordable);
+        assert!(!plan(Research::from_saved(59.0).unwrap()).affordable);
+        assert!(plan(Research::from_saved(60.0).unwrap()).affordable);
+        // The gate is the only hard lock left; the price is unaffected by it.
+        assert_eq!(plan(Research::default()).cost, 70.0);
+    }
+
+    #[test]
+    fn crewing_moves_a_monkey_from_the_pool_onto_a_cart() {
+        let m = base();
+        let staff = Staff::default();
+        let fed = FedStaff::default();
+
+        let pool_only = EconomySnapshot::project(9, Carts::default(), staff, fed, m);
+        let mut crewed = Carts::default();
+        crewed.buy(0);
+        for _ in 0..CART_CREW {
+            crewed.board();
+        }
+        let with_cart = EconomySnapshot::project(9, crewed, staff, fed, m);
+
+        // Three monkeys left the route, so the pool's contribution drops by
+        // three walkers' worth and the cart's is added in their place.
+        let walker = worker_throughput(m);
+        let expected = pool_only.gross_per_sec - 3.0 * walker + throughput(CycleSpec::CART, m);
+        assert!((with_cart.gross_per_sec - expected).abs() < 1e-12);
+
+        // A cart costs 0.20/s flat, and its crew stop drawing 0.03 each.
+        let expected_wages = 6.0 * WORKER_WAGE + CART_WAGE;
+        assert!((with_cart.wages_per_sec - expected_wages).abs() < 1e-12);
+        // Which is a decisive win - the whole reason D17 called cart slots
+        // strictly better than the pool.
+        assert!(with_cart.net_per_sec > pool_only.net_per_sec);
+
+        // A half-boarded cart produces nothing and its waiting crew is out of
+        // the pool: boarding costs a trip, and that is its whole cost.
+        let mut boarding = Carts::default();
+        boarding.buy(0);
+        boarding.board();
+        let mid = EconomySnapshot::project(9, boarding, staff, fed, m);
+        assert_eq!(boarding.running(), 0);
+        assert!((mid.gross_per_sec - 8.0 * walker).abs() < 1e-12);
+        assert!((mid.wages_per_sec - 8.0 * WORKER_WAGE).abs() < 1e-12);
     }
 
     #[test]

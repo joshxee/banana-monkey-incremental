@@ -146,10 +146,29 @@ def worker_meal(s, p):
 
 
 def cart_cycle(s, p):
-    """Carts get the same speed multiplier as everyone else - D6 is deleted."""
-    return (2 * p.dist / (p.k_speed * m_speed(s, p)),
+    """Four addends, exactly like `worker_cycle`. Carts get the same speed
+    multiplier as everyone else (D6 is deleted) and, since the cart increment,
+    the same snack (D19/D20).
+
+    Adding the snack closes the asymmetry D18 recorded as its one outstanding
+    cost: workers converged 5% under the §3 ceiling while carts converged on
+    it. Both now converge to (1 - snack) x m_tech / t_pick per crew monkey, so
+    the ceiling theorem is uniform across harvest methods.
+
+    It also makes the cart solvent by construction. Its meal is 37.9 bananas of
+    a 200-banana payload, reserved out of that delivery - without which a cart
+    that missed one would freeze holding the payload, and at an empty pool the
+    treasury could never climb back to free it.
+    """
+    work = (2 * p.dist / (p.k_speed * m_speed(s, p)),
             p.k_payload * p.t_pick / (p.k_crew * m_tech(s, p)),
             p.k_payload * p.t_unload / m_unpack(s, p))
+    return work + (sum(work) * p.w_snack / (1.0 - p.w_snack),)
+
+
+def cart_meal(s, p):
+    """Bananas one cart eats per round trip, crew included."""
+    return p.k_salary * sum(cart_cycle(s, p))
 
 
 def worker_throughput(s, p):
@@ -249,16 +268,18 @@ def _income_sources(s, p):
 def unfunded_salary(s, p):
     """The part of the wage bill that no delivery is holding money for.
 
-    A pool worker's meal is reserved out of the delivery it just made (D20), so
-    it never draws on the general pot. Support staff have no delivery of their
-    own and eat out of surplus (D19); cart crews will join the workers once the
-    cart increment gives carts a snack, and until then they are here too.
+    Every harvester's meal is now reserved out of the delivery it just made
+    (D20), so neither the pool nor the carts draw on the general pot. What is
+    left is the support staff, who have no delivery of their own and eat out of
+    surplus (D19).
 
     Modelled as a continuous drain even though D19 pays support in 1.0-banana
     lumps every ten seconds. The rate is identical and the lumpiness only makes
     the measured dip slightly pessimistic, which is the safe direction.
     """
-    return salary(s, p) - (s.W - s.A) * p.w_salary
+    return (salary(s, p)
+            - (s.W - s.A) * p.w_salary
+            - p.k_salary * crewed(s, p) / p.k_crew)
 
 
 def committed(s, p):
@@ -271,8 +292,8 @@ def committed(s, p):
     encumbered at any moment.
     """
     pool = s.W - s.A
-    held = pool * p.w_salary * sum(worker_cycle(s, p)) / (1.0 - p.w_snack)
-    # Carts owe this too, once they adopt a snack. Until then they hold nothing.
+    held = (pool * worker_meal(s, p)
+            + (crewed(s, p) / p.k_crew) * cart_meal(s, p))
     return held * p.w_snack
 
 
@@ -415,6 +436,8 @@ def discrete_run(s, p, duration=1200.0, dt=0.05, start=0.0,
     # A worker unloads at Tw - w_snack and eats at Tw, so the two events are
     # separated on the clock even though they belong to the same trip.
     unload_at, w_meal = Tw - worker_cycle(s, p)[3], worker_meal(s, p)
+    # A cart unloads at Tk - snack and eats at Tk, exactly like a worker.
+    k_unload_at, k_meal = Tk - cart_cycle(s, p)[3], cart_meal(s, p)
     while t < duration:
         bananas -= drain * dt
         for i in range(pool):
@@ -427,11 +450,14 @@ def discrete_run(s, p, duration=1200.0, dt=0.05, start=0.0,
                 wph[i] -= Tw
                 bananas -= w_meal
         for i, payload in enumerate(cart_payloads):
+            was = kph[i]
             kph[i] += dt
-            if kph[i] >= Tk:
-                kph[i] -= Tk
+            if was < k_unload_at <= kph[i]:
                 bananas += payload
                 delivered += payload
+            if kph[i] >= Tk:
+                kph[i] -= Tk
+                bananas -= k_meal
         lo = min(lo, bananas)
         t += dt
     return lo, delivered / duration

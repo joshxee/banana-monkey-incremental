@@ -94,11 +94,12 @@ def t_seeded_world_is_alive():
 # ──────────────────────────────────────────────────────────── cycle physics
 
 def t_cycle_segments_are_positive_and_finite():
-    """A worker has a fourth addend the cart does not: the snack it eats at the
-    stall. The cart increment owes its crew the same treatment."""
+    """Four addends each: travel, pick, unload, and the snack eaten at the stall
+    out of the delivery just made. The cart used to have three, which is the
+    asymmetry D18 recorded and the cart increment closed."""
     s = State(W=10, C=3, U=2)
     for name, cyc, want in (("worker", worker_cycle(s, P), 4),
-                            ("cart", cart_cycle(s, P), 3)):
+                            ("cart", cart_cycle(s, P), 4)):
         check(f"CYC  {name} has {want} positive finite segments",
               len(cyc) == want and all(math.isfinite(x) and x > 0 for x in cyc))
 
@@ -131,17 +132,22 @@ def t_ceiling_is_one_over_pick_time():
     to the same per-monkey throughput. This bounds the whole game."""
     s = State(W=1, C=10**6, U=10**6)
     ceil = m_tech(s, P) / P.t_pick
-    # A worker keeps a fixed share of every trip for itself, so it converges to
-    # a flat 5% under the ceiling rather than to the ceiling. Because the share
-    # is constant, the theorem's content survives: it still bounds the game, and
-    # it will bound every harvest method equally once carts adopt the snack too.
+    # Every harvester keeps a fixed share of every trip for itself, so they all
+    # converge to a flat 5% under the ceiling rather than to the ceiling. The
+    # theorem's content survives because the share is constant - and since the
+    # cart increment gave carts the same snack, it now bounds every harvest
+    # method *equally*, which is what D18 recorded as owed.
+    target = ceil * (1 - P.w_snack)
     check("CEIL worker throughput converges to (1-snack) x m_tech/t_pick",
-          math.isclose(worker_throughput(s, P), ceil * (1 - P.w_snack),
-                       rel_tol=1e-3),
-          f"{worker_throughput(s, P):.4f} vs {ceil * (1 - P.w_snack):.4f}")
+          math.isclose(worker_throughput(s, P), target, rel_tol=1e-3),
+          f"{worker_throughput(s, P):.4f} vs {target:.4f}")
     check("CEIL cart per-crew throughput converges to the same ceiling",
-          math.isclose(cart_throughput(s, P) / P.k_crew, ceil, rel_tol=1e-3),
-          f"{cart_throughput(s, P)/P.k_crew:.4f} vs {ceil:.4f}")
+          math.isclose(cart_throughput(s, P) / P.k_crew, target, rel_tol=1e-3),
+          f"{cart_throughput(s, P)/P.k_crew:.4f} vs {target:.4f}")
+    check("CEIL both harvest methods converge to the same number",
+          math.isclose(worker_throughput(s, P), cart_throughput(s, P) / P.k_crew,
+                       rel_tol=1e-3),
+          "the D18 asymmetry is closed")
 
 
 def t_ceiling_is_not_binding_in_mvp():

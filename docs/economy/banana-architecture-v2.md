@@ -70,8 +70,11 @@ the type should not need revisiting when prestige arrives.
 Tiers tune independently without touching systems.
 
 **D3 — Five unit types.**
-Worker Monkey (harvests on foot), Net Cart (harvests with a crew of three),
+Worker Monkey (harvests on foot), Cart (harvests with a crew of three),
 Chef (speed), Unpacker (unload rate), Technologist (research).
+
+*Renamed:* "Net Cart" is just the Cart. There is no second vehicle to
+distinguish it from, and the shop has a column width to respect.
 
 **D4 — All multipliers are additive within their term.**
 `M = 1 + count × bonus`. Multiplicative stacking is unbalanceable at this stage.
@@ -307,10 +310,11 @@ the top of the tick, plus everything delivered so far during it — through ever
 worker in turn. A worker eats only what the larder holds. That single value is
 what makes the treasury non-negative by construction rather than by gate.
 
-**Owed by the cart increment.** Cart crews still drain continuously, so D15 and
-D16 still bind for them, and until they adopt a snack workers converge 5% under
-the §3 ceiling while carts converge on it. That asymmetry is this decision's one
-outstanding cost.
+**~~Owed by the cart increment.~~ Paid.** Cart crews used to drain continuously,
+so D15 and D16 bound them, and workers converged 5% under the §3 ceiling while
+carts converged on it. D19 and D23 give the cart the same snack out of its own
+delivery, so both methods now converge to the same per-monkey figure and the
+reserve is gone for everyone.
 
 **D17 — *Deleted* (support increment).**
 Auto-pull existed to answer "which monkeys crew the cart?" every tick. With crew
@@ -636,6 +640,49 @@ The research progress bar is deliberately deferred rather than cut — see §10.
 D14 removes the Technologist from the ranked list, and the MVP has no research
 progress bar, so a player following payback order would never buy one, never
 unlock the Cart, and never see the second half of the game.
+
+**D23 — A cart is crewed by boarding, and paid like every other harvester.**
+*(Cart increment.)*
+
+The last piece of D8 and D17's deletion. A cart takes exactly three monkeys, and
+the purchase guarantees them: if the player has three spare workers it costs
+`70 × 1.70^n`, and if they do not, the price includes hiring the difference off
+the worker ladder. A shop that quoted 70 and then refused the sale for want of
+monkeys would be the same lie D18 removed.
+
+**Crewed monkeys still count as workers owned.** The ladder never rewinds — if
+crewing decremented the count, buying a cart would make the next worker `1.15³`
+cheaper, a discount for spending seventy bananas. They leave the *pool*, which is
+`owned − crewed`, and that is the number the route renders.
+
+**Boarding is first come, no reservation.** The cart spawns as an empty box at
+the depot and takes the next worker to finish its snack — the one point in the
+cycle where a monkey is standing still, carrying nothing and owing nothing.
+Monkeys bought *with* the cart board immediately, since they are already at the
+stall; that is what makes "pay more, start sooner" a real trade rather than a
+penalty. Carts fill in purchase order, so two carts never sit stuck at 2/3.
+
+A boarding monkey neither harvests nor eats. Boarding happens in its own stage
+*before* the cycles advance, so that is true by construction rather than by
+bookkeeping — and the cost of boarding is a forgone trip, which is the honest
+price, rather than a fee invented to represent one.
+
+**The cart takes the same 5% snack**, `meal = 0.20 × T_cart` ≈ 37.9 of the 200 it
+has just delivered, reserved by D20. This closes the asymmetry D18 recorded as
+its one outstanding cost: both harvest methods now converge to
+`(1 − f) × M_tech / t_pick` per crew monkey, so §3's ceiling theorem is uniform.
+Its crew stop drawing their individual 0.03 — a cart is 0.20/s flat, crew
+included.
+
+*Presentation.* The cart has **no depth lane**, because there is none left: the
+three worker lanes already reach 12 texels of a 16-texel grass band and a fourth
+would stand a sprite on the sky. It separates by drawing *in front* instead,
+which is what a vehicle should do — workers pass behind it rather than through
+it — with its dwell points pushed to the inside of the route so it has its own
+bay at each end. The crew never dismounts; the box sits at the grove through
+Pick and at the depot through Unload, and its riders appear one at a time as
+they board, which is the only feedback during the longest dead stretch in the
+game.
 
 **D22 — The Cart's shop row is the research bar.**
 *(Support increment.)*

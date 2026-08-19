@@ -44,6 +44,7 @@ fn main() {
         .insert_resource(run.workforce)
         .insert_resource(run.staff)
         .insert_resource(run.research)
+        .insert_resource(run.carts)
         .insert_resource(worker::RestoreWorkers::new(restored_workers))
         .add_plugins(HarvestGamePlugin)
         .run();
