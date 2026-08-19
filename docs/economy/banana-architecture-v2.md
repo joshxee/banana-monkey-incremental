@@ -631,14 +631,47 @@ The research progress bar is deliberately deferred rather than cut — see §10.
 
 ## 10. Known Gaps
 
-**The Technologist has no pull.** D14 removes it from the ranked list, and the
-MVP has no research progress bar. A player following payback order will never
-buy one, never unlock the Net Cart, and never see the second half of the game.
-In a text MVP where all five units are visible at once this is survivable; in
-the full product the research bar with its named next unlock is what closes it.
-Flagged here so it is not rediscovered as a bug.
+**~~The Technologist has no pull.~~ Closed by D22.**
 
-**Retired Technologists are permanent overhead.** With capped research they end
-the session drawing wages for nothing — six of them, 1.2 bananas/sec against a
-15-banana gross. Tolerable now; under a population cap they are six monkeys not
-harvesting, which is a different problem. Retraining is the v2 fix.
+D14 removes the Technologist from the ranked list, and the MVP has no research
+progress bar, so a player following payback order would never buy one, never
+unlock the Cart, and never see the second half of the game.
+
+**D22 — The Cart's shop row is the research bar.**
+*(Support increment.)*
+
+Rather than add a progress bar, the locked row carries the progress. The Cart is
+present from the first frame with no hire button - a *dimmed button* and *a unit
+that does not exist yet* are different states, and a dimmed button says the first
+when it means the second - and its message cell spans the three stat columns it
+has no values for, because a locked unit has no rate, no meal and no count but
+does have one thing worth saying:
+
+| technologists | message | plaque |
+|---|---|---|
+| 0 | `NEEDS A TECHNOLOGIST` | `LOCKED` |
+| ≥1 | `RESEARCH 34/60` | `41%` |
+
+The first string names **the Technologist**, not "cart technology". The
+technologist is a row one above with a button on it; a sentence that points at
+something the player can act on closes the loop, and one naming a noun they have
+never met does not. Once one is hired the same node becomes a counter, which
+turns buying an unlock on faith into a wait with a clock - and gives the
+Technologist's `1.0 RES/s` the denominator it otherwise completely lacks.
+
+*One thing this does not fix.* At the resting drawer height the Cart row is
+below the fold on every viewport, so the breadcrumb has to be scrolled to. The
+row order is fixed and declared (`Unit::ROWS`) precisely so that scrolling finds
+it in the same place every time; ordering by price would re-sort the table under
+the player's finger, since a worker passes the Chef's base after thirteen hires.
+
+**Retired Technologists are permanent overhead** — but far less of it than this
+gap originally recorded. Measured under the support increment, a *marginal*
+Technologist is never worth buying: the ladder grows 2.2× a level while an extra
+researcher only scales the rate by `(X+1)/X`, so the second one costs 120 bananas
+of wages over ten minutes and does not land an extra level inside that horizon.
+`X = 1` is the correct count for the whole MVP. The end-state overhead is
+therefore 0.2 bananas/sec, not 1.2, and the whitepaper's six-Technologist ending
+is an artifact of the oracle's `technologist_npv` still crediting cart-unlock
+option value after the cart is already unlocked. Under a population cap it is one
+monkey not harvesting, which is a much smaller version of the same problem.

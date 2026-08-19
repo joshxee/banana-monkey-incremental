@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Staff, Treasury, Workforce};
+use crate::domain::{Research, Staff, Treasury, Workforce};
 
 const SAVE_VERSION: u32 = 3;
 // The storage key is a namespace, not a schema version: it deliberately stays
@@ -22,6 +22,7 @@ pub struct SavedRun {
     pub treasury: Treasury,
     pub workforce: Workforce,
     pub staff: Staff,
+    pub research: Research,
 }
 
 /// Read just enough to route to the right schema. Untagged deserialisation
@@ -55,6 +56,11 @@ struct SaveV3 {
     chefs: u32,
     unpackers: u32,
     technologists: u32,
+    /// Points only. The research *level* is derived from them on load, because
+    /// two fields that must agree eventually will not: a tampered save or a
+    /// rebalanced growth factor would leave a level its points do not justify,
+    /// and nothing would notice.
+    research: f64,
 }
 
 impl From<SaveV1> for SaveV3 {
@@ -66,6 +72,7 @@ impl From<SaveV1> for SaveV3 {
             chefs: 0,
             unpackers: 0,
             technologists: 0,
+            research: 0.0,
         }
     }
 }
@@ -79,6 +86,7 @@ impl From<SaveV2> for SaveV3 {
             chefs: 0,
             unpackers: 0,
             technologists: 0,
+            research: 0.0,
         }
     }
 }
@@ -110,6 +118,7 @@ fn encode(run: SavedRun) -> String {
         chefs: run.staff.count(SupportRole::Chef),
         unpackers: run.staff.count(SupportRole::Unpacker),
         technologists: run.staff.count(SupportRole::Technologist),
+        research: run.research.points(),
     })
     .expect("valid run state always serializes")
 }
@@ -132,6 +141,7 @@ fn decode(raw: &str) -> Option<SavedRun> {
         // unchecked count spawns that many entities in a single tick and is
         // then re-persisted, so the tab never recovers.
         staff: Staff::from_saved(data.chefs, data.unpackers, data.technologists)?,
+        research: Research::from_saved(data.research)?,
     })
 }
 
@@ -222,18 +232,27 @@ mod tests {
     }
 
     fn staffed(bananas: f64, workers: u32, c: u32, u: u32, x: u32) -> SavedRun {
+        researched(bananas, workers, c, u, x, 0.0)
+    }
+
+    fn researched(bananas: f64, workers: u32, c: u32, u: u32, x: u32, r: f64) -> SavedRun {
         SavedRun {
             treasury: Treasury::from_saved(bananas).unwrap(),
             workforce: Workforce::from_saved(workers).unwrap(),
             staff: Staff::from_saved(c, u, x).unwrap(),
+            research: Research::from_saved(r).unwrap(),
         }
     }
 
     #[test]
     fn save_round_trip_preserves_the_run() {
-        let saved = staffed(123.0, 7, 2, 3, 1);
+        let saved = researched(123.0, 7, 2, 3, 1, 145.5);
 
         assert_eq!(decode(&encode(saved)), Some(saved));
+        // The level has to come back with the points that bought it: level 0
+        // costs 60 and level 1 costs 132, so 145.5 has bought exactly one.
+        assert_eq!(saved.research.level(), 1);
+        assert_eq!(decode(&encode(saved)).unwrap().research.level(), 1);
     }
 
     #[test]
@@ -273,6 +292,12 @@ mod tests {
             decode(r#"{"version":3,"bananas":3,"workers":1,"chefs":1,"unpackers":1}"#),
             None
         );
+        assert_eq!(
+            decode(
+                r#"{"version":3,"bananas":3,"workers":1,"chefs":1,"unpackers":1,"technologists":1,"research":-1}"#
+            ),
+            None
+        );
         assert_eq!(decode(r#"{"version":4,"bananas":3,"workers":1}"#), None);
         // A v1 payload must not be read as a v2 one.
         assert_eq!(decode(r#"{"version":1,"bananas":1.5}"#), None);
@@ -301,7 +326,7 @@ mod tests {
         // loop of its own.
         let staffed_payload = |c: &str| {
             format!(
-                r#"{{"version":3,"bananas":1,"workers":0,"chefs":{c},"unpackers":0,"technologists":0}}"#
+                r#"{{"version":3,"bananas":1,"workers":0,"chefs":{c},"unpackers":0,"technologists":0,"research":0}}"#
             )
         };
         assert_eq!(decode(&staffed_payload("-1")), None);

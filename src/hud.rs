@@ -20,8 +20,9 @@ use bevy::prelude::*;
 
 use crate::{
     domain::{
-        Committed, EconomySnapshot, FedStaff, Multipliers, SUPPORT_MEAL_PERIOD, Staff, SupportRole,
-        Treasury, UnitKind, Workforce, plan_hire,
+        CART_TECH_REQUIREMENT, Committed, EconomySnapshot, EconomyState, FedStaff, Multipliers,
+        RESEARCH_PER_TECHNOLOGIST, Research, SUPPORT_MEAL_PERIOD, Staff, SupportRole, Treasury,
+        UnitKind, Workforce, plan_hire,
     },
     game::{
         BROWN, BROWN_LIGHT, ButtonAction, CREAM, Feedback, GOLD, INK, MUTED, MenuState, SceneLayout,
@@ -149,6 +150,13 @@ pub(crate) enum RateLine {
 pub(crate) enum Unit {
     Worker,
     Support(SupportRole),
+    /// Present from the first frame, and locked until research says otherwise.
+    ///
+    /// §10 records the gap this closes: a player following payback order never
+    /// buys a Technologist, so they never unlock the Cart and never see the
+    /// second half of the game. A row that simply is not there cannot teach
+    /// that; a locked row that names what would unlock it can.
+    Cart,
 }
 
 impl Unit {
@@ -156,11 +164,12 @@ impl Unit {
     /// stable order - a worker passes the Chef's 25 base after thirteen hires -
     /// so a price-sorted table would re-sort itself under the player's finger
     /// in a panel that gets tapped repeatedly. Declaration order it is.
-    const ROWS: [Unit; 4] = [
+    const ROWS: [Unit; 5] = [
         Unit::Worker,
         Unit::Support(SupportRole::Chef),
         Unit::Support(SupportRole::Unpacker),
         Unit::Support(SupportRole::Technologist),
+        Unit::Cart,
     ];
 
     /// Singular, because the row reads as a spec sheet for one of them: the
@@ -171,13 +180,17 @@ impl Unit {
             // all monkeys too.
             Unit::Worker => "WORKER",
             Unit::Support(role) => role.name(),
+            Unit::Cart => "CART",
         }
     }
 
-    fn kind(self) -> UnitKind {
+    /// The Cart is not purchasable yet, so it has no `UnitKind` and no hire
+    /// button. Increment three gives it both.
+    fn kind_opt(self) -> Option<UnitKind> {
         match self {
-            Unit::Worker => UnitKind::Worker,
-            Unit::Support(role) => UnitKind::Support(role),
+            Unit::Worker => Some(UnitKind::Worker),
+            Unit::Support(role) => Some(UnitKind::Support(role)),
+            Unit::Cart => None,
         }
     }
 }
@@ -509,6 +522,9 @@ const COL_EATS: f32 = 74.0;
 const COL_OWNED: f32 = 46.0;
 const COL_GAP: f32 = 10.0;
 
+/// A locked row's message spans the three stat columns it has no values for.
+const LOCKED_MESSAGE_WIDTH: f32 = COL_FARMING + COL_EATS + COL_OWNED + 2.0 * COL_GAP;
+
 /// Column width the table needs, with and without the column a narrow screen
 /// drops. Gaps are counted separately because they do not scale with the
 /// columns - see `column_scale`.
@@ -599,44 +615,94 @@ fn spawn_unit_row(store: &mut ChildSpawnerCommands, unit: Unit) {
                 children![(
                     Text::new(unit.name()),
                     TextFont::from_font_size(14.0),
-                    TextColor(CREAM),
+                    TextColor(if unit.kind_opt().is_some() {
+                        CREAM
+                    } else {
+                        STORE_LABEL
+                    }),
                 )],
             ));
 
-            row.spawn((
-                Button,
-                ButtonAction::Hire(unit.kind()),
-                HireButton(unit),
-                TableCell(COL_HIRE),
-                Node {
-                    width: px(COL_HIRE),
-                    min_height: px(34),
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    flex_shrink: 0.0,
-                    border: UiRect::all(px(2)),
-                    border_radius: BorderRadius::all(px(7)),
-                    ..default()
-                },
-                BackgroundColor(BROWN_LIGHT),
-                BorderColor::all(GOLD),
-                // Just the price. The column header says HIRE, so repeating the
-                // word inside every button costs a word per unit for nothing.
-                children![(
-                    Text::new("4.0"),
-                    TextFont::from_font_size(17.0),
-                    TextColor(GOLD),
-                    UnitField {
-                        unit,
-                        stat: UnitStat::Price,
-                    },
-                )],
-            ));
+            match unit.kind_opt() {
+                Some(kind) => spawn_hire_button(row, unit, kind),
+                // A locked row must not look like an affordability problem.
+                // A button greyed for want of bananas and a unit that does not
+                // exist yet are different states, and a dimmed button says the
+                // first when it means the second - so the Cart gets no button
+                // at all, and the space becomes the explanation.
+                None => spawn_locked_plaque(row, unit),
+            }
 
-            spawn_unit_cell(row, unit, UnitStat::Gain, COL_FARMING, false);
-            spawn_unit_cell(row, unit, UnitStat::Feeding, COL_EATS, true);
-            spawn_unit_cell(row, unit, UnitStat::Owned, COL_OWNED, false);
+            if unit.kind_opt().is_some() {
+                spawn_unit_cell(row, unit, UnitStat::Gain, COL_FARMING, false);
+                spawn_unit_cell(row, unit, UnitStat::Feeding, COL_EATS, true);
+                spawn_unit_cell(row, unit, UnitStat::Owned, COL_OWNED, false);
+            } else {
+                // A locked unit has no rate, no meal and no count - three cells
+                // of "-" that say nothing. It has one thing worth saying, and
+                // it needs the width of all three to say it.
+                spawn_unit_cell(row, unit, UnitStat::Gain, LOCKED_MESSAGE_WIDTH, false);
+            }
         });
+}
+
+fn spawn_hire_button(row: &mut ChildSpawnerCommands, unit: Unit, kind: UnitKind) {
+    row.spawn((
+        Button,
+        ButtonAction::Hire(kind),
+        HireButton(unit),
+        TableCell(COL_HIRE),
+        Node {
+            width: px(COL_HIRE),
+            min_height: px(34),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            flex_shrink: 0.0,
+            border: UiRect::all(px(2)),
+            border_radius: BorderRadius::all(px(7)),
+            ..default()
+        },
+        BackgroundColor(BROWN_LIGHT),
+        BorderColor::all(GOLD),
+        // Just the price. The column header says HIRE, so repeating the word
+        // inside every button costs a word per unit for nothing.
+        children![(
+            Text::new("4.0"),
+            TextFont::from_font_size(17.0),
+            TextColor(GOLD),
+            UnitField {
+                unit,
+                stat: UnitStat::Price,
+            },
+        )],
+    ));
+}
+
+fn spawn_locked_plaque(row: &mut ChildSpawnerCommands, unit: Unit) {
+    row.spawn((
+        TableCell(COL_HIRE),
+        Node {
+            width: px(COL_HIRE),
+            min_height: px(34),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            flex_shrink: 0.0,
+            border: UiRect::all(px(2)),
+            border_radius: BorderRadius::all(px(7)),
+            ..default()
+        },
+        BackgroundColor(STORE_SOIL),
+        BorderColor::all(STORE_LABEL),
+        children![(
+            Text::new("LOCKED"),
+            TextFont::from_font_size(12.0),
+            TextColor(STORE_LABEL),
+            UnitField {
+                unit,
+                stat: UnitStat::Price,
+            },
+        )],
+    ));
 }
 
 fn spawn_unit_cell(
@@ -1274,6 +1340,7 @@ pub fn sync_shop(
     workforce: Res<Workforce>,
     staff: Res<Staff>,
     fed: Res<FedStaff>,
+    research: Res<Research>,
     committed: Res<Committed>,
     multipliers: Res<Multipliers>,
     mut fields: Query<(&UnitField, &mut Text, &mut TextColor)>,
@@ -1284,58 +1351,97 @@ pub fn sync_shop(
         &mut BorderColor,
     )>,
 ) {
-    let plan_for = |unit: Unit| {
-        plan_hire(
-            unit.kind(),
-            *workforce,
-            *staff,
-            *fed,
-            *treasury,
-            committed.0,
-            *multipliers,
-        )
+    let world = EconomyState {
+        workforce: *workforce,
+        staff: *staff,
+        fed: *fed,
+        research: *research,
+        treasury: *treasury,
+        committed: committed.0,
+        multipliers: *multipliers,
     };
+    let plan_for = |unit: Unit| unit.kind_opt().map(|kind| plan_hire(kind, world));
+    let (into_level, level_cost) = research.progress();
 
     for (field, mut text, mut colour) in &mut fields {
         let plan = plan_for(field.unit);
+        let affordable = plan.is_some_and(|plan| plan.affordable);
         // The price greys out with its button, rather than staying gold on a
         // dimmed fill and reading as mud.
         set_if_changed(
             &mut colour.0,
-            match field.stat {
-                UnitStat::Price if plan.affordable => GOLD,
-                UnitStat::Price => STORE_LABEL,
+            match (field.stat, field.unit) {
+                (UnitStat::Price, _) if affordable => GOLD,
+                (UnitStat::Price, _) => STORE_LABEL,
+                // The Technologist's cell is the one number in the column that
+                // is not bananas, and D14 says that is correct rather than a
+                // gap: its banana delta is exactly -wage at every world state
+                // and carries no information. Gold, so being the row the
+                // ranking does not price looks deliberate.
+                (UnitStat::Gain, Unit::Support(SupportRole::Technologist)) => GOLD,
+                (_, Unit::Cart) => STORE_LABEL,
                 _ => CREAM,
             },
         );
         let owned = match field.unit {
             Unit::Worker => workforce.count(),
             Unit::Support(role) => staff.count(role),
+            Unit::Cart => 0,
         };
-        let value = match field.stat {
-            UnitStat::Price => format!("{:.1}", plan.cost),
+        let value = match (field.stat, field.unit) {
+            // What the Cart's row says instead of a price. Naming the
+            // *Technologist* rather than "cart technology" matters: the
+            // technologist is a row one above with a button on it, and the
+            // sentence has to point at something the player can act on. Once
+            // one is hired the same cell becomes a counter, which turns buying
+            // an unlock on faith into a wait with a clock.
+            (UnitStat::Price, Unit::Cart) => {
+                if research.level() >= CART_TECH_REQUIREMENT {
+                    // Increment three turns this into a price and a button.
+                    "SOON".to_string()
+                } else if staff.count(SupportRole::Technologist) == 0 {
+                    "LOCKED".to_string()
+                } else {
+                    format!("{}%", ((into_level / level_cost) * 100.0).floor())
+                }
+            }
+            (UnitStat::Gain, Unit::Cart) => {
+                if research.level() >= CART_TECH_REQUIREMENT {
+                    "CART TECHNOLOGY READY".to_string()
+                } else if staff.count(SupportRole::Technologist) == 0 {
+                    "NEEDS A TECHNOLOGIST".to_string()
+                } else {
+                    format!("RESEARCH {into_level:.0}/{level_cost:.0}")
+                }
+            }
+            (UnitStat::Gain, Unit::Support(SupportRole::Technologist)) => {
+                format!("{RESEARCH_PER_TECHNOLOGIST:.1} RES/s")
+            }
+            (UnitStat::Price, _) => format!("{:.1}", plan.map_or(0.0, |plan| plan.cost)),
             // Per minute, like the readout. Per second a worker reads 0.10 and
             // a meal reads 0.03, and three numbers that all round to nothing
             // are worse than no numbers at all.
-            UnitStat::Gain => format!("{:+.1}/min", plan.gain_per_min),
+            (UnitStat::Gain, _) => {
+                format!("{:+.1}/min", plan.map_or(0.0, |plan| plan.gain_per_min))
+            }
             // Per trip for a harvester, per shift for support. The two eat on
             // entirely different clocks and a shared "/min" would hide that a
             // worker's meal is a lump out of a delivery while a chef's is a
             // standing charge.
-            UnitStat::Feeding => {
-                if plan.meal_period == SUPPORT_MEAL_PERIOD {
+            (UnitStat::Feeding, _) => match plan {
+                Some(plan) if plan.meal_period == SUPPORT_MEAL_PERIOD => {
                     format!("{:.1}/{:.0}s", plan.meal, SUPPORT_MEAL_PERIOD)
-                } else {
-                    format!("{:.1}/trip", plan.meal)
                 }
-            }
-            UnitStat::Owned => owned.to_string(),
+                Some(plan) => format!("{:.1}/trip", plan.meal),
+                None => "-".to_string(),
+            },
+            (UnitStat::Owned, _) => owned.to_string(),
         };
         set_if_changed(&mut text.0, value);
     }
 
     for (button, interaction, mut background, mut border) in &mut buttons {
-        let affordable = plan_for(button.0).affordable;
+        let affordable = plan_for(button.0).is_some_and(|plan| plan.affordable);
         // Affordability outranks hover: a button the player cannot press must
         // not light up under the cursor.
         //

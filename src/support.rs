@@ -43,11 +43,60 @@ const IDLE_FPS: f32 = 12.0;
 /// a thing the player can see rather than infer from a stalled rate.
 pub(crate) const AVATARS_PER_ROLE: usize = 3;
 
+/// Half the width of the monkey's actual body, in source texels.
+///
+/// Not half the 32-texel frame: these sheets centre a much narrower monkey in a
+/// square cell, and budgeting the whole frame would declare a collision from
+/// two sprites whose transparent margins touch.
+const BODY_HALF_TEXELS: f32 = 8.0;
+
 /// Spacing between two monkeys of the same role, in source texels.
 ///
 /// Wider than the widest role box, or three chefs' hats merge into one white
-/// rectangle and the role reads as a single object with a strange head.
-const SLOT_STEP_TEXELS: f32 = 18.0;
+/// rectangle and the role reads as a single object with a strange head. Narrow
+/// enough that a role's whole fan still fits between its neighbours - see
+/// [`slot_offset_texels`].
+const SLOT_STEP_TEXELS: f32 = 13.0;
+
+/// Where a role's `slot`th monkey stands, relative to the role's station, when
+/// `drawn` of them are on screen.
+///
+/// Centred on the station rather than running rightwards from it. Fanning in
+/// one direction makes a role's width grow into the next role's space: at three
+/// slots the chefs' third monkey landed exactly on the technologist's desk, so
+/// buying a third chef appeared to delete the researcher.
+pub(crate) fn slot_offset_texels(slot: usize, drawn: usize) -> f32 {
+    (slot as f32 - (drawn as f32 - 1.0) * 0.5) * SLOT_STEP_TEXELS
+}
+
+/// How many monkeys of one role the scene has room to draw.
+///
+/// Three stations around a single deposit is a fixed amount of space, and the
+/// deposit shrinks with the viewport: at 320 px the zone is half its desktop
+/// size, so three roles of three simply do not fit and something has to give.
+/// What gives is the *crowd*, not the layout - the count is still exact in the
+/// badge and in the shop's OWNED column, and a phone shows one monkey per role
+/// rather than a smear of overlapping ones.
+pub(crate) fn avatars_per_role(layout: &SceneLayout) -> usize {
+    let scale = layout.world_scale();
+    let mut stations: Vec<f32> = SupportRole::ALL
+        .iter()
+        .map(|role| layout.support_stand(*role).0)
+        .collect();
+    stations.sort_by(f32::total_cmp);
+    let gap = stations
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .fold(f32::INFINITY, f32::min);
+
+    (1..=AVATARS_PER_ROLE)
+        .rev()
+        .find(|drawn| {
+            let half = slot_offset_texels(drawn - 1, *drawn) * scale + BODY_HALF_TEXELS * scale;
+            half * 2.0 <= gap
+        })
+        .unwrap_or(1)
+}
 /// Depth spacing, matched to `worker::LANE_STEP_TEXELS` so support and workers
 /// sit on the same ground plane.
 const ROW_STEP_TEXELS: f32 = 3.0;
@@ -195,9 +244,9 @@ pub(crate) fn sync_support_avatars(
         return;
     };
 
+    let per_role = avatars_per_role(&layout);
     for role in SupportRole::ALL {
-        let hired = staff.count(role) as usize;
-        let wanted = hired.min(AVATARS_PER_ROLE);
+        let wanted = (staff.count(role) as usize).min(per_role);
         let drawn = avatars
             .iter()
             .filter(|(_, avatar, ..)| avatar.role == role)
@@ -205,6 +254,14 @@ pub(crate) fn sync_support_avatars(
 
         for slot in drawn..wanted {
             spawn_avatar(&mut commands, &art, &layout, role, slot);
+        }
+        // A resize can shrink the fan, so the pool has to give sprites back as
+        // well as take them - otherwise rotating a phone leaves a role drawn
+        // three-wide in space that now fits one.
+        for (entity, avatar, ..) in &avatars {
+            if avatar.role == role && avatar.slot >= wanted {
+                commands.entity(entity).despawn();
+            }
         }
     }
 
@@ -224,11 +281,8 @@ pub(crate) fn sync_support_avatars(
     for (entity, avatar, flash, mut transform, mut sprite) in &mut avatars {
         let (x, row) = layout.support_stand(avatar.role);
         let scale = layout.world_scale();
-        let slot = avatar.slot as f32;
 
-        // Fan out from the station, away from the deposit's centre line, so
-        // the first monkey of a role always stands exactly on its anchor.
-        let spread = slot * SLOT_STEP_TEXELS * scale;
+        let spread = slot_offset_texels(avatar.slot, per_role) * scale;
         let feet = layout.ground_top() + row as f32 * ROW_STEP_TEXELS * scale;
         let half_height = FRAME_SIZE as f32 * 0.5 * scale;
 
@@ -237,7 +291,7 @@ pub(crate) fn sync_support_avatars(
             layout.snap(feet + half_height),
             // Behind the dragged banana and the zone labels, and stepped by
             // depth row so a nearer monkey draws over a further one.
-            1.0 - row as f32 * 0.01 + slot * 0.001,
+            1.0 - row as f32 * 0.01 + avatar.slot as f32 * 0.001,
         );
 
         if let Some(atlas) = sprite.texture_atlas.as_mut() {
@@ -330,7 +384,7 @@ pub(crate) fn sync_support_badges(
                 .spawn((
                     SupportBadge(role),
                     BadgePlate,
-                    Sprite::from_color(BADGE_PLATE, Vec2::new(30.0, 16.0)),
+                    Sprite::from_color(BADGE_PLATE, Vec2::new(26.0, 14.0)),
                     Transform::default(),
                     Visibility::Hidden,
                 ))
@@ -338,7 +392,7 @@ pub(crate) fn sync_support_badges(
                     BadgeLabel,
                     Text2d::new(String::new()),
                     TextColor(CREAM),
-                    TextFont::from_font_size(11.0),
+                    TextFont::from_font_size(10.0),
                     // In front of its own plate, and in front of the monkeys.
                     Transform::from_xyz(0.0, 0.0, 0.01),
                 ));
@@ -346,11 +400,12 @@ pub(crate) fn sync_support_badges(
     }
 
     let scale = layout.world_scale();
+    let per_role = avatars_per_role(&layout);
     for (badge, mut transform, mut visibility) in &mut badges {
         let hired = staff.count(badge.0);
         // Only once the sprites stop being able to carry the count. A "x1" on a
         // lone chef is noise, and "x3" over three visible chefs reads as nine.
-        let shown = hired as usize > AVATARS_PER_ROLE;
+        let shown = hired as usize > per_role;
         *visibility = if shown {
             Visibility::Inherited
         } else {
@@ -363,16 +418,19 @@ pub(crate) fn sync_support_badges(
         let (x, row) = layout.support_stand(badge.0);
         let feet = layout.ground_top() + row as f32 * ROW_STEP_TEXELS * scale;
         transform.translation = Vec3::new(
-            // Past the last drawn monkey of the role, so it labels the group
-            // rather than sitting on one of its heads.
-            layout.snap(x + AVATARS_PER_ROLE as f32 * SLOT_STEP_TEXELS * scale),
-            layout.snap(feet + FRAME_SIZE as f32 * 0.72 * scale),
+            // Centred over the role's fan and lifted clear of it. Placed
+            // *beside* the group it covered the outermost monkeys - and at a
+            // crowded deposit those were the chefs' hats, which are the only
+            // thing telling that role apart.
+            layout.snap(x),
+            layout.snap(feet + (FRAME_SIZE as f32 * 0.5 + 13.0) * scale),
             // In front of every monkey, including the front depth row.
             2.5,
         );
-        // Scene text is authored at a fixed size, so on a phone a desktop-sized
-        // badge would be twice its intended size against a 32 px monkey.
-        transform.scale = Vec3::splat(scale.max(1.0));
+        // Tracks the world scale so a phone does not get a badge twice its
+        // intended size against a 32 px monkey - but only partly, because a
+        // label that scaled fully would dominate the monkeys it counts.
+        transform.scale = Vec3::splat((scale * 0.6).max(0.8));
     }
 
     for (parent, mut text) in &mut labels {
@@ -417,6 +475,48 @@ mod tests {
     }
 
     #[test]
+    fn a_full_fan_of_one_role_never_reaches_the_next_role() {
+        // The bug this pins: fanning slots rightwards from the station made a
+        // role's footprint grow with its count, so the third Chef stood exactly
+        // on the Technologist's desk and buying it appeared to delete the
+        // researcher. Every role is drawn at its maximum spread here, because
+        // the crowded case is the only one that can collide.
+        for viewport in [
+            Vec2::new(320.0, 640.0),
+            Vec2::new(390.0, 844.0),
+            Vec2::new(844.0, 390.0),
+            Vec2::new(1280.0, 720.0),
+            Vec2::new(1920.0, 1080.0),
+        ] {
+            let layout = SceneLayout::for_viewport(viewport);
+            let scale = layout.world_scale();
+            let drawn = avatars_per_role(&layout);
+            let half_body = BODY_HALF_TEXELS * scale;
+
+            let mut spans: Vec<(SupportRole, f32, f32)> = SupportRole::ALL
+                .iter()
+                .map(|role| {
+                    let (x, _) = layout.support_stand(*role);
+                    let left = x + slot_offset_texels(0, drawn) * scale - half_body;
+                    let right = x + slot_offset_texels(drawn - 1, drawn) * scale + half_body;
+                    (*role, left, right)
+                })
+                .collect();
+            spans.sort_by(|a, b| a.1.total_cmp(&b.1));
+
+            for pair in spans.windows(2) {
+                let (left_role, _, left_end) = pair[0];
+                let (right_role, right_start, _) = pair[1];
+                assert!(
+                    left_end <= right_start,
+                    "{viewport:?}: {left_role:?} ends at {left_end} but {right_role:?} \
+                     starts at {right_start}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn support_never_stands_on_the_worker_route() {
         // Workers walk between `grove_stand` and `stall_stand`. A support
         // monkey standing inside that span would be walked through all game.
@@ -429,9 +529,15 @@ mod tests {
             let layout = SceneLayout::for_viewport(viewport);
             for role in SupportRole::ALL {
                 let (x, _) = layout.support_stand(role);
+                // The *leftmost* monkey of the role, not the station: a fan
+                // that reaches back over the stall puts a support monkey in the
+                // middle of the unloading queue.
+                let drawn = avatars_per_role(&layout);
+                let leftmost = x + slot_offset_texels(0, drawn) * layout.world_scale();
                 assert!(
-                    x > layout.stall_stand,
-                    "{viewport:?}: {role:?} at {x} is on the route (stall {})",
+                    leftmost > layout.stall_stand,
+                    "{viewport:?}: {role:?} reaches {leftmost}, onto the route \
+                     (stall {})",
                     layout.stall_stand
                 );
             }

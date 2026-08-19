@@ -474,6 +474,23 @@ impl HarvestCycle {
 /// only sets how much it hurts.
 pub const SUPPORT_MEAL_PERIOD: f64 = 10.0;
 
+/// Pick multiplier added per research *level* - not per Technologist.
+///
+/// The Technologist is the one unit whose output is not a multiplier but a
+/// currency. That indirection is the whole reason D14 refuses to rank it
+/// against harvesters, and it is why a second Technologist is worth so much
+/// less than the first: the ladder below grows 2.2x a level while a marginal
+/// researcher only scales the rate by `(X+1)/X`.
+pub const TECH_BONUS_PER_LEVEL: f64 = 0.10;
+/// Research points one fed Technologist produces per second, before `M_speed`.
+pub const RESEARCH_PER_TECHNOLOGIST: f64 = 1.0;
+/// Research level `n` costs `60 x 2.2^n`.
+pub const RESEARCH_LEVEL_BASE: f64 = 60.0;
+pub const RESEARCH_LEVEL_GROWTH: f64 = 2.2;
+/// Research level the Cart is gated behind. The Cart itself arrives in the next
+/// increment; the shop already reads this to decide whether its row is locked.
+pub const CART_TECH_REQUIREMENT: u32 = 1;
+
 /// Travel multiplier added per fed Chef.
 pub const CHEF_BONUS: f64 = 0.15;
 /// Unload multiplier added per fed Unpacker.
@@ -837,10 +854,16 @@ impl Workforce {
 
 /// Reset every piece of run state together, so they cannot drift apart. Every
 /// new resource that survives a run belongs here and nowhere else.
-pub fn restart_run(treasury: &mut Treasury, workforce: &mut Workforce, staff: &mut Staff) {
+pub fn restart_run(
+    treasury: &mut Treasury,
+    workforce: &mut Workforce,
+    staff: &mut Staff,
+    research: &mut Research,
+) {
     treasury.restart();
     workforce.restart();
     staff.restart();
+    research.restart();
 }
 
 // ──────────────────────────────────────────────────────────────── economy
@@ -909,6 +932,76 @@ pub fn spendable(treasury: Treasury, committed: f64) -> f64 {
     (treasury.bananas() - committed).max(0.0)
 }
 
+/// Cumulative research, and the levels it has bought.
+///
+/// Only the points are stored. The level is *derived* from them, rather than
+/// carried alongside, because two fields that must agree eventually will not:
+/// a tampered save or a rebalanced `RESEARCH_LEVEL_GROWTH` would leave a level
+/// its points do not justify, and nothing would notice.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+pub struct Research {
+    points: f64,
+}
+
+impl Research {
+    pub fn from_saved(points: f64) -> Option<Self> {
+        is_valid_banana_count(points).then_some(Self { points })
+    }
+
+    pub fn points(self) -> f64 {
+        self.points
+    }
+
+    /// Levels completed. `60 x 2.2^n` per level, summed.
+    pub fn level(self) -> u32 {
+        let mut level = 0;
+        let mut spent = 0.0;
+        loop {
+            let next = spent + Self::level_cost(level);
+            if self.points < next || level >= MAX_RESEARCH_LEVEL {
+                return level;
+            }
+            spent = next;
+            level += 1;
+        }
+    }
+
+    /// Points into the current level, and what it needs. The shop renders this
+    /// as the Cart's unlock progress.
+    pub fn progress(self) -> (f64, f64) {
+        let level = self.level();
+        let spent: f64 = (0..level).map(Self::level_cost).sum();
+        (self.points - spent, Self::level_cost(level))
+    }
+
+    pub fn level_cost(level: u32) -> f64 {
+        RESEARCH_LEVEL_BASE * RESEARCH_LEVEL_GROWTH.powi(level as i32)
+    }
+
+    pub fn credit(&mut self, amount: f64) {
+        debug_assert!(amount.is_finite() && amount >= 0.0);
+        self.points = (self.points + amount).min(MAX_SAFE_BANANAS);
+    }
+
+    pub fn restart(&mut self) {
+        self.points = 0.0;
+    }
+}
+
+/// Far beyond anything reachable, and low enough that `2.2^n` stays finite -
+/// it overflows f64 around n = 450.
+pub const MAX_RESEARCH_LEVEL: u32 = 64;
+
+/// Research points per second, which only *fed* technologists produce.
+///
+/// Scaled by `M_speed`: chefs feed the researchers too (whitepaper §8). It is
+/// the one place a support unit boosts another support unit, and it is what
+/// keeps Chefs relevant during the research phase, when the walking pool is at
+/// its smallest.
+pub fn research_per_sec(fed: FedStaff, multipliers: Multipliers) -> f64 {
+    fed.technologists as f64 * RESEARCH_PER_TECHNOLOGIST * multipliers.speed
+}
+
 /// Bananas currently reserved by harvesters against meals they have earned but
 /// not yet eaten. Summed from the world every tick, never accumulated (I3').
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
@@ -968,15 +1061,35 @@ pub struct HirePlan {
 /// well-defined: at the whitepaper's end state net is -1.44/s with every monkey
 /// fed and +0.59/s with the technologists idle, so the gate's answer depended on
 /// a multiplier state it never named.
-pub fn plan_hire(
-    kind: UnitKind,
-    workforce: Workforce,
-    staff: Staff,
-    fed: FedStaff,
-    treasury: Treasury,
-    committed: f64,
-    multipliers: Multipliers,
-) -> HirePlan {
+/// Everything a purchase decision reads, in one value.
+///
+/// Seven parameters that always travel together, and a caller that passed six
+/// of them would be pricing against a world that does not exist. Bundling also
+/// keeps the shop and the simulation honest with each other: both build one of
+/// these from the same resources, so the price on the button and the price the
+/// tick charges cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EconomyState {
+    pub workforce: Workforce,
+    pub staff: Staff,
+    pub fed: FedStaff,
+    pub research: Research,
+    pub treasury: Treasury,
+    /// Bananas harvesters have reserved against meals they have earned.
+    pub committed: f64,
+    pub multipliers: Multipliers,
+}
+
+pub fn plan_hire(kind: UnitKind, state: EconomyState) -> HirePlan {
+    let EconomyState {
+        workforce,
+        staff,
+        fed,
+        research,
+        treasury,
+        committed,
+        multipliers,
+    } = state;
     // Hypothetical steady state with everything fed: this is "what would this
     // purchase be worth", not "what is happening right now". A shop that priced
     // a chef against a currently-starving kitchen would quote a number that
@@ -1011,8 +1124,10 @@ pub fn plan_hire(
                     // A support hire changes the multipliers, which is the
                     // whole point of buying one - so the projection has to be
                     // taken against the multipliers it would create, not the
-                    // ones standing now.
-                    multipliers_for(fed_after, multipliers),
+                    // ones standing now. Research is unchanged by a hire: a new
+                    // Technologist raises the research *rate*, and the level it
+                    // eventually buys is a later event, not this purchase.
+                    multipliers_for(fed_after, research),
                 ),
             )
         }
@@ -1030,14 +1145,13 @@ pub fn plan_hire(
 
 /// D4: every multiplier is additive within its term, `M = 1 + count × bonus`,
 /// and only monkeys that are actually fed count towards it.
-///
-/// `research` carries the tech term through unchanged; it is the Technologist's
-/// output rather than its head count, and it arrives with the research ladder.
-pub fn multipliers_for(fed: FedStaff, research: Multipliers) -> Multipliers {
+pub fn multipliers_for(fed: FedStaff, research: Research) -> Multipliers {
     Multipliers {
         speed: 1.0 + fed.chefs as f64 * CHEF_BONUS,
         unpack: 1.0 + fed.unpackers as f64 * UNPACK_BONUS,
-        tech: research.tech,
+        // Per level, not per head: a Technologist's output is research, and
+        // research is what moves the multiplier.
+        tech: 1.0 + research.level() as f64 * TECH_BONUS_PER_LEVEL,
     }
 }
 
@@ -1055,16 +1169,23 @@ mod tests {
 
     const SPEC: CycleSpec = CycleSpec::WORKER;
 
-    /// A hire plan against an economy with `workers` workers and no support.
+    /// An economy with `workers` workers, `staff` support, and nothing owed.
+    fn world(workers: u32, staff: Staff, bananas: f64, m: Multipliers) -> EconomyState {
+        EconomyState {
+            workforce: Workforce::from_saved(workers).unwrap(),
+            staff,
+            fed: FedStaff::default(),
+            research: Research::default(),
+            treasury: Treasury::from_saved(bananas).unwrap(),
+            committed: 0.0,
+            multipliers: m,
+        }
+    }
+
     fn worker_plan(workers: u32, bananas: f64, m: Multipliers) -> HirePlan {
         plan_hire(
             UnitKind::Worker,
-            Workforce::from_saved(workers).unwrap(),
-            Staff::default(),
-            FedStaff::default(),
-            Treasury::from_saved(bananas).unwrap(),
-            0.0,
-            m,
+            world(workers, Staff::default(), bananas, m),
         )
     }
 
@@ -1521,12 +1642,14 @@ mod tests {
         let mut workforce = Workforce::from_saved(4).unwrap();
 
         let mut staff = Staff::from_saved(2, 3, 1).unwrap();
+        let mut research = Research::from_saved(500.0).unwrap();
 
-        restart_run(&mut treasury, &mut workforce, &mut staff);
+        restart_run(&mut treasury, &mut workforce, &mut staff, &mut research);
 
         assert_eq!(treasury, Treasury::default());
         assert_eq!(workforce, Workforce::default());
         assert_eq!(staff, Staff::default());
+        assert_eq!(research, Research::default());
     }
 
     // ─────────────────────────────────────────── costs and gating
@@ -1584,16 +1707,13 @@ mod tests {
         // chef with a meal a monkey has already earned - and at an empty pool a
         // cart that missed its 37.9-banana meal could never be freed.
         let m = base();
-        let treasury = Treasury::from_saved(4.0).unwrap();
         let plan = |committed| {
             plan_hire(
                 UnitKind::Worker,
-                Workforce::default(),
-                Staff::default(),
-                FedStaff::default(),
-                treasury,
-                committed,
-                m,
+                EconomyState {
+                    committed,
+                    ..world(0, Staff::default(), 4.0, m)
+                },
             )
         };
 
@@ -1629,12 +1749,7 @@ mod tests {
         let chef_of = |workers| {
             plan_hire(
                 UnitKind::Support(SupportRole::Chef),
-                Workforce::from_saved(workers).unwrap(),
-                Staff::default(),
-                FedStaff::default(),
-                Treasury::from_saved(MAX_SAFE_BANANAS).unwrap(),
-                0.0,
-                m,
+                world(workers, Staff::default(), MAX_SAFE_BANANAS, m),
             )
             .gain_per_min
         };
@@ -1650,12 +1765,7 @@ mod tests {
         // A chef eats on a shift, not on a trip, and the shop has to say so.
         let chef = plan_hire(
             UnitKind::Support(SupportRole::Chef),
-            Workforce::from_saved(8).unwrap(),
-            Staff::default(),
-            FedStaff::default(),
-            Treasury::from_saved(MAX_SAFE_BANANAS).unwrap(),
-            0.0,
-            m,
+            world(8, Staff::default(), MAX_SAFE_BANANAS, m),
         );
         assert_eq!(chef.cost, 25.0);
         assert_eq!(chef.meal, 1.0);
@@ -1742,7 +1852,7 @@ mod tests {
         let mut staff = Staff::default();
         let mut cycles: Vec<HarvestCycle> = Vec::new();
         let mut shifts: Vec<(SupportRole, SupportCycle)> = Vec::new();
-        let mut multipliers = base();
+        let mut multipliers;
         let mut worst = f64::INFINITY;
 
         // Seed the run the way a player does: by hand, up to the first gate.
@@ -1761,7 +1871,7 @@ mod tests {
                     .count() as u32,
                 technologists: 0,
             };
-            multipliers = multipliers_for(fed, multipliers);
+            multipliers = multipliers_for(fed, Research::default());
 
             // Buy whatever is affordable, alternating so support actually gets
             // bought rather than being priced out by a cheaper worker forever.
@@ -1776,12 +1886,15 @@ mod tests {
             };
             let plan = plan_hire(
                 kind,
-                workforce,
-                staff,
-                fed,
-                treasury,
-                committed,
-                multipliers,
+                EconomyState {
+                    workforce,
+                    staff,
+                    fed,
+                    research: Research::default(),
+                    treasury,
+                    committed,
+                    multipliers,
+                },
             );
             if plan.affordable {
                 treasury.charge(plan.cost);
@@ -1827,6 +1940,90 @@ mod tests {
         assert!(worst >= 0.0, "treasury dipped to {worst}");
         assert!(workforce.count() >= 8, "only {} hired", workforce.count());
         assert!(staff.total() >= 1, "no support hired");
+    }
+
+    #[test]
+    fn the_research_ladder_is_geometric_and_the_level_is_derived_from_it() {
+        // Level n costs 60 x 2.2^n, and the level is a function of cumulative
+        // points rather than a second stored field that could disagree.
+        assert_eq!(Research::level_cost(0), 60.0);
+        assert!((Research::level_cost(1) - 132.0).abs() < 1e-12);
+        assert!((Research::level_cost(2) - 290.4).abs() < 1e-12);
+
+        assert_eq!(Research::from_saved(0.0).unwrap().level(), 0);
+        assert_eq!(Research::from_saved(59.9).unwrap().level(), 0);
+        assert_eq!(Research::from_saved(60.0).unwrap().level(), 1);
+        assert_eq!(Research::from_saved(191.9).unwrap().level(), 1);
+        assert_eq!(Research::from_saved(192.0).unwrap().level(), 2);
+
+        // Progress into the current level is what the shop renders as the
+        // Cart's unlock counter.
+        let (into, needed) = Research::from_saved(90.0).unwrap().progress();
+        assert!((into - 30.0).abs() < 1e-12);
+        assert!((needed - 132.0).abs() < 1e-12);
+
+        // An absurd save cannot spin the derivation forever. In practice the
+        // ladder bounds itself long before the guard does - 60 x 2.2^41 already
+        // exceeds the integer-safe banana ceiling - so the guard is the backstop
+        // for a future rebalance, not the thing doing the work today.
+        let absurd = Research::from_saved(MAX_SAFE_BANANAS).unwrap().level();
+        assert!(absurd <= MAX_RESEARCH_LEVEL, "{absurd}");
+        assert!(Research::level_cost(absurd).is_finite());
+    }
+
+    #[test]
+    fn a_research_level_shortens_picking_and_the_cart_is_gated_on_the_first() {
+        let fed = FedStaff::default();
+        let base = multipliers_for(fed, Research::default());
+        assert_eq!(base.tech, 1.0);
+
+        let one = multipliers_for(fed, Research::from_saved(60.0).unwrap());
+        assert!((one.tech - 1.1).abs() < 1e-12);
+        // The gate the Cart's shop row reads.
+        assert_eq!(
+            Research::from_saved(60.0).unwrap().level(),
+            CART_TECH_REQUIREMENT
+        );
+        assert!(Research::from_saved(59.0).unwrap().level() < CART_TECH_REQUIREMENT);
+
+        // Picking is the term it shortens, and only that term.
+        let spec = CycleSpec::WORKER;
+        assert!(Segment::Pick.duration(spec, one) < Segment::Pick.duration(spec, base));
+        assert_eq!(
+            Segment::ToGrove.duration(spec, one),
+            Segment::ToGrove.duration(spec, base)
+        );
+        assert_eq!(
+            Segment::Unload.duration(spec, one),
+            Segment::Unload.duration(spec, base)
+        );
+    }
+
+    #[test]
+    fn only_fed_technologists_research_and_chefs_make_them_faster() {
+        // Whitepaper §8: research scales with M_speed - chefs feed the
+        // researchers too. It is the one place a support unit boosts another,
+        // and it is what keeps Chefs worth owning while the pool is smallest.
+        let hired = FedStaff {
+            technologists: 3,
+            ..FedStaff::default()
+        };
+        let base = Multipliers::default();
+        assert_eq!(research_per_sec(hired, base), 3.0);
+
+        let with_chefs = multipliers_for(
+            FedStaff {
+                chefs: 2,
+                technologists: 3,
+                ..FedStaff::default()
+            },
+            Research::default(),
+        );
+        assert!((with_chefs.speed - 1.3).abs() < 1e-12);
+        assert!((research_per_sec(hired, with_chefs) - 3.9).abs() < 1e-12);
+
+        // A starving researcher researches nothing.
+        assert_eq!(research_per_sec(FedStaff::default(), with_chefs), 0.0);
     }
 
     #[test]

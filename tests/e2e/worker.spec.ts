@@ -359,8 +359,16 @@ test.describe("worker monkey", () => {
     // A random phase can land near the stall by chance, so retry a few resumes
     // to make this assertion reliable without exposing a test-only seed.
     let after: GameState | undefined;
+    let atReload = saved;
     let resumedOffStall = false;
     for (let attempt = 0; attempt < 5; attempt += 1) {
+      // Re-read immediately before *this* reload. The throttled save keeps
+      // running between attempts, and a worker's meal settles a couple of
+      // seconds after the delivery that funds it - so the value on disk when a
+      // later attempt reloads is legitimately lower than the one captured
+      // before the first. Comparing a fifth reload against the first snapshot
+      // is what made this test flaky, not anything it was written to catch.
+      atReload = await savedBananas(page);
       await page.reload();
       await waitForGame(page);
 
@@ -380,8 +388,11 @@ test.describe("worker monkey", () => {
     // still catches is the failure this test exists for: a truncating save
     // restores *below* what it recorded, and production cannot make `after`
     // start out smaller than `saved`.
-    expect(after!.bananas).toBeGreaterThanOrEqual(saved!);
-    expect(after!.bananas).toBeLessThanOrEqual(saved! + 5 * (PAYLOAD - MEAL));
+    expect(after!.bananas).toBeGreaterThanOrEqual(atReload!);
+    expect(after!.bananas).toBeLessThanOrEqual(atReload! + 5 * (PAYLOAD - MEAL));
+    // The fraction is the point of the test: an integer save format would have
+    // truncated it on the way out, whatever the magnitude.
+    expect(saved! % 1).not.toBe(0);
 
     // Cycle phase is deliberately not persisted (see `persistence.rs`), but a
     // restored worker must still be placed somewhere in its cycle rather than

@@ -10,9 +10,9 @@ use bevy::{
 
 use crate::{
     domain::{
-        BANANAS_PER_HARVEST, Committed, CycleSpec, CycleTerms, EconomySnapshot, FedStaff,
-        HarvestCycle, Multipliers, SIM_HZ, Staff, SupportCycle, SupportRole, Treasury, UnitKind,
-        Workforce, multipliers_for, plan_hire, restart_run,
+        BANANAS_PER_HARVEST, Committed, CycleSpec, CycleTerms, EconomySnapshot, EconomyState,
+        FedStaff, HarvestCycle, Multipliers, Research, SIM_HZ, Staff, SupportCycle, SupportRole,
+        Treasury, UnitKind, Workforce, multipliers_for, plan_hire, research_per_sec, restart_run,
     },
     hud, persistence,
     support::{self, SupportUnit},
@@ -90,6 +90,7 @@ impl Plugin for HarvestGamePlugin {
         app.init_resource::<SceneLayout>()
             .init_resource::<Multipliers>()
             .init_resource::<Staff>()
+            .init_resource::<Research>()
             .init_resource::<FedStaff>()
             .init_resource::<Committed>()
             .init_resource::<EconomySnapshot>()
@@ -383,8 +384,9 @@ impl SceneLayout {
             SupportRole::Unpacker => (-0.30, 0),
             // Under the sign, where the eating already happens.
             SupportRole::Chef => (-0.02, 1),
-            // Behind the deposit, at the back of the ground plane.
-            SupportRole::Technologist => (0.28, 2),
+            // Behind the deposit, at the back of the ground plane. Far enough
+            // out that a full fan of chefs cannot reach the desk.
+            SupportRole::Technologist => (0.32, 2),
         };
         let x = self.deposit.x + self.zone_size * offset;
         let limit = self.viewport.x * 0.5 - self.zone_size * 0.22;
@@ -815,6 +817,7 @@ fn apply_purchases(
     mut workforce: ResMut<Workforce>,
     mut staff: ResMut<Staff>,
     mut dirty: ResMut<PersistenceDirty>,
+    research: Res<Research>,
     fed: Res<FedStaff>,
     committed: Res<Committed>,
     multipliers: Res<Multipliers>,
@@ -822,12 +825,15 @@ fn apply_purchases(
     for kind in std::mem::take(&mut requests.0) {
         let plan = plan_hire(
             kind,
-            *workforce,
-            *staff,
-            *fed,
-            *treasury,
-            committed.0,
-            *multipliers,
+            EconomyState {
+                workforce: *workforce,
+                staff: *staff,
+                fed: *fed,
+                research: *research,
+                treasury: *treasury,
+                committed: committed.0,
+                multipliers: *multipliers,
+            },
         );
         // `continue`, not `break`: the requests are heterogeneous now, so an
         // unaffordable chef says nothing about the worker queued behind it.
@@ -852,6 +858,7 @@ fn apply_restart(
     mut treasury: ResMut<Treasury>,
     mut workforce: ResMut<Workforce>,
     mut staff: ResMut<Staff>,
+    mut research: ResMut<Research>,
     mut queue: ResMut<DeliveryQueue>,
     mut requests: ResMut<HireRequests>,
     mut dirty: ResMut<PersistenceDirty>,
@@ -864,7 +871,7 @@ fn apply_restart(
         return;
     }
 
-    restart_run(&mut treasury, &mut workforce, &mut staff);
+    restart_run(&mut treasury, &mut workforce, &mut staff, &mut research);
     restored.clear();
     queue.entries.clear();
     requests.0.clear();
@@ -887,9 +894,12 @@ fn apply_restart(
 /// the treasury structurally non-negative - a worker that cannot afford its meal
 /// stalls instead of overdrawing - and it is why the shop can quote a bare
 /// signing fee with no wage reserve bolted on.
+#[allow(clippy::too_many_arguments)]
 fn advance_cycles(
     time: Res<Time<Fixed>>,
     multipliers: Res<Multipliers>,
+    fed: Res<FedStaff>,
+    mut research: ResMut<Research>,
     treasury: Res<Treasury>,
     mut queue: ResMut<DeliveryQueue>,
     mut workers: Query<(
@@ -945,6 +955,13 @@ fn advance_cycles(
                 kind: DeliveryKind::Snack,
             });
         }
+    }
+
+    // Research accrues from the technologists that were fed *last* tick, which
+    // is what `FedStaff` holds when `recompute_multipliers` runs ahead of this
+    // system. A technologist that starves this tick stops researching next one.
+    if fed.technologists > 0 {
+        research.credit(research_per_sec(*fed, *multipliers) * dt);
     }
 
     // Support staff eat last, and only out of what the harvesters did not
@@ -1026,6 +1043,7 @@ fn settle(
 /// simulation just ran - exactly the drift I3' exists to prevent.
 fn recompute_multipliers(
     support: Query<(&SupportRole, &SupportCycle)>,
+    research: Res<Research>,
     mut fed: ResMut<FedStaff>,
     mut multipliers: ResMut<Multipliers>,
 ) {
@@ -1036,9 +1054,7 @@ fn recompute_multipliers(
         }
     }
     fed.set_if_neq(counted);
-    // `research` carries the tech term, which the Technologist's ladder will
-    // write; nothing here may clobber it.
-    let next = multipliers_for(counted, *multipliers);
+    let next = multipliers_for(counted, *research);
     multipliers.set_if_neq(next);
 }
 
@@ -1634,6 +1650,7 @@ fn persist_changes(
     treasury: Res<Treasury>,
     workforce: Res<Workforce>,
     staff: Res<Staff>,
+    research: Res<Research>,
 ) {
     dirty.since_last_save += time.delta_secs();
     if !dirty.pending {
@@ -1652,6 +1669,7 @@ fn persist_changes(
         treasury: *treasury,
         workforce: *workforce,
         staff: *staff,
+        research: *research,
     };
     match persistence::store_run(run) {
         Ok(()) => {
@@ -1916,6 +1934,9 @@ struct TestState {
     /// Bananas reserved by harvesters against meals they have earned but not
     /// yet eaten, and which therefore nothing else may spend.
     committed: f64,
+    research: f64,
+    research_level: u32,
+    research_per_sec: f64,
     store_expanded: bool,
     buttons: TestButtons,
 }
@@ -1936,6 +1957,7 @@ struct EconomyView<'w> {
     committed: Res<'w, Committed>,
     multipliers: Res<'w, Multipliers>,
     snapshot: Res<'w, EconomySnapshot>,
+    research: Res<'w, Research>,
     store_expanded: Res<'w, hud::StoreExpanded>,
 }
 
@@ -1965,6 +1987,7 @@ fn sync_web_test_state(
         committed,
         multipliers,
         snapshot,
+        research,
         store_expanded,
     } = economy;
 
@@ -1999,17 +2022,16 @@ fn sync_web_test_state(
         button_centers[index] = transform.translation * node.inverse_scale_factor;
     }
 
-    let plan_for = |kind| {
-        plan_hire(
-            kind,
-            *workforce,
-            *staff,
-            *fed,
-            *treasury,
-            committed.0,
-            *multipliers,
-        )
+    let world = EconomyState {
+        workforce: *workforce,
+        staff: *staff,
+        fed: *fed,
+        research: *research,
+        treasury: *treasury,
+        committed: committed.0,
+        multipliers: *multipliers,
     };
+    let plan_for = |kind| plan_hire(kind, world);
     let plan = plan_for(UnitKind::Worker);
     let state = TestState {
         ready: true,
@@ -2088,6 +2110,9 @@ fn sync_web_test_state(
             })
             .collect(),
         committed: committed.0,
+        research: research.points(),
+        research_level: research.level(),
+        research_per_sec: research_per_sec(*fed, *multipliers),
         store_expanded: store_expanded.0,
         buttons: TestButtons {
             menu: point(button_centers[0]),

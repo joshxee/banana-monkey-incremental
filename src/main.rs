@@ -43,6 +43,7 @@ fn main() {
     app.insert_resource(run.treasury)
         .insert_resource(run.workforce)
         .insert_resource(run.staff)
+        .insert_resource(run.research)
         .insert_resource(worker::RestoreWorkers::new(restored_workers))
         .add_plugins(HarvestGamePlugin)
         .run();
