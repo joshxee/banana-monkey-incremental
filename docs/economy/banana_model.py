@@ -41,7 +41,7 @@ class Params:
     w_cost_r: float = 1.15
 
     k_speed: float = 15.0
-    k_payload: float = 200.0
+    k_payload: float = 100.0
     k_crew: int = 3
     k_salary: float = 0.20
     k_cost_b: float = 70.0
@@ -155,8 +155,8 @@ def cart_cycle(s, p):
     it. Both now converge to (1 - snack) x m_tech / t_pick per crew monkey, so
     the ceiling theorem is uniform across harvest methods.
 
-    It also makes the cart solvent by construction. Its meal is 37.9 bananas of
-    a 200-banana payload, reserved out of that delivery - without which a cart
+    It also makes the cart solvent by construction. Its meal is about 20.4 bananas of
+    a 100-banana payload, reserved out of that delivery - without which a cart
     that missed one would freeze holding the payload, and at an empty pool the
     treasury could never climb back to free it.
     """

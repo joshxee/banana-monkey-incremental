@@ -41,7 +41,10 @@ pub const WORKER_COST_BASE: f64 = 4.0;
 pub const WORKER_COST_GROWTH: f64 = 1.15;
 
 /// Bananas a full cart carries per round trip.
-pub const CART_PAYLOAD: f64 = 200.0;
+///
+/// The first cart is deliberately a frequent, moderate delivery rather than
+/// a huge delivery that spends most of its cycle being unloaded.
+pub const CART_PAYLOAD: f64 = 100.0;
 /// Metres per second. Three times a monkey on foot, which is why a cart barely
 /// travels and instead spends its life being emptied (whitepaper §5).
 pub const CART_SPEED: f64 = 15.0;
@@ -328,8 +331,8 @@ pub struct HarvestCycle {
     ///
     /// Reserving the meal out of the delivery it is owed against closes the gap
     /// by construction rather than by gate, and it is what makes the cart
-    /// possible at all: a cart's meal is 37.9 bananas, so a cart that missed one
-    /// would freeze holding a 200-banana payload, and at an empty pool the
+    /// possible at all: a cart's meal is about 20.4 bananas, so a cart that missed one
+    /// would freeze holding a 100-banana payload, and at an empty pool the
     /// treasury could never climb back to free it.
     earmarked: f64,
 }
@@ -743,7 +746,7 @@ impl SupportCycle {
     /// A time budget with a carried remainder, for the reasons D13's
     /// implementation note gives: `remaining -= dt` two hundred times over
     /// accumulates a binary residual, and a shift that takes 201 ticks instead
-    /// of 200 puts the realised wage a fraction of a percent under the published
+    /// of 100 puts the realised wage a fraction of a percent under the published
     /// one. Work is measured in seconds here, so the rate is exactly 1.
     pub fn advance(&mut self, dt: f64, meal: f64, larder: &mut f64) -> f64 {
         debug_assert!(dt.is_finite() && dt >= 0.0);
@@ -991,7 +994,7 @@ impl EconomySnapshot {
 /// gate, but it only works if *everything* that can spend respects the
 /// reservation. Support staff do so through the larder; the shop does so
 /// through here. Without this the player could buy a chef with a cart's
-/// 37.9-banana meal and freeze the cart holding a 200-banana payload - and at an
+/// 20.4-banana meal and freeze the cart holding a 100-banana payload - and at an
 /// empty pool the treasury could never climb back to free it.
 pub fn spendable(treasury: Treasury, committed: f64) -> f64 {
     (treasury.bananas() - committed).max(0.0)
@@ -1094,6 +1097,7 @@ impl Research {
 
     /// Points into the current level, and what it needs. The shop renders this
     /// as the Cart's unlock progress.
+    #[allow(dead_code)]
     pub fn progress(self) -> (f64, f64) {
         let level = self.level();
         let spent: f64 = (0..level).map(Self::level_cost).sum();
@@ -2126,7 +2130,7 @@ mod tests {
                 treasury.charge(plan.cost);
                 match kind {
                     // The solvency sweep is deliberately cart-free: a cart's
-                    // meal is reserved out of its own 200-banana delivery by the
+                    // meal is reserved out of its own 100-banana delivery by the
                     // same mechanism, and mixing them in would only re-test it.
                     UnitKind::Cart => unreachable!("this sweep buys no carts"),
                     UnitKind::Worker => {
@@ -2177,15 +2181,15 @@ mod tests {
         let m = base();
         let cart = CycleSpec::CART;
 
-        // Whitepaper §5: 200 bananas, crew of 3, 15 m/s.
+        // Cart balance: 100 bananas, crew of 3, 15 m/s.
         assert!((Segment::ToGrove.duration(cart, m) * 2.0 - 13.333_333_333_333_334).abs() < 1e-9);
-        assert!((Segment::Pick.duration(cart, m) - 66.666_666_666_666_67).abs() < 1e-9);
-        assert!((Segment::Unload.duration(cart, m) - 100.0).abs() < 1e-9);
-        assert!((work_time(cart, m) - 180.0).abs() < 1e-9);
+        assert!((Segment::Pick.duration(cart, m) - 33.333_333_333_333_336).abs() < 1e-9);
+        assert!((Segment::Unload.duration(cart, m) - 50.0).abs() < 1e-9);
+        assert!((work_time(cart, m) - 96.666_666_666_666_67).abs() < 1e-9);
         // The snack is a uniform inflation of all three, so the segment shares
         // §5 reports are untouched by it.
-        assert!((cycle_time(cart, m) - 189.473_684_210_526_3).abs() < 1e-9);
-        assert!((meal(cart, m) - 37.894_736_842_105_26).abs() < 1e-9);
+        assert!((cycle_time(cart, m) - 101.754_385_964_912_3).abs() < 1e-9);
+        assert!((meal(cart, m) - 20.350_877_192_982_46).abs() < 1e-9);
 
         // A cart barely travels and instead sits at the depot being emptied,
         // which is the whole reason Chefs are a worker's buy and Unpackers a

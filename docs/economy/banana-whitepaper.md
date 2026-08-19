@@ -68,7 +68,7 @@ The two harvest methods have different cycle shapes, and everything follows.
 | | travel | pick / load | unload | throughput |
 |---|---|---|---|---|
 | **Worker**, payload 5, 5 m/s | 40.0 s (**84%**) | 5.0 s (11%) | 2.5 s (5%) | 0.105 /s |
-| **Net Cart**, payload 200, crew 3, 15 m/s | 13.3 s (7%) | 66.7 s (37%) | 100.0 s (**56%**) | 1.111 /s |
+| **Cart**, payload 100, crew 3, 15 m/s | 13.3 s (13%) | 33.3 s (33%) | 50.0 s (**49%**) | 0.983 /s |
 
 A monkey on foot spends its life walking. A cart barely travels and instead
 sits at the depot being emptied — it is fast and capacious and *slow to handle*,
@@ -243,7 +243,7 @@ right three times, which is the usual ratio and worth stating out loud.*
 
 ## 6. Lumpy income
 
-A cart delivers 200 bananas every ~135 seconds. Wages drain continuously. The
+A cart delivers 100 bananas every ~102 seconds. Wages drain continuously. The
 treasury therefore dips between deliveries even when net rate is comfortably
 positive.
 
@@ -370,7 +370,7 @@ delivery.
 | Unit | payload | speed | wage | cost base | cost growth | augment |
 |---|---|---|---|---|---|---|
 | Worker Monkey | 5 | 5 m/s | 0.03 (post-paid, §6.1) | 4 | 1.15 | — |
-| Net Cart | 200 (crew 3) | 15 m/s | 0.20 | 70 | 1.70 | — |
+| Cart | 100 (crew 3) | 15 m/s | 0.20 | 70 | 1.70 | — |
 | Chef | — | — | 0.10 | 25 | 1.30 | travel +0.15 |
 | Unpacker | — | — | 0.10 | 30 | 1.30 | unload +0.20 |
 | Technologist | — | — | 0.20 | 40 | 1.35 | pick +0.10/level |

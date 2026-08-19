@@ -596,7 +596,7 @@ pub fn spawn_missing_carts(
     for index in current..carts.owned() {
         // A restored cart gets a random elapsed phase, exactly as a restored
         // worker does. Starting it at zero would be far worse than for a worker:
-        // a cart cycle is 189 s and 200 bananas, so every reload would discard
+        // a cart cycle is about 102 s and 100 bananas, so every reload would discard
         // up to a whole trip, and a player whose session cadence is shorter than
         // a cart cycle would get *zero* cart income, permanently, with nothing
         // on screen to explain it. `RestoredCycle` keeps the placement from

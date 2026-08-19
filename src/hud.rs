@@ -20,9 +20,9 @@ use bevy::prelude::*;
 
 use crate::{
     domain::{
-        CART_TECH_REQUIREMENT, Carts, Committed, EconomySnapshot, EconomyState, FedStaff,
-        Multipliers, RESEARCH_PER_TECHNOLOGIST, Research, SUPPORT_MEAL_PERIOD, Staff, SupportRole,
-        Treasury, UnitKind, Workforce, plan_hire,
+        CART_TECH_REQUIREMENT, Carts, Committed, CycleSpec, EconomySnapshot, EconomyState,
+        FedStaff, Multipliers, RESEARCH_PER_TECHNOLOGIST, Research, SUPPORT_MEAL_PERIOD, Segment,
+        Staff, SupportRole, Treasury, UnitKind, Workforce, cycle_time, plan_hire,
     },
     game::{
         BROWN, BROWN_LIGHT, ButtonAction, CREAM, Feedback, GOLD, INK, MUTED, MenuState, SceneLayout,
@@ -126,6 +126,19 @@ pub(crate) struct StoreGrip;
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct StoreExpanded(pub bool);
 
+/// The unit whose live breakdown is open in the information panel.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct InfoOpen(pub Option<Unit>);
+
+#[derive(Component)]
+pub(crate) struct InfoPanel;
+
+#[derive(Component, Clone, Copy)]
+pub(crate) enum InfoText {
+    Title,
+    Body,
+}
+
 /// The row a rate line lives in, so a line can be hidden label and all.
 #[derive(Component, Clone, Copy)]
 pub(crate) struct RateLineRow(pub(crate) RateLine);
@@ -195,6 +208,7 @@ impl Unit {
 
 /// Which number in a unit's row a text node holds. One component and one query
 /// beats four of each, and it keeps the columns in a fixed, declared order.
+#[allow(dead_code)]
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UnitStat {
     /// Signing fee, on the hire button.
@@ -483,6 +497,46 @@ fn spawn_store(commands: &mut Commands) {
                     }
                 });
         });
+    commands
+        .spawn((
+            InfoPanel,
+            Node {
+                position_type: PositionType::Absolute,
+                top: percent(18.0),
+                left: percent(5.0),
+                width: percent(90.0),
+                max_width: px(560.0),
+                align_self: AlignSelf::Center,
+                padding: UiRect::all(px(16)),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8),
+                display: Display::None,
+                border: UiRect::all(px(3)),
+                ..default()
+            },
+            BackgroundColor(STORE_SOIL),
+            BorderColor::all(GOLD),
+            GlobalZIndex(20),
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new("UNIT INFO"),
+                TextFont::from_font_size(18.0),
+                TextColor(GOLD),
+                InfoText::Title,
+            ));
+            panel.spawn((
+                Text::new(""),
+                TextFont::from_font_size(14.0),
+                TextColor(CREAM),
+                InfoText::Body,
+            ));
+            panel.spawn((
+                Text::new("Click the i button again to close"),
+                TextFont::from_font_size(11.0),
+                TextColor(STORE_LABEL),
+            ));
+        });
 }
 
 /// The drawer's handle: a gold bar that reads as something to pull.
@@ -517,28 +571,25 @@ fn spawn_store_grip(store: &mut ChildSpawnerCommands) {
 /// content-sized: content-sized columns re-align themselves per row, which is
 /// the one thing a comparison table must not do.
 const COL_NAME: f32 = 104.0;
-const COL_HIRE: f32 = 84.0;
-/// Wide enough for a signed four-digit-and-a-decimal rate plus its unit:
-/// "-12.0/min" wrapped at 70 and broke after the slash, which reads as two
-/// numbers stacked rather than one rate.
-const COL_FARMING: f32 = 80.0;
-const COL_EATS: f32 = 74.0;
-const COL_OWNED: f32 = 46.0;
+const COL_COST: f32 = 84.0;
+const COL_DESCRIPTION: f32 = 280.0;
+const COL_INFO: f32 = 48.0;
 const COL_GAP: f32 = 10.0;
 
 /// Column width the table needs, with and without the column a narrow screen
 /// drops. Gaps are counted separately because they do not scale with the
 /// columns - see `column_scale`.
-fn table_columns(with_eats: bool) -> f32 {
-    COL_NAME + COL_HIRE + COL_FARMING + COL_OWNED + if with_eats { COL_EATS } else { 0.0 }
+fn table_columns() -> f32 {
+    COL_NAME + COL_COST + COL_DESCRIPTION + COL_INFO
 }
 
-fn table_gaps(with_eats: bool) -> f32 {
-    (if with_eats { 4.0 } else { 3.0 }) * COL_GAP
+fn table_gaps() -> f32 {
+    3.0 * COL_GAP
 }
 
-fn table_width(with_eats: bool) -> f32 {
-    table_columns(with_eats) + table_gaps(with_eats)
+#[allow(dead_code)]
+fn table_width() -> f32 {
+    table_columns() + table_gaps()
 }
 
 /// How far the columns have to shrink to fit `room`, never above 1.
@@ -548,12 +599,12 @@ fn table_width(with_eats: bool) -> f32 {
 /// and the OWNED value falls off the right edge. Scaling every column by one
 /// factor keeps the header lined up with the rows, which dropping or wrapping
 /// individual columns would not.
-fn column_scale(room: f32, with_eats: bool) -> f32 {
-    let columns = table_columns(with_eats);
+fn column_scale(room: f32) -> f32 {
+    let columns = table_columns();
     if columns <= 0.0 {
         return 1.0;
     }
-    ((room - table_gaps(with_eats)) / columns).clamp(0.4, 1.0)
+    ((room - table_gaps()) / columns).clamp(0.4, 1.0)
 }
 
 fn spawn_store_header(store: &mut ChildSpawnerCommands) {
@@ -567,14 +618,13 @@ fn spawn_store_header(store: &mut ChildSpawnerCommands) {
             StoreHeading,
         ))
         .with_children(|header| {
-            for (label, width, optional) in [
-                ("UNIT", COL_NAME, false),
-                ("HIRE", COL_HIRE, false),
-                ("GAIN", COL_FARMING, false),
-                ("EATS", COL_EATS, true),
-                ("OWNED", COL_OWNED, false),
+            for (label, width) in [
+                ("UNIT", COL_NAME),
+                ("COST", COL_COST),
+                ("DESCRIPTION", COL_DESCRIPTION),
+                ("INFO", COL_INFO),
             ] {
-                let mut cell = header.spawn((
+                header.spawn((
                     TableCell(width),
                     Node {
                         width: px(width),
@@ -587,9 +637,6 @@ fn spawn_store_header(store: &mut ChildSpawnerCommands) {
                         TextColor(STORE_LABEL),
                     )],
                 ));
-                if optional {
-                    cell.insert(OptionalColumn);
-                }
             }
         });
 }
@@ -633,10 +680,55 @@ fn spawn_unit_row(store: &mut ChildSpawnerCommands, unit: Unit) {
                 // is silently dropped, and burns the debounce doing it.
                 spawn_locked_plaque(row, unit);
             }
-            spawn_unit_cell(row, unit, UnitStat::Gain, COL_FARMING, false);
-            spawn_unit_cell(row, unit, UnitStat::Feeding, COL_EATS, true);
-            spawn_unit_cell(row, unit, UnitStat::Owned, COL_OWNED, false);
+            row.spawn((
+                TableCell(COL_DESCRIPTION),
+                Node {
+                    width: px(COL_DESCRIPTION),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                children![(
+                    Text::new(unit.description()),
+                    TextFont::from_font_size(13.0),
+                    TextColor(CREAM),
+                    TextLayout::linebreak(LineBreak::WordBoundary),
+                )],
+            ));
+            row.spawn((
+                Button,
+                ButtonAction::Info(unit),
+                TableCell(COL_INFO),
+                Node {
+                    width: px(COL_INFO),
+                    min_height: px(34),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    flex_shrink: 0.0,
+                    border: UiRect::all(px(2)),
+                    border_radius: BorderRadius::all(px(7)),
+                    ..default()
+                },
+                BackgroundColor(STORE_SOIL),
+                BorderColor::all(GOLD),
+                children![(
+                    Text::new("i"),
+                    TextFont::from_font_size(18.0),
+                    TextColor(GOLD),
+                )],
+            ));
         });
+}
+
+impl Unit {
+    fn description(self) -> &'static str {
+        match self {
+            Unit::Worker => "Harvests 6 bananas from the jungle per minute.",
+            Unit::Support(SupportRole::Chef) => "Makes harvesting monkeys travel 15% faster.",
+            Unit::Support(SupportRole::Unpacker) => "Unloads bananas 20% faster.",
+            Unit::Support(SupportRole::Technologist) => "Produces 1.0 research per second.",
+            Unit::Cart => "Carries 100 bananas per trip with a 3-monkey crew.",
+        }
+    }
 }
 
 fn spawn_hire_button(row: &mut ChildSpawnerCommands, unit: Unit, kind: UnitKind) {
@@ -644,9 +736,9 @@ fn spawn_hire_button(row: &mut ChildSpawnerCommands, unit: Unit, kind: UnitKind)
         Button,
         ButtonAction::Hire(kind),
         HireButton(unit),
-        TableCell(COL_HIRE),
+        TableCell(COL_COST),
         Node {
-            width: px(COL_HIRE),
+            width: px(COL_COST),
             min_height: px(34),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
@@ -674,10 +766,10 @@ fn spawn_hire_button(row: &mut ChildSpawnerCommands, unit: Unit, kind: UnitKind)
 fn spawn_locked_plaque(row: &mut ChildSpawnerCommands, unit: Unit) {
     row.spawn((
         LockedPlaque(unit),
-        TableCell(COL_HIRE),
+        TableCell(COL_COST),
         Node {
             display: Display::None,
-            width: px(COL_HIRE),
+            width: px(COL_COST),
             min_height: px(34),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
@@ -696,6 +788,7 @@ fn spawn_locked_plaque(row: &mut ChildSpawnerCommands, unit: Unit) {
     ));
 }
 
+#[allow(dead_code)]
 fn spawn_unit_cell(
     row: &mut ChildSpawnerCommands,
     unit: Unit,
@@ -1177,10 +1270,9 @@ pub fn apply_store_layout(
     // left to whatever room remains. Both are applied to header and value cells
     // through the same component, so the two can never disagree about a column.
     let room = layout.viewport.x - 2.0 * pad;
-    let show_eats = table_width(true) <= room;
-    let scale = column_scale(room, show_eats);
+    let scale = column_scale(room);
     for (cell, optional, mut node) in &mut cells {
-        let shown = show_eats || optional.is_none();
+        let shown = optional.is_none();
         set_if_changed(
             &mut node.display,
             if shown { Display::Flex } else { Display::None },
@@ -1326,6 +1418,7 @@ pub fn sync_readout(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub fn sync_shop(
     treasury: Res<Treasury>,
     workforce: Res<Workforce>,
@@ -1498,6 +1591,174 @@ pub fn sync_shop(
             },
         );
     }
+}
+
+pub fn sync_shop_new(
+    treasury: Res<Treasury>,
+    workforce: Res<Workforce>,
+    carts: Res<Carts>,
+    staff: Res<Staff>,
+    fed: Res<FedStaff>,
+    research: Res<Research>,
+    committed: Res<Committed>,
+    multipliers: Res<Multipliers>,
+    mut fields: Query<(&UnitField, &mut Text, &mut TextColor)>,
+    mut buttons: Query<(
+        &HireButton,
+        &Interaction,
+        &mut BackgroundColor,
+        &mut BorderColor,
+        &mut Node,
+    )>,
+    mut plaques: Query<(&LockedPlaque, &mut Node), Without<HireButton>>,
+) {
+    let world = EconomyState {
+        workforce: *workforce,
+        carts: *carts,
+        staff: *staff,
+        fed: *fed,
+        research: *research,
+        treasury: *treasury,
+        committed: committed.0,
+        multipliers: *multipliers,
+    };
+    let cart_locked = research.level() < CART_TECH_REQUIREMENT;
+    let locked = |unit: Unit| matches!(unit, Unit::Cart) && cart_locked;
+    let lit: Vec<Unit> = buttons
+        .iter()
+        .filter(|(_, i, ..)| matches!(i, Interaction::Hovered | Interaction::Pressed))
+        .map(|(b, ..)| b.0)
+        .collect();
+    for (field, mut text, mut colour) in &mut fields {
+        let plan = plan_hire(field.unit.kind(), world);
+        let affordable = plan.affordable && !locked(field.unit);
+        set_if_changed(
+            &mut colour.0,
+            if locked(field.unit) {
+                STORE_LABEL
+            } else if matches!(field.stat, UnitStat::Price)
+                && affordable
+                && lit.contains(&field.unit)
+            {
+                STORE_SOIL
+            } else if matches!(field.stat, UnitStat::Price) && affordable {
+                GOLD
+            } else {
+                CREAM
+            },
+        );
+        set_if_changed(
+            &mut text.0,
+            match field.stat {
+                UnitStat::Name => field.unit.name().to_string(),
+                UnitStat::Price if cart_locked && matches!(field.unit, Unit::Cart) => String::new(),
+                UnitStat::Price => format!("{:.1}", plan.cost),
+                _ => String::new(),
+            },
+        );
+    }
+    for (plaque, mut node) in &mut plaques {
+        set_if_changed(
+            &mut node.display,
+            if locked(plaque.0) {
+                Display::Flex
+            } else {
+                Display::None
+            },
+        );
+    }
+    for (button, interaction, mut background, mut border, mut node) in &mut buttons {
+        let affordable = plan_hire(button.0.kind(), world).affordable && !locked(button.0);
+        let (fill, edge) = if !affordable {
+            (STORE_SOIL, STORE_LABEL)
+        } else {
+            match interaction {
+                Interaction::Pressed | Interaction::Hovered => (GOLD, CREAM),
+                Interaction::None => (BROWN_LIGHT, GOLD),
+            }
+        };
+        set_if_changed(&mut *background, BackgroundColor(fill));
+        set_if_changed(&mut *border, BorderColor::all(edge));
+        set_if_changed(
+            &mut node.display,
+            if locked(button.0) {
+                Display::None
+            } else {
+                Display::Flex
+            },
+        );
+    }
+}
+
+pub fn sync_info(
+    info: Res<InfoOpen>,
+    workforce: Res<Workforce>,
+    carts: Res<Carts>,
+    staff: Res<Staff>,
+    fed: Res<FedStaff>,
+    research: Res<Research>,
+    multipliers: Res<Multipliers>,
+    mut panel: Single<(&mut Node, &Children), With<InfoPanel>>,
+    mut texts: Query<(&InfoText, &mut Text)>,
+) {
+    let shown = info.0.is_some();
+    set_if_changed(
+        &mut panel.0.display,
+        if shown { Display::Flex } else { Display::None },
+    );
+    let Some(unit) = info.0 else { return };
+    let owned = match unit {
+        Unit::Worker => workforce.count(),
+        Unit::Support(role) => staff.count(role),
+        Unit::Cart => carts.owned(),
+    };
+    let title = format!("{} INFO", unit.name());
+    let body = match unit {
+        Unit::Worker | Unit::Cart => {
+            let spec = if matches!(unit, Unit::Worker) {
+                CycleSpec::WORKER
+            } else {
+                CycleSpec::CART
+            };
+            let labels = [
+                "TRAVEL TO JUNGLE",
+                "HARVEST / LOAD",
+                "TRAVEL TO DEPOT",
+                "UNLOAD",
+                "MEAL",
+            ];
+            let durations = Segment::ORDER.map(|segment| segment.duration(spec, *multipliers));
+            let mut body = format!(
+                "OWNED: {owned}\nSALARY: {:.2} bananas/s\nPAYLOAD: {:.0} bananas\n",
+                spec.wage, spec.payload
+            );
+            if matches!(unit, Unit::Cart) {
+                body.push_str("CREW: 3 monkeys\n");
+            }
+            for (label, duration) in labels.into_iter().zip(durations) {
+                body.push_str(&format!("{label}: {duration:.1}s\n"));
+            }
+            body.push_str(&format!(
+                "TOTAL CYCLE: {:.1}s",
+                cycle_time(spec, *multipliers)
+            ));
+            body
+        }
+        Unit::Support(role) => format!(
+            "OWNED: {owned}\nSALARY: {:.2} bananas/s\nSHIFT PAYMENT: {:.1} bananas every {:.0}s\nEFFECT: {}",
+            role.wage(),
+            role.meal(),
+            SUPPORT_MEAL_PERIOD,
+            unit.description()
+        ),
+    };
+    for (field, mut text) in &mut texts {
+        match field {
+            InfoText::Title => set_if_changed(&mut text.0, title.clone()),
+            InfoText::Body => set_if_changed(&mut text.0, body.clone()),
+        }
+    }
+    let _ = (&carts, &fed, &research); // keep the panel system's live inputs explicit
 }
 
 #[allow(clippy::type_complexity)]

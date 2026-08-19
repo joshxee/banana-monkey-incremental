@@ -107,6 +107,7 @@ impl Plugin for HarvestGamePlugin {
             .init_resource::<Feedback>()
             .init_resource::<MenuState>()
             .init_resource::<hud::StoreExpanded>()
+            .init_resource::<hud::InfoOpen>()
             .init_resource::<PointerGuard>()
             .init_resource::<DiagnosticPointerTrace>()
             .insert_resource(Time::<Fixed>::from_hz(SIM_HZ))
@@ -198,7 +199,8 @@ impl Plugin for HarvestGamePlugin {
                     update_feedback,
                     update_floaters,
                     hud::sync_readout,
-                    hud::sync_shop,
+                    hud::sync_shop_new,
+                    hud::sync_info,
                     hud::style_buttons,
                 )
                     .in_set(Present::Render),
@@ -275,6 +277,7 @@ enum LayoutElement {
 pub(crate) enum ButtonAction {
     OpenMenu,
     Hire(UnitKind),
+    Info(hud::Unit),
     ToggleStore,
     Resume,
     #[cfg(target_arch = "wasm32")]
@@ -284,15 +287,22 @@ pub(crate) enum ButtonAction {
     CancelRestart,
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+struct MenuPanels<'w> {
+    store_expanded: ResMut<'w, hud::StoreExpanded>,
+    info_open: ResMut<'w, hud::InfoOpen>,
+}
+
 impl ButtonAction {
     /// Which menu state the button is live in. The touch hit-test iterates
     /// every button regardless of what is actually on screen, so without this
     /// a tap on the scrim would reach the shop card underneath it.
     fn active_in(self, menu: MenuState) -> bool {
         match self {
-            ButtonAction::OpenMenu | ButtonAction::Hire(_) | ButtonAction::ToggleStore => {
-                menu == MenuState::Closed
-            }
+            ButtonAction::OpenMenu
+            | ButtonAction::Hire(_)
+            | ButtonAction::Info(_)
+            | ButtonAction::ToggleStore => menu == MenuState::Closed,
             ButtonAction::Resume | ButtonAction::Restart => menu == MenuState::Open,
             #[cfg(target_arch = "wasm32")]
             ButtonAction::Diagnostics => menu == MenuState::Open,
@@ -1237,7 +1247,7 @@ fn handle_menu(
     mut pending: ResMut<PendingSettlement>,
     mut restart: ResMut<RestartRequest>,
     mut hire_requests: ResMut<HireRequests>,
-    mut store_expanded: ResMut<hud::StoreExpanded>,
+    mut panels: MenuPanels,
     mut pointer_guard: ResMut<PointerGuard>,
     mut feedback: ResMut<Feedback>,
     time: Res<Time>,
@@ -1252,7 +1262,9 @@ fn handle_menu(
     if *menu == MenuState::Open && keys.just_pressed(KeyCode::KeyL) {
         open_web_diagnostics();
     }
-    if keys.just_pressed(KeyCode::Escape) {
+    if keys.just_pressed(KeyCode::Escape) && panels.info_open.0.is_some() {
+        panels.info_open.0 = None;
+    } else if keys.just_pressed(KeyCode::Escape) {
         requested = Some(match *menu {
             MenuState::Closed => MenuState::Open,
             MenuState::Open => MenuState::Closed,
@@ -1289,13 +1301,24 @@ fn handle_menu(
                 requested = Some(MenuState::Open);
             }
             ButtonAction::Hire(kind)
-                if *menu == MenuState::Closed && pointer_guard.suppress_hire_for == 0.0 =>
+                if *menu == MenuState::Closed
+                    && panels.info_open.0.is_none()
+                    && pointer_guard.suppress_hire_for == 0.0 =>
             {
                 hire_requests.0.push(kind);
                 pointer_guard.suppress_hire_for = HIRE_DEBOUNCE_SECONDS;
             }
-            ButtonAction::ToggleStore if *menu == MenuState::Closed => {
-                store_expanded.0 = !store_expanded.0;
+            ButtonAction::ToggleStore
+                if *menu == MenuState::Closed && panels.info_open.0.is_none() =>
+            {
+                panels.store_expanded.0 = !panels.store_expanded.0;
+            }
+            ButtonAction::Info(unit) if *menu == MenuState::Closed => {
+                panels.info_open.0 = if panels.info_open.0 == Some(unit) {
+                    None
+                } else {
+                    Some(unit)
+                };
             }
             ButtonAction::Resume if *menu == MenuState::Open => {
                 requested = Some(MenuState::Closed);
@@ -2142,6 +2165,7 @@ fn sync_web_test_state(
     for (action, node, transform) in &buttons {
         let index = match action {
             ButtonAction::OpenMenu => 0,
+            ButtonAction::Info(_) => continue,
             ButtonAction::Hire(UnitKind::Worker) => 1,
             ButtonAction::Hire(UnitKind::Support(SupportRole::Chef)) => 2,
             ButtonAction::Hire(UnitKind::Support(SupportRole::Unpacker)) => 3,
