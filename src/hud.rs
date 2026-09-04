@@ -158,7 +158,7 @@ pub(crate) enum RateLine {
 /// The shop is one row per unit type, and everything in a row is addressed
 /// through this rather than through a marker component per field per unit.
 /// Adding the Chef is then a variant here, one [`spawn_unit_row`] call, and one
-/// arm in [`sync_shop`] - not four new components and four new queries.
+/// arm in [`sync_shop_new`] - not four new components and four new queries.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Unit {
     Worker,
@@ -572,7 +572,24 @@ fn spawn_store_grip(store: &mut ChildSpawnerCommands) {
 /// the one thing a comparison table must not do.
 const COL_NAME: f32 = 104.0;
 const COL_COST: f32 = 84.0;
-const COL_DESCRIPTION: f32 = 280.0;
+/// D21: the live marginal rate, recomputed every tick. Narrow and numeric on
+/// purpose, sitting next to COST rather than under the prose DESCRIPTION
+/// cell, so the figure lines up down one column and stays comparable row to
+/// row - a value anchored to a variable-length description would not.
+const COL_RATE: f32 = 84.0;
+/// The RATE cell's unscaled font size. `apply_store_layout` scales this down
+/// by the same factor it scales `COL_RATE`'s width by, so the cell's longest
+/// word ("TECHNOLOGIST") keeps the fit it has at full size instead of running
+/// past a box that shrank under it.
+const RATE_FONT_SIZE: f32 = 12.0;
+/// Cut by exactly `COL_RATE`'s own width plus the gap it added, so the
+/// table's total budget - and therefore `column_scale`'s factor at every
+/// viewport - is unchanged from before D21's column existed. Verified against
+/// a real 390 px render: growing the table instead of trading width for the
+/// new column let RATE's `NoWrap` text run straight through this cell at the
+/// narrowest supported width, on every row, not only the long locked-Cart
+/// message.
+const COL_DESCRIPTION: f32 = 280.0 - COL_RATE - COL_GAP;
 const COL_INFO: f32 = 48.0;
 const COL_GAP: f32 = 10.0;
 
@@ -580,11 +597,11 @@ const COL_GAP: f32 = 10.0;
 /// drops. Gaps are counted separately because they do not scale with the
 /// columns - see `column_scale`.
 fn table_columns() -> f32 {
-    COL_NAME + COL_COST + COL_DESCRIPTION + COL_INFO
+    COL_NAME + COL_COST + COL_RATE + COL_DESCRIPTION + COL_INFO
 }
 
 fn table_gaps() -> f32 {
-    3.0 * COL_GAP
+    4.0 * COL_GAP
 }
 
 #[allow(dead_code)]
@@ -621,6 +638,7 @@ fn spawn_store_header(store: &mut ChildSpawnerCommands) {
             for (label, width) in [
                 ("UNIT", COL_NAME),
                 ("COST", COL_COST),
+                ("RATE", COL_RATE),
                 ("DESCRIPTION", COL_DESCRIPTION),
                 ("INFO", COL_INFO),
             ] {
@@ -680,6 +698,7 @@ fn spawn_unit_row(store: &mut ChildSpawnerCommands, unit: Unit) {
                 // is silently dropped, and burns the debounce doing it.
                 spawn_locked_plaque(row, unit);
             }
+            spawn_rate_cell(row, unit);
             row.spawn((
                 TableCell(COL_DESCRIPTION),
                 Node {
@@ -717,6 +736,36 @@ fn spawn_unit_row(store: &mut ChildSpawnerCommands, unit: Unit) {
                 )],
             ));
         });
+}
+
+/// D21's live marginal rate, recomputed every tick by [`sync_shop_new`].
+///
+/// `NoWrap`, verified against the actual failure it exists to avoid: at
+/// 390 px, word-boundary wrap breaks "+4.2/min" after the slash and leaves an
+/// orphaned "min" on its own line - the exact wrap the old, pre-redesign rate
+/// column's own comment warned about, and confirmed live in this column
+/// before this fix landed. `NoWrap` still honours an explicit `\n`
+/// (`bevy_text::LineBreak::NoWrap` docs), which is what the locked Cart row's
+/// longer messages use instead of relying on word-wrap to break them well.
+fn spawn_rate_cell(row: &mut ChildSpawnerCommands, unit: Unit) {
+    row.spawn((
+        TableCell(COL_RATE),
+        Node {
+            width: px(COL_RATE),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        children![(
+            Text::new(""),
+            TextFont::from_font_size(RATE_FONT_SIZE),
+            TextColor(CREAM),
+            TextLayout::linebreak(LineBreak::NoWrap),
+            UnitField {
+                unit,
+                stat: UnitStat::Gain,
+            },
+        )],
+    ));
 }
 
 impl Unit {
@@ -1176,6 +1225,7 @@ pub fn apply_store_layout(
     // mid-row fold the quantising was added to prevent.
     heading_size: Single<&ComputedNode, With<StoreHeading>>,
     row_sizes: Query<&ComputedNode, With<Unit>>,
+    mut rate_fonts: Query<(&UnitField, &mut TextFont)>,
 ) {
     /// Below this much soil the header row is the first thing to go. A unit
     /// line is self-describing enough without it - "+6.0/min", "1.5/trip" - and
@@ -1278,6 +1328,18 @@ pub fn apply_store_layout(
             if shown { Display::Flex } else { Display::None },
         );
         set_if_changed(&mut node.width, px((cell.0 * scale).floor()));
+    }
+    // The RATE cell's font has to shrink with its box, not just the box: cell
+    // width is scaled above, but `NoWrap` text does not reflow to a narrower
+    // box on its own, and "TECHNOLOGIST" - the longest word this cell ever
+    // shows - visibly overlapped DESCRIPTION on a real 390 px render before
+    // this landed. Scaling the font by the same factor as the box preserves
+    // the fit ratio exactly: content that fits at `scale = 1.0` still fits at
+    // any smaller scale, because both shrink together.
+    for (field, mut font) in &mut rate_fonts {
+        if matches!(field.stat, UnitStat::Gain) {
+            set_if_changed(&mut font.font_size, FontSize::Px(RATE_FONT_SIZE * scale));
+        }
     }
 }
 
@@ -1418,181 +1480,6 @@ pub fn sync_readout(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-pub fn sync_shop(
-    treasury: Res<Treasury>,
-    workforce: Res<Workforce>,
-    carts: Res<Carts>,
-    staff: Res<Staff>,
-    fed: Res<FedStaff>,
-    research: Res<Research>,
-    committed: Res<Committed>,
-    multipliers: Res<Multipliers>,
-    mut fields: Query<(&UnitField, &mut Text, &mut TextColor)>,
-    mut buttons: Query<(
-        &HireButton,
-        &Interaction,
-        &mut BackgroundColor,
-        &mut BorderColor,
-        &mut Node,
-    )>,
-    mut plaques: Query<(&LockedPlaque, &mut Node), Without<HireButton>>,
-) {
-    let world = EconomyState {
-        workforce: *workforce,
-        carts: *carts,
-        staff: *staff,
-        fed: *fed,
-        research: *research,
-        treasury: *treasury,
-        committed: committed.0,
-        multipliers: *multipliers,
-    };
-    let plan_for = |unit: Unit| plan_hire(unit.kind(), world);
-    let (into_level, level_cost) = research.progress();
-    // Which rows the pointer is on. The price sits *inside* its button, so when
-    // the fill lights up gold the gold text on it disappears - the number the
-    // player is reaching for is the one thing they cannot read while reaching
-    // for it. Collected first so the field pass can flip that text dark.
-    let lit: Vec<Unit> = buttons
-        .iter()
-        .filter(|(_, interaction, ..)| {
-            matches!(interaction, Interaction::Hovered | Interaction::Pressed)
-        })
-        .map(|(button, ..)| button.0)
-        .collect();
-    // The Cart is the one row that can be present and not yet purchasable.
-    let cart_locked = research.level() < CART_TECH_REQUIREMENT;
-    let locked = |unit: Unit| matches!(unit, Unit::Cart) && cart_locked;
-
-    for (field, mut text, mut colour) in &mut fields {
-        let plan = plan_for(field.unit);
-        let affordable = plan.affordable && !locked(field.unit);
-        set_if_changed(
-            &mut colour.0,
-            match (field.stat, field.unit) {
-                // A locked row recedes entirely - name included - so it reads
-                // as "not yet" rather than as "you cannot afford this".
-                _ if locked(field.unit) => STORE_LABEL,
-                // On a lit fill the price goes dark, so it stays legible
-                // against the gold rather than vanishing into it.
-                (UnitStat::Price, _) if affordable && lit.contains(&field.unit) => STORE_SOIL,
-                // The price greys out with its button, rather than staying gold
-                // on a dimmed fill and reading as mud.
-                (UnitStat::Price, _) if affordable => GOLD,
-                (UnitStat::Price, _) => STORE_LABEL,
-                // The Technologist's cell is the one number in the column that
-                // is not bananas, and D14 says that is correct rather than a
-                // gap: its banana delta is exactly -wage at every world state
-                // and carries no information. Gold, so being the row the
-                // ranking does not price looks deliberate.
-                (UnitStat::Gain, Unit::Support(SupportRole::Technologist)) => GOLD,
-                // A column that exists to say "worth it / not worth it" cannot
-                // spend its whole signal on one glyph in eight. The banner
-                // already establishes the convention with FEEDING.
-                (UnitStat::Gain, _) if plan.gain_per_min < 0.0 => BROWN_LIGHT,
-                _ => CREAM,
-            },
-        );
-        let owned = match field.unit {
-            Unit::Worker => workforce.count(),
-            Unit::Support(role) => staff.count(role),
-            Unit::Cart => carts.owned(),
-        };
-        let value = match (field.stat, field.unit) {
-            (UnitStat::Name, _) => field.unit.name().to_string(),
-            // What the Cart's row says instead of a price and a rate while it
-            // is locked. Naming the *Technologist* rather than "cart
-            // technology" matters: the technologist is a row one above with a
-            // button on it, and the sentence has to point at something the
-            // player can act on. Once one is hired the same cells become a
-            // counter, which turns buying an unlock on faith into a wait with a
-            // clock - and gives 1.0 RES/s the denominator it otherwise lacks.
-            (UnitStat::Price, Unit::Cart) if cart_locked => String::new(),
-            (UnitStat::Gain, Unit::Cart) if cart_locked => {
-                if staff.count(SupportRole::Technologist) == 0 {
-                    // Names the Technologist, not "cart technology". The
-                    // technologist is the row directly above with a button on
-                    // it; a sentence pointing at something the player can act
-                    // on closes the loop, and one naming an abstraction they
-                    // have never met does not.
-                    "NEEDS A TECHNOLOGIST".to_string()
-                } else {
-                    format!("RESEARCH {into_level:.0}/{level_cost:.0}")
-                }
-            }
-            // Blanked rather than filled with "-", so the message above has the
-            // width of all three columns it has no values for. A locked unit has
-            // no rate, no meal and no count; it has one thing worth saying.
-            (UnitStat::Feeding | UnitStat::Owned, Unit::Cart) if cart_locked => String::new(),
-            (UnitStat::Gain, Unit::Support(SupportRole::Technologist)) => {
-                format!("{RESEARCH_PER_TECHNOLOGIST:.1} RES/s")
-            }
-            (UnitStat::Price, _) => format!("{:.1}", plan.cost),
-            // Per minute, like the readout. Per second a worker reads 0.10 and
-            // a meal reads 0.03, and three numbers that all round to nothing
-            // are worse than no numbers at all.
-            (UnitStat::Gain, _) => format!("{:+.1}/min", plan.gain_per_min),
-            // Per trip for a harvester, per shift for support. The two eat on
-            // entirely different clocks and a shared "/min" would hide that a
-            // harvester's meal is a lump out of a delivery while a chef's is a
-            // standing charge.
-            (UnitStat::Feeding, _) => {
-                if plan.meal_period == SUPPORT_MEAL_PERIOD {
-                    format!("{:.1}/{:.0}s", plan.meal, SUPPORT_MEAL_PERIOD)
-                } else {
-                    format!("{:.1}/trip", plan.meal)
-                }
-            }
-            (UnitStat::Owned, _) => owned.to_string(),
-        };
-        set_if_changed(&mut text.0, value);
-    }
-
-    for (plaque, mut node) in &mut plaques {
-        let shown = locked(plaque.0);
-        set_if_changed(
-            &mut node.display,
-            if shown { Display::Flex } else { Display::None },
-        );
-    }
-
-    for (button, interaction, mut background, mut border, mut node) in &mut buttons {
-        let affordable = plan_for(button.0).affordable && !locked(button.0);
-        // Affordability outranks hover: a button the player cannot press must
-        // not light up under the cursor.
-        //
-        // These are the store's own tones, not the bar's. Inheriting the
-        // cream-card palette inverted the signal underground - `MUTED` on
-        // `STORE_SOIL` made the *disabled* state the brightest object in the
-        // panel, while the enabled `BROWN` was the same colour as the dirt
-        // sprite behind it. So the opening screen shouted the one thing the
-        // player could not do. Disabled now recedes into the soil and enabled
-        // is the lit thing in the dark.
-        let (fill, edge) = if !affordable {
-            (STORE_SOIL, STORE_LABEL)
-        } else {
-            match interaction {
-                Interaction::Pressed => (GOLD, CREAM),
-                Interaction::Hovered => (GOLD, CREAM),
-                Interaction::None => (BROWN_LIGHT, GOLD),
-            }
-        };
-        set_if_changed(&mut *background, BackgroundColor(fill));
-        set_if_changed(&mut *border, BorderColor::all(edge));
-        // A locked unit's button steps aside for its plaque entirely, rather
-        // than sitting there dimmed and swallowing taps.
-        set_if_changed(
-            &mut node.display,
-            if locked(button.0) {
-                Display::None
-            } else {
-                Display::Flex
-            },
-        );
-    }
-}
-
 pub fn sync_shop_new(
     treasury: Res<Treasury>,
     workforce: Res<Workforce>,
@@ -1624,6 +1511,7 @@ pub fn sync_shop_new(
     };
     let cart_locked = research.level() < CART_TECH_REQUIREMENT;
     let locked = |unit: Unit| matches!(unit, Unit::Cart) && cart_locked;
+    let (into_level, level_cost) = research.progress();
     let lit: Vec<Unit> = buttons
         .iter()
         .filter(|(_, i, ..)| matches!(i, Interaction::Hovered | Interaction::Pressed))
@@ -1643,6 +1531,17 @@ pub fn sync_shop_new(
                 STORE_SOIL
             } else if matches!(field.stat, UnitStat::Price) && affordable {
                 GOLD
+            } else if matches!(field.stat, UnitStat::Gain)
+                && matches!(field.unit, Unit::Support(SupportRole::Technologist))
+            {
+                // Checked before the generic negative-gain arm below: a
+                // Technologist's own gain_per_min is exactly -wage at every
+                // world state (D14) - always negative - even though the row
+                // is a perfectly good buy. Gold marks "correctly unranked,"
+                // not "underwater."
+                GOLD
+            } else if matches!(field.stat, UnitStat::Gain) && plan.gain_per_min < 0.0 {
+                BROWN_LIGHT
             } else {
                 CREAM
             },
@@ -1653,6 +1552,31 @@ pub fn sync_shop_new(
                 UnitStat::Name => field.unit.name().to_string(),
                 UnitStat::Price if cart_locked && matches!(field.unit, Unit::Cart) => String::new(),
                 UnitStat::Price => format!("{:.1}", plan.cost),
+                // The locked Cart's row carries D22's research progress here
+                // instead of a rate: naming the Technologist, not "cart
+                // technology", because the Technologist is the row directly
+                // above with a button on it. Explicit `\n` rather than relying
+                // on word-wrap: this cell is `NoWrap` (see `spawn_rate_cell`),
+                // so these are the only line breaks either string gets.
+                UnitStat::Gain if cart_locked && matches!(field.unit, Unit::Cart) => {
+                    if staff.count(SupportRole::Technologist) == 0 {
+                        "NEEDS A\nTECHNOLOGIST".to_string()
+                    } else {
+                        format!("RESEARCH\n{into_level:.0}/{level_cost:.0}")
+                    }
+                }
+                // Live, not the bare 1.0 RES/s constant: Chefs feed the
+                // researchers too (whitepaper §8), so a fed Technologist's
+                // real rate is `RESEARCH_PER_TECHNOLOGIST * M_speed`.
+                UnitStat::Gain
+                    if matches!(field.unit, Unit::Support(SupportRole::Technologist)) =>
+                {
+                    format!("{:.1} RES/s", RESEARCH_PER_TECHNOLOGIST * multipliers.speed)
+                }
+                // Per minute, like the readout above. Recomputed every tick
+                // (D21): what this unit is worth is what it makes everybody
+                // else produce right now, not a static per-unit effect.
+                UnitStat::Gain => format!("{:+.1}/min", plan.gain_per_min),
                 _ => String::new(),
             },
         );
@@ -1690,6 +1614,7 @@ pub fn sync_shop_new(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn sync_info(
     info: Res<InfoOpen>,
     workforce: Res<Workforce>,

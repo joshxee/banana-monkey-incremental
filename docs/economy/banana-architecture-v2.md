@@ -1,11 +1,18 @@
-# Banana Incremental — Text-Only MVP Architecture (v2)
+# Banana Incremental — MVP Architecture (v2)
 
-**Engine:** Bevy (Rust), ECS-first, headless/text renderer
-**Scope:** Establish the simulation core. No visuals, no persistence, no prestige.
+**Engine:** Bevy (Rust), ECS-first.
+**Scope:** Establish the simulation core. No prestige.
 
 Supersedes v1. The economy is no longer a flat rate per unit; it is a harvest
 cycle with separately attackable segments. Every change below is traceable to a
 measured result in the companion white paper.
+
+*Header note, added after the fact.* This document was written against a
+headless, text-only renderer, and said so. The shipped game grew a sprite-based
+Bevy front end and versioned local-storage save/load before this line was
+updated — both are described in detail by D16, D22 and D23 below, and by §8's
+feature cut, so the drift was in this header, not in the decisions. It is
+corrected here rather than left to contradict the rest of its own document.
 
 ---
 
@@ -489,6 +496,29 @@ struct CycleProgress {
 harvesters only. `CycleProgress` is the sole piece of irreducible per-entity
 state in the simulation. Settlement credits `Payload × delivery_scale`.
 
+*Implementation note.* This sketch predates several of the decisions above and
+the shipped shapes disagree with it in four ways, none of them accidental:
+
+- `Chef`, `Unpacker` and `Technologist` are not three component types. Support
+  is one archetype tagged with a `SupportRole` enum (`domain::SupportRole`),
+  because D19 gave every role the same shift-and-meal machinery and a shared
+  type is what let `SupportCycle` and the feeding order (D19) be written once.
+- `delivery_scale` on `CycleProgress` is gone with D8: a cart is crewed by
+  exactly three monkeys or it does not run, so there is no partial-crew
+  fraction left to scale.
+- `UnitCosts`, `PurchaseOptions` and `Offer` do not exist. The shop instead
+  calls `domain::plan_hire(kind, state) -> HirePlan` fresh, every tick, for
+  whichever units are on screen, where `HirePlan` carries `cost`, `meal`,
+  `meal_period`, `gain_per_min` (D21) and `affordable`. There is no
+  `payback_secs`: D21 replaced D11's payback ranking with the live rate before
+  this struct was ever built, so payback never shipped as a field. `kind` and
+  `cycle_effect` are likewise absent - the caller already knows which unit it
+  asked about, and the info panel reads segment durations directly off
+  `CycleSpec` rather than through a bundled diff type.
+- `Research { points, level }` is stored as `points` alone; `level()` is a
+  method, derived on every call, for the reason `Research`'s own doc comment
+  gives - two fields that must agree eventually will not.
+
 ---
 
 ## 5. Where the tradeoff lives
@@ -609,15 +639,33 @@ shop's info panel renders.
 ## 8. MVP Feature Cut
 
 **In:** five unit types; harvest cycles with per-entity progress; escalating
-per-type costs; research levels gating the Net Cart; auto-pull crewing;
-live gross/wages/net/reserve readout; per-offer payback and cycle-effect diff;
-fixed-step tick loop with decoupled text refresh.
+per-type costs; research levels gating the Cart; boarding-based crewing (D23);
+live gross/wages/net readout; a live per-unit marginal rate in the shop (D21);
+a sprite-based scene with save/load between sessions; a fixed-step tick loop
+decoupled from presentation refresh.
 
-**Out:** save/load, prestige, offline progress, population cap, additional
-vehicle tiers, retiring or reassigning technologists, a persistent research
-progress bar, achievements, any rendering beyond stdout.
+**Out:** prestige, offline progress, population cap, additional vehicle tiers,
+retiring or reassigning technologists, a persistent research progress bar,
+achievements.
 
 The research progress bar is deliberately deferred rather than cut — see §10.
+
+*Revised from the original cut.* Three items moved from Out to In, and two
+phrases in the original In list no longer describe anything in the codebase:
+
+- **Save/load and rendering.** Both were cut when this document assumed a
+  headless text renderer (see the header note above). The game that shipped is
+  visual and persists between sessions (`src/persistence.rs`, versioned
+  save schema), so both belong in the shipped feature set, not the cut list.
+- **Auto-pull crewing** was D17's answer, and D17 is itself deleted: D23
+  replaced auto-pull with crewing by boarding, so the In list now says the
+  thing that actually ships.
+- **Per-offer payback and cycle-effect diff** described `Offer.payback_secs`
+  and `Offer.cycle_effect`, neither of which was ever built - see §4's
+  implementation note. What shipped in their place, and what actually
+  satisfies the intent behind them, is D21's live `gain_per_min`.
+- **Wage reserve** is gone from the readout it once qualified, because D15/D20
+  removed the reserve itself; the live readout is gross, wages and net.
 
 ---
 

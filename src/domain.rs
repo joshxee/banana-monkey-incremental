@@ -1097,7 +1097,6 @@ impl Research {
 
     /// Points into the current level, and what it needs. The shop renders this
     /// as the Cart's unlock progress.
-    #[allow(dead_code)]
     pub fn progress(self) -> (f64, f64) {
         let level = self.level();
         let spent: f64 = (0..level).map(Self::level_cost).sum();
