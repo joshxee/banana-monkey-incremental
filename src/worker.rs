@@ -1,14 +1,11 @@
 //! Worker monkey avatars.
 //!
-//! Position and animation are derived from [`HarvestCycle`] every frame, so an
+//! Position and pose are derived from [`HarvestCycle`] every frame, so an
 //! avatar is a pure function of simulation state: it survives a resize, and it
 //! cannot drift out of step with the economy.
 //!
-//! Simulation entities are unbounded, but rendering is not: a hundred animated
-//! 32x32 sprites on one route is visual mush, and each one costs a change
-//! detection hit per frame. The systems here read `(&HarvestCycle, &Lane)` and
-//! write `Transform`, so capping avatars at a fixed pool later is a change to
-//! *which* entities they iterate, not a rendering rewrite.
+//! For the isometric lo-fi pass every monkey is a light rectangle with a brown
+//! outline. Final art can replace this presentation without changing cycles.
 
 use bevy::prelude::*;
 
@@ -19,29 +16,14 @@ use crate::{
     game::{Delivery, DeliveryKind, DeliveryQueue, SceneLayout},
 };
 
-const FRAME_SIZE: u32 = 32;
-const IDLE_FRAMES: usize = 18;
-const RUN_FRAMES: usize = 8;
-const IDLE_FPS: f32 = 12.0;
-
-/// How many run frames elapse over one leg of the journey. Expressed per leg
-/// rather than per second so that the foot cadence is identical at every
-/// viewport: a worker covers 40 world px/s on desktop but only 12 at 390 px
-/// wide, and a fixed frame rate would make it moonwalk on a phone.
-const RUN_FRAMES_PER_LEG: f32 = 160.0;
+const FRAME_SIZE: u32 = 22;
+const MONKEY_SIZE: Vec2 = Vec2::new(13.0, 22.0);
+const MONKEY_FILL: Color = Color::srgb(0.94, 0.82, 0.67);
+const MONKEY_EDGE: Color = Color::srgb(0.34, 0.17, 0.10);
 
 /// Three lanes is enough to keep a crowd legible without turning the route into
 /// a parade ground.
 const LANES: u32 = 3;
-/// Lane spacing in *source* texels; multiplied by the world scale so lanes stay
-/// on the pixel grid.
-///
-/// Small on purpose. The ground is a flat side-on plane with a 16 px grass
-/// band, so a lane that steps far *below* the ground line is not "in front of"
-/// anything - it is buried in the dirt. Three lanes at three texels keep every
-/// worker's feet inside the band.
-const LANE_STEP_TEXELS: f32 = 3.0;
-
 #[derive(Component)]
 pub struct Worker;
 
@@ -157,90 +139,6 @@ pub(crate) enum Pose {
     Run,
 }
 
-/// Cached handles, so the atlas swap does not touch the asset server per frame.
-#[derive(Resource)]
-pub(crate) struct WorkerArt {
-    idle_image: Handle<Image>,
-    run_image: Handle<Image>,
-    idle_layout: Handle<TextureAtlasLayout>,
-    run_layout: Handle<TextureAtlasLayout>,
-    banana_image: Handle<Image>,
-    banana_layout: Handle<TextureAtlasLayout>,
-}
-
-impl WorkerArt {
-    /// Loaded once, at [`crate::game::HarvestGamePlugin`]'s `Startup`, like
-    /// every other sprite in the scene.
-    ///
-    /// This used to be lazy: the first system to find the resource missing
-    /// would build and insert it. That worked as long as the first purchase
-    /// of *any* game was a Worker, because only [`spawn_missing_workers`]
-    /// carried the lazy-init branch - `animate_workers`, `spawn_missing_carts`
-    /// and `support::sync_support_avatars` all just read `Option<Res<Self>>`
-    /// and returned early on `None`, forever, if nothing ever triggered the one
-    /// branch that created it. A player who bought a Chef, an Unpacker or a
-    /// Technologist before ever hiring a Worker got a fully-functioning,
-    /// wage-drawing monkey with no sprite at all - invisible, but real: it
-    /// showed up in the shop's OWNED count and the readout's FEEDING line, just
-    /// never on screen. Loading eagerly removes the race instead of chasing it
-    /// through a fourth call site.
-    pub(crate) fn load(
-        asset_server: &AssetServer,
-        layouts: &mut Assets<TextureAtlasLayout>,
-    ) -> Self {
-        Self {
-            idle_image: asset_server.load("Monkey/Character Spritesheets/1-Idle/Idle.png"),
-            run_image: asset_server.load("Monkey/Character Spritesheets/2-Run/Run.png"),
-            idle_layout: layouts.add(TextureAtlasLayout::from_grid(
-                UVec2::splat(FRAME_SIZE),
-                IDLE_FRAMES as u32,
-                1,
-                None,
-                None,
-            )),
-            run_layout: layouts.add(TextureAtlasLayout::from_grid(
-                UVec2::splat(FRAME_SIZE),
-                RUN_FRAMES as u32,
-                1,
-                None,
-                None,
-            )),
-            banana_image: asset_server.load("Banana/Banana.png"),
-            banana_layout: layouts.add(TextureAtlasLayout::from_grid(
-                UVec2::splat(16),
-                12,
-                1,
-                None,
-                None,
-            )),
-        }
-    }
-
-    /// The idle sheet, shared with `support`: every monkey in the game is this
-    /// spritesheet, and the roles are told apart by what they stand next to.
-    pub(crate) fn idle_image(&self) -> Handle<Image> {
-        self.idle_image.clone()
-    }
-
-    pub(crate) fn idle_layout(&self) -> Handle<TextureAtlasLayout> {
-        self.idle_layout.clone()
-    }
-
-    /// Image, layout and index must move together. Carrying index 12 from the
-    /// 18-frame idle sheet into the 8-frame run sheet is out of range.
-    fn apply(&self, sprite: &mut Sprite, pose: Pose, index: usize) {
-        let (image, layout) = match pose {
-            Pose::Idle => (&self.idle_image, &self.idle_layout),
-            Pose::Run => (&self.run_image, &self.run_layout),
-        };
-        sprite.image = image.clone();
-        sprite.texture_atlas = Some(TextureAtlas {
-            layout: layout.clone(),
-            index,
-        });
-    }
-}
-
 /// Workers restored from a save get a random elapsed-time phase. Fresh hires
 /// still start at the stall so the purchase has an immediate, legible result.
 #[derive(Resource)]
@@ -275,7 +173,6 @@ pub fn spawn_missing_workers(
     mut commands: Commands,
     workforce: Res<Workforce>,
     multipliers: Res<Multipliers>,
-    art: Res<WorkerArt>,
     mut restored: ResMut<RestoreWorkers>,
     mut next_lane: ResMut<NextLane>,
     carts: Res<Carts>,
@@ -315,14 +212,7 @@ pub fn spawn_missing_workers(
             CycleSpec::WORKER,
             Lane(index),
             Pose::Run,
-            Sprite {
-                image: art.run_image.clone(),
-                texture_atlas: Some(TextureAtlas {
-                    layout: art.run_layout.clone(),
-                    index: 0,
-                }),
-                ..default()
-            },
+            Sprite::from_color(MONKEY_FILL, MONKEY_SIZE),
             Transform::from_xyz(0.0, 0.0, 1.0),
         ));
         if was_restored {
@@ -333,24 +223,36 @@ pub fn spawn_missing_workers(
             });
         }
         worker.with_children(|parent| {
+            spawn_monkey_outline(parent, MONKEY_SIZE);
             parent.spawn((
                 CarriedBanana,
-                Sprite {
-                    image: art.banana_image.clone(),
-                    texture_atlas: Some(TextureAtlas {
-                        layout: art.banana_layout.clone(),
-                        index: 0,
-                    }),
-                    custom_size: Some(Vec2::splat(14.0)),
-                    ..default()
-                },
-                // Local space: the parent's scale carries it to world size.
-                // The character's head tops out around y 13 of the 32 px frame,
-                // so this rides just above it rather than floating clear.
-                Transform::from_xyz(1.0, 16.0, 0.1),
+                Sprite::from_color(Color::srgb(1.0, 0.78, 0.10), Vec2::splat(7.0)),
+                Transform::from_xyz(5.5, 7.0, 0.2)
+                    .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4)),
                 Visibility::Hidden,
             ));
         });
+    }
+}
+
+pub(crate) fn spawn_monkey_outline(parent: &mut ChildSpawnerCommands, size: Vec2) {
+    const EDGE: f32 = 2.0;
+    for (custom_size, translation) in [
+        (
+            Vec2::new(size.x + EDGE * 2.0, EDGE),
+            Vec2::new(0.0, size.y * 0.5),
+        ),
+        (
+            Vec2::new(size.x + EDGE * 2.0, EDGE),
+            Vec2::new(0.0, -size.y * 0.5),
+        ),
+        (Vec2::new(EDGE, size.y), Vec2::new(-size.x * 0.5, 0.0)),
+        (Vec2::new(EDGE, size.y), Vec2::new(size.x * 0.5, 0.0)),
+    ] {
+        parent.spawn((
+            Sprite::from_color(MONKEY_EDGE, custom_size),
+            Transform::from_xyz(translation.x, translation.y, 0.1),
+        ));
     }
 }
 
@@ -389,23 +291,16 @@ pub fn position_workers(
             Segment::Unload | Segment::Snack => (layout.stall_stand, true),
         };
 
-        // Depth: lane 0 is the *front* row, feet on the ground line itself, and
-        // later lanes step back up the ground plane. Front-first matters more
-        // than it sounds - lanes are handed out in hire order, so the common
-        // case of a single worker would otherwise spend the whole game in the
-        // back row, shaded and visibly hovering 6 texels off the grass. Going
-        // the other way, stepping *down* from the ground line, sinks the front
-        // row into the dirt.
+        // Project the route and its parallel crowd lanes in one place. Screen
+        // y also drives the stable painter's order through `actor_z`.
         let back = lane.row() as f32;
-        let feet = layout.ground_top() + back * LANE_STEP_TEXELS * layout.world_scale;
+        let point = layout.route_point(x + lane.stagger_texels() * layout.world_scale, back);
         let half_height = FRAME_SIZE as f32 * 0.5 * layout.world_scale;
 
         let translation = Vec3::new(
-            layout.snap(x + lane.stagger_texels() * layout.world_scale),
-            layout.snap(feet + half_height),
-            // Nearer lanes draw in front, and every worker sits behind the
-            // dragged banana (z 3) and the zone labels (z 2).
-            1.0 + (LANES - 1) as f32 * 0.01 - back * 0.01,
+            layout.snap(point.x),
+            layout.snap(point.y + half_height),
+            layout.actor_z(point, lane.0 as f32 * 0.0001),
         );
         let scale = Vec3::splat(layout.world_scale);
         // Written only on change: a worker stands still through Pick and
@@ -422,7 +317,8 @@ pub fn position_workers(
 
         // Depth cue: rows further back sit slightly in shade.
         let shade = 1.0 - 0.09 * back;
-        let mut tint = Vec3::splat(shade);
+        let base = MONKEY_FILL.to_srgba();
+        let mut tint = Vec3::new(base.red, base.green, base.blue) * shade;
         // A worker stuck waiting for a banana to eat has stopped producing, and
         // the player has to be able to see why the rate died. Idling at the
         // stall alone is ambiguous - unloading looks the same.
@@ -453,38 +349,14 @@ pub fn position_workers(
 
 #[allow(clippy::type_complexity)]
 pub fn animate_workers(
-    time: Res<Time>,
-    art: Res<WorkerArt>,
-    multipliers: Res<Multipliers>,
-    mut workers: Query<(&HarvestCycle, &mut Pose, &mut Sprite, &Children), With<Worker>>,
+    mut workers: Query<(&HarvestCycle, &mut Pose, &Children), With<Worker>>,
     mut carried: Query<&mut Visibility, With<CarriedBanana>>,
 ) {
-    // f64: past ~10^5 s of session an f32 mantissa coarsens enough to make the
-    // idle loop visibly judder.
-    let elapsed = time.elapsed_secs_f64();
-
-    for (cycle, mut pose, mut sprite, children) in &mut workers {
+    for (cycle, mut pose, children) in &mut workers {
         let segment = cycle.segment();
         let walking = segment.is_walking();
         let next_pose = if walking { Pose::Run } else { Pose::Idle };
-
-        let index = if walking {
-            (cycle.segment_fraction(CycleSpec::WORKER, *multipliers) as f32 * RUN_FRAMES_PER_LEG)
-                as usize
-                % RUN_FRAMES
-        } else {
-            (elapsed * IDLE_FPS as f64) as usize % IDLE_FRAMES
-        };
-
-        let pose_changed = *pose != next_pose;
-        let index_changed = sprite
-            .texture_atlas
-            .as_ref()
-            .is_none_or(|atlas| atlas.index != index);
-        // Only touch the sprite when something actually changed, so idle
-        // workers do not trigger a re-extract every frame.
-        if pose_changed || index_changed {
-            art.apply(&mut sprite, next_pose, index);
+        if *pose != next_pose {
             *pose = next_pose;
         }
 
@@ -511,32 +383,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_lane_keeps_its_feet_inside_the_ground_band() {
-        // The ground is a flat side-on plane with a 16 px grass band. A lane
-        // that steps below the ground line is buried in the dirt, and one that
-        // steps far above it stands on the sky.
+    fn isometric_lanes_are_separated_and_depth_sorted() {
         let layout = SceneLayout::for_viewport(Vec2::new(1280.0, 720.0));
-        let band = 16.0;
-
-        for lane in 0..LANES {
-            let back = lane as f32;
-            let feet = layout.ground_top() + back * LANE_STEP_TEXELS * layout.world_scale;
-            let lift = feet - layout.ground_top();
-
-            assert!(lift >= 0.0, "lane {lane} is below the ground line");
-            assert!(lift <= band, "lane {lane} floats {lift} above the ground");
+        let x = (layout.grove_stand + layout.stall_stand) * 0.5;
+        let points: Vec<Vec2> = (0..LANES)
+            .map(|lane| layout.route_point(x, lane as f32))
+            .collect();
+        for pair in points.windows(2) {
+            assert!(pair[1].y < pair[0].y);
+            assert!(layout.actor_z(pair[1], 0.0) > layout.actor_z(pair[0], 0.0));
         }
-        // Lane 0 is the front row: feet exactly on the ground line, unshaded,
-        // drawn in front. Lanes are handed out in hire order, so the first
-        // worker - which for most of a session is the only worker - must be the
-        // one standing on the grass rather than hovering above it.
-        let z = |lane: Lane| 1.0 + (LANES - 1) as f32 * 0.01 - lane.row() as f32 * 0.01;
-        let shade = |lane: Lane| 1.0 - 0.09 * lane.row() as f32;
-
-        assert_eq!(Lane(0).row(), 0);
-        assert_eq!(shade(Lane(0)), 1.0);
-        assert!(z(Lane(0)) > z(Lane(LANES - 1)));
-        assert!(shade(Lane(0)) > shade(Lane(LANES - 1)));
     }
 
     #[test]
@@ -557,25 +413,6 @@ mod tests {
             assert!(Lane(index).stagger_texels().abs() <= 8.0);
         }
     }
-
-    #[test]
-    fn the_run_cycle_covers_whole_frames_across_a_leg() {
-        // Every frame index the animation can produce must be inside the run
-        // sheet; an out-of-range index renders as a garbled tile.
-        for step in 0..=1_000 {
-            let fraction = step as f32 / 1_000.0;
-            let index = (fraction * RUN_FRAMES_PER_LEG) as usize % RUN_FRAMES;
-            assert!(index < RUN_FRAMES);
-        }
-    }
-
-    #[test]
-    fn the_idle_cycle_stays_inside_the_idle_sheet() {
-        for tick in 0..5_000 {
-            let index = ((tick as f32 * 0.01) * IDLE_FPS) as usize % IDLE_FRAMES;
-            assert!(index < IDLE_FRAMES);
-        }
-    }
 }
 
 // ────────────────────────────────────────────────────────────────── carts
@@ -591,7 +428,6 @@ pub fn spawn_missing_carts(
     mut commands: Commands,
     carts: Res<Carts>,
     multipliers: Res<Multipliers>,
-    art: Res<WorkerArt>,
     mut restored: ResMut<RestoreCarts>,
     existing: Query<Entity, With<Cart>>,
 ) {
@@ -648,23 +484,18 @@ pub fn spawn_missing_carts(
             // whole crew afterwards.
             for seat in 0..CART_CREW {
                 let offset = (seat as f32 - (CART_CREW as f32 - 1.0) * 0.5) * SEAT_STEP_TEXELS;
-                cart.spawn((
+                let mut seat_entity = cart.spawn((
                     CartSeat { cart: index, seat },
-                    Sprite {
-                        image: art.idle_image(),
-                        texture_atlas: Some(TextureAtlas {
-                            layout: art.idle_layout(),
-                            index: 0,
-                        }),
-                        flip_x: true,
-                        ..default()
-                    },
+                    Sprite::from_color(MONKEY_FILL, Vec2::new(10.0, 16.0)),
                     // Sitting in the box: feet behind its front wall, heads
                     // clear of the top. Local texels, so the parent's world
                     // scale applies without this having to know it.
                     Transform::from_xyz(offset, FRAME_SIZE as f32 * 0.30, -0.001),
                     Visibility::Hidden,
                 ));
+                seat_entity.with_children(|seat| {
+                    spawn_monkey_outline(seat, Vec2::new(10.0, 16.0));
+                });
             }
         });
     }
@@ -790,7 +621,6 @@ type CartAvatarQuery<'w, 's> = Query<
 /// Only the box is placed: the seats are its children, so their offsets and
 /// scale follow for free. All this loop decides is how many of them are visible.
 pub fn position_carts(
-    time: Res<Time>,
     layout: Res<SceneLayout>,
     multipliers: Res<Multipliers>,
     carts_res: Res<Carts>,
@@ -799,10 +629,6 @@ pub fn position_carts(
     mut loads: Query<(&ChildOf, &mut Transform, &mut Visibility, &mut Sprite), With<CartLoad>>,
 ) {
     let scale = layout.world_scale();
-    // The crew rides the same idle sheet everyone else is animated on. Frozen on
-    // frame zero inside a moving box they read as a rendering fault rather than
-    // as passengers, since every other monkey on screen is breathing.
-    let frame = ((time.elapsed_secs() * IDLE_FPS) as usize) % IDLE_FRAMES;
     // Which way the crew faces. A cart heading out to the grove is travelling
     // left, so a permanently flipped rider rides backwards for half the trip.
     let mut facing_left = true;
@@ -828,13 +654,11 @@ pub fn position_carts(
             }
         };
 
+        let point = layout.route_point(x, -1.0);
         transform.translation = Vec3::new(
-            layout.snap(x),
-            layout.snap(layout.ground_top() + CART_BOX_TEXELS.y * 0.5 * scale),
-            // In front of every monkey on foot. A vehicle they walk behind
-            // rather than through - which is the only separation available,
-            // since all three depth lanes are spent.
-            1.5,
+            layout.snap(point.x),
+            layout.snap(point.y + CART_BOX_TEXELS.y * 0.5 * scale),
+            layout.actor_z(point, 0.02),
         );
         transform.scale = Vec3::splat(scale);
         facing_left = !matches!(cycle.segment(), Segment::ToDepot) || boarding.is_some();
@@ -882,11 +706,6 @@ pub fn position_carts(
     }
 
     for (seat, mut visibility, mut sprite) in &mut seats {
-        if let Some(atlas) = sprite.texture_atlas.as_mut()
-            && atlas.index != frame
-        {
-            atlas.index = frame;
-        }
         if sprite.flip_x != facing_left {
             sprite.flip_x = facing_left;
         }

@@ -13,21 +13,18 @@
 //! hanging a role's avatar off "the first entity of that role", which breaks the
 //! moment that entity is despawned.
 //!
-//! No new art. Every monkey here is the worker's idle sheet; the roles are told
-//! apart entirely by a coloured box - worn as a chef's hat, carried as a crate,
-//! or sat behind as a desk - and by where they stand.
+//! Every monkey uses the same outlined lo-fi marker. Roles are told apart by a
+//! coloured box worn as a hat, carried as a crate, or used as a desk.
 
 use bevy::prelude::*;
 
 use crate::{
     domain::{SUPPORT_MEAL_PERIOD, SUPPORT_PHASE_STRIDE, Staff, SupportCycle, SupportRole},
     game::{CREAM, GOLD, SceneLayout},
-    worker::WorkerArt,
+    worker::spawn_monkey_outline,
 };
 
-const FRAME_SIZE: u32 = 32;
-const IDLE_FRAMES: usize = 18;
-const IDLE_FPS: f32 = 12.0;
+const FRAME_SIZE: u32 = 22;
 
 /// Sprites drawn per role before the count moves to a badge.
 ///
@@ -99,8 +96,6 @@ pub(crate) fn avatars_per_role(layout: &SceneLayout) -> usize {
 }
 /// Depth spacing, matched to `worker::LANE_STEP_TEXELS` so support and workers
 /// sit on the same ground plane.
-const ROW_STEP_TEXELS: f32 = 3.0;
-
 /// Slow enough to read as distress rather than as a strobe. Shared with the
 /// worker's old hunger pulse, which is now unreachable: a harvester's meal is
 /// reserved out of its own delivery, so the only monkeys who can go hungry are
@@ -229,7 +224,6 @@ pub(crate) fn sync_support_avatars(
     time: Res<Time>,
     layout: Res<SceneLayout>,
     staff: Res<Staff>,
-    art: Res<WorkerArt>,
     units: Query<(&SupportRole, &SupportCycle), With<SupportUnit>>,
     mut avatars: Query<(
         Entity,
@@ -248,7 +242,7 @@ pub(crate) fn sync_support_avatars(
             .count();
 
         for slot in drawn..wanted {
-            spawn_avatar(&mut commands, &art, &layout, role, slot);
+            spawn_avatar(&mut commands, &layout, role, slot);
         }
         // A resize can shrink the fan, so the pool has to give sprites back as
         // well as take them - otherwise rotating a phone leaves a role drawn
@@ -271,29 +265,18 @@ pub(crate) fn sync_support_avatars(
         }
     }
 
-    let frame = ((time.elapsed_secs() * IDLE_FPS) as usize) % IDLE_FRAMES;
-
     for (entity, avatar, flash, mut transform, mut sprite) in &mut avatars {
-        let (x, row) = layout.support_stand(avatar.role);
         let scale = layout.world_scale();
 
         let spread = slot_offset_texels(avatar.slot, per_role) * scale;
-        let feet = layout.ground_top() + row as f32 * ROW_STEP_TEXELS * scale;
+        let point = layout.support_point(avatar.role, spread);
         let half_height = FRAME_SIZE as f32 * 0.5 * scale;
 
         transform.translation = Vec3::new(
-            layout.snap(x + spread),
-            layout.snap(feet + half_height),
-            // Behind the dragged banana and the zone labels, and stepped by
-            // depth row so a nearer monkey draws over a further one.
-            1.0 - row as f32 * 0.01 + avatar.slot as f32 * 0.001,
+            layout.snap(point.x),
+            layout.snap(point.y + half_height),
+            layout.actor_z(point, avatar.slot as f32 * 0.001),
         );
-
-        if let Some(atlas) = sprite.texture_atlas.as_mut() {
-            atlas.index = frame;
-        }
-        // Everyone faces left, into the arriving traffic.
-        sprite.flip_x = true;
 
         let starving = avatar.slot < hungry[role_index(avatar.role)];
         let base = avatar.role.tint();
@@ -329,13 +312,7 @@ fn role_index(role: SupportRole) -> usize {
     }
 }
 
-fn spawn_avatar(
-    commands: &mut Commands,
-    art: &WorkerArt,
-    layout: &SceneLayout,
-    role: SupportRole,
-    slot: usize,
-) {
+fn spawn_avatar(commands: &mut Commands, layout: &SceneLayout, role: SupportRole, slot: usize) {
     let scale = layout.world_scale();
     let (size, offset) = role.box_geometry();
 
@@ -343,22 +320,17 @@ fn spawn_avatar(
         .spawn((
             SupportAvatar { role, slot },
             HireFlash(HIRE_HIGHLIGHT_SECONDS),
-            Sprite {
-                image: art.idle_image(),
-                texture_atlas: Some(TextureAtlas {
-                    layout: art.idle_layout(),
-                    index: 0,
-                }),
-                color: role.tint(),
-                ..default()
-            },
+            Sprite::from_color(role.tint(), Vec2::new(13.0, 22.0)),
             Transform::from_scale(Vec3::splat(scale)),
         ))
-        .with_child((
-            RoleBox,
-            Sprite::from_color(role.box_color(), size),
-            Transform::from_xyz(offset.x, offset.y, role.box_z()),
-        ));
+        .with_children(|avatar| {
+            spawn_monkey_outline(avatar, Vec2::new(13.0, 22.0));
+            avatar.spawn((
+                RoleBox,
+                Sprite::from_color(role.box_color(), size),
+                Transform::from_xyz(offset.x, offset.y, role.box_z()),
+            ));
+        });
 }
 
 /// Keeps the role boxes on the texel grid when the viewport changes. They are
@@ -410,15 +382,14 @@ pub(crate) fn sync_support_badges(
             continue;
         }
 
-        let (x, row) = layout.support_stand(badge.0);
-        let feet = layout.ground_top() + row as f32 * ROW_STEP_TEXELS * scale;
+        let point = layout.support_point(badge.0, 0.0);
         transform.translation = Vec3::new(
             // Centred over the role's fan and lifted clear of it. Placed
             // *beside* the group it covered the outermost monkeys - and at a
             // crowded deposit those were the chefs' hats, which are the only
             // thing telling that role apart.
-            layout.snap(x),
-            layout.snap(feet + (FRAME_SIZE as f32 * 0.5 + 13.0) * scale),
+            layout.snap(point.x),
+            layout.snap(point.y + (FRAME_SIZE as f32 * 0.5 + 13.0) * scale),
             // In front of every monkey, including the front depth row.
             2.5,
         );
@@ -540,16 +511,13 @@ mod tests {
     }
 
     #[test]
-    fn every_support_avatar_keeps_its_feet_inside_the_ground_band() {
-        // The same constraint `worker::every_lane_keeps_its_feet_inside_the_ground_band`
-        // enforces: the grass band is 16 texels, and a monkey standing above it
-        // is standing on the sky.
+    fn every_support_avatar_stays_inside_the_board() {
+        let layout = SceneLayout::default();
+        let half = layout.scene_side() * 0.5;
         for role in SupportRole::ALL {
-            let (_, row) = SceneLayout::default().support_stand(role);
-            assert!(
-                (row as f32 * ROW_STEP_TEXELS) < 16.0,
-                "{role:?} sits {row} rows back, outside the grass"
-            );
+            let point = layout.support_point(role, 0.0);
+            assert!((point.x - layout.scene_center().x).abs() < half);
+            assert!((point.y - layout.scene_center().y).abs() < half);
         }
     }
 }

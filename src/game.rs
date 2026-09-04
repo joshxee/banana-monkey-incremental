@@ -1,12 +1,6 @@
 use std::time::Duration;
 
-use bevy::{
-    diagnostic::FrameCount,
-    input::touch::Touches,
-    prelude::*,
-    sprite::{SpriteImageMode, SpriteScalingMode},
-    window::PrimaryWindow,
-};
+use bevy::{diagnostic::FrameCount, input::touch::Touches, prelude::*, window::PrimaryWindow};
 
 use crate::{
     domain::{
@@ -15,7 +9,7 @@ use crate::{
         SupportRole, Treasury, UnitKind, Workforce, cart_crew_shortfall, multipliers_for,
         plan_hire, research_per_sec, restart_run,
     },
-    hud, persistence,
+    hud, isometric, persistence,
     support::{self, SupportUnit},
     worker::{self, Cart, RestoredCycle, Worker},
 };
@@ -107,7 +101,9 @@ impl Plugin for HarvestGamePlugin {
             .init_resource::<Feedback>()
             .init_resource::<MenuState>()
             .init_resource::<hud::StoreExpanded>()
+            .init_resource::<hud::ActiveShopTab>()
             .init_resource::<hud::InfoOpen>()
+            .init_resource::<UiTouchGesture>()
             .init_resource::<PointerGuard>()
             .init_resource::<DiagnosticPointerTrace>()
             .insert_resource(Time::<Fixed>::from_hz(SIM_HZ))
@@ -178,7 +174,13 @@ impl Plugin for HarvestGamePlugin {
             .add_systems(
                 Update,
                 (
-                    (handle_menu, hud::sync_menu_visibility).chain(),
+                    (
+                        track_ui_touch,
+                        hud::handle_store_gesture,
+                        handle_menu,
+                        hud::sync_menu_visibility,
+                    )
+                        .chain(),
                     handle_harvest_input,
                     hud::scroll_store,
                     move_keyboard_harvest,
@@ -199,6 +201,7 @@ impl Plugin for HarvestGamePlugin {
                     update_feedback,
                     update_floaters,
                     hud::sync_readout,
+                    hud::sync_shop_tabs,
                     hud::sync_shop_new,
                     hud::sync_info,
                     hud::style_buttons,
@@ -214,15 +217,6 @@ impl Plugin for HarvestGamePlugin {
 
 #[derive(Component)]
 struct MainCamera;
-
-#[derive(Component)]
-struct Sky;
-
-#[derive(Component)]
-struct GroundFill;
-
-#[derive(Component)]
-struct GroundEdge;
 
 #[derive(Component)]
 struct HarvestZone;
@@ -262,9 +256,6 @@ struct Floater {
 
 #[derive(Component, Clone, Copy)]
 enum LayoutElement {
-    Sky,
-    GroundFill,
-    GroundEdge,
     HarvestZone,
     DepositZone,
     DepositGlow,
@@ -273,12 +264,14 @@ enum LayoutElement {
     DepositLabel,
 }
 
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ButtonAction {
     OpenMenu,
     Hire(UnitKind),
     Info(hud::Unit),
     ToggleStore,
+    PreviousShopTab,
+    NextShopTab,
     Resume,
     #[cfg(target_arch = "wasm32")]
     Diagnostics,
@@ -291,6 +284,7 @@ pub(crate) enum ButtonAction {
 struct MenuPanels<'w> {
     store_expanded: ResMut<'w, hud::StoreExpanded>,
     info_open: ResMut<'w, hud::InfoOpen>,
+    active_tab: ResMut<'w, hud::ActiveShopTab>,
 }
 
 impl ButtonAction {
@@ -302,7 +296,9 @@ impl ButtonAction {
             ButtonAction::OpenMenu
             | ButtonAction::Hire(_)
             | ButtonAction::Info(_)
-            | ButtonAction::ToggleStore => menu == MenuState::Closed,
+            | ButtonAction::ToggleStore
+            | ButtonAction::PreviousShopTab
+            | ButtonAction::NextShopTab => menu == MenuState::Closed,
             ButtonAction::Resume | ButtonAction::Restart => menu == MenuState::Open,
             #[cfg(target_arch = "wasm32")]
             ButtonAction::Diagnostics => menu == MenuState::Open,
@@ -323,7 +319,10 @@ pub(crate) struct SceneLayout {
     banana_size: f32,
     harvest_bounds: Rect,
     deposit_bounds: Rect,
-    ground_top: f32,
+    scene_center: Vec2,
+    scene_side: f32,
+    header_height: f32,
+    short_landscape: bool,
     /// Where a worker stands to pick, and where it stands to unload. The route
     /// between the two is the whole visible economy.
     pub(crate) grove_stand: f32,
@@ -344,20 +343,24 @@ impl SceneLayout {
     pub(crate) fn for_viewport(viewport: Vec2) -> Self {
         let width = viewport.x.max(320.0);
         let height = viewport.y.max(320.0);
-        let available_zone_size = (width * 0.28).min(height * 0.38);
-        let zone_size = if available_zone_size >= 192.0 {
-            256.0
+        let short_landscape = width > height * 1.35 && height < 560.0;
+        let header_height = 104.0;
+        let scene_side = if short_landscape {
+            (height - header_height).min(width * 0.48)
         } else {
-            128.0
+            width.min(height * 0.58)
         };
-        let horizontal_offset = (width * 0.31).clamp(96.0, 360.0);
-        let ground_top = -height * 0.28;
-        let zone_y = ground_top + zone_size * 0.5;
-        let harvest = Vec2::new(-horizontal_offset, zone_y);
-        let deposit = Vec2::new(horizontal_offset, zone_y);
-        let banana_size = if width < 720.0 { 48.0 } else { 64.0 };
-        let banana_home = harvest + Vec2::new(zone_size * 0.34, zone_size * 0.2);
-        let banana_hitbox = Rect::from_center_size(banana_home, Vec2::splat(72.0));
+        let scene_center = if short_landscape {
+            Vec2::new(-width * 0.5 + scene_side * 0.5, -header_height * 0.5)
+        } else {
+            Vec2::new(0.0, height * 0.5 - header_height - scene_side * 0.5)
+        };
+        let harvest = scene_center + Vec2::new(-0.315, 0.060) * scene_side;
+        let deposit = scene_center + Vec2::new(0.315, -0.130) * scene_side;
+        let zone_size = scene_side * 0.18;
+        let banana_size = (scene_side * 0.050).clamp(18.0, 36.0);
+        let banana_home = harvest + Vec2::new(zone_size * 0.18, -zone_size * 0.52);
+        let banana_hitbox = Rect::from_center_size(banana_home, Vec2::splat(zone_size * 0.8));
         let harvest_bounds =
             Rect::from_center_size(harvest, Vec2::splat(zone_size)).union(banana_hitbox);
 
@@ -373,17 +376,58 @@ impl SceneLayout {
                 deposit + Vec2::new(0.0, zone_size * 0.02),
                 Vec2::splat(zone_size + 36.0),
             ),
-            ground_top,
-            grove_stand: harvest.x + zone_size * 0.30,
-            stall_stand: deposit.x - zone_size * 0.44,
-            world_scale: zone_size / 128.0,
+            scene_center,
+            scene_side,
+            header_height,
+            short_landscape,
+            grove_stand: harvest.x + zone_size * 0.28,
+            stall_stand: deposit.x - zone_size * 0.34,
+            world_scale: scene_side / 390.0,
         }
     }
 
-    /// Ground level, where a worker's feet go. Lanes step *down* from here,
-    /// toward the camera; stepping up would stand a monkey on the sky.
-    pub(crate) fn ground_top(self) -> f32 {
-        self.ground_top
+    pub(crate) fn scene_center(self) -> Vec2 {
+        self.scene_center
+    }
+
+    pub(crate) fn scene_side(self) -> f32 {
+        self.scene_side
+    }
+
+    pub(crate) fn header_height(self) -> f32 {
+        self.header_height
+    }
+
+    pub(crate) fn short_landscape(self) -> bool {
+        self.short_landscape
+    }
+
+    pub(crate) fn store_width(self) -> f32 {
+        if self.short_landscape {
+            self.viewport.x - self.scene_side
+        } else {
+            self.viewport.x
+        }
+    }
+
+    pub(crate) fn store_height(self) -> f32 {
+        if self.short_landscape {
+            self.viewport.y - self.header_height
+        } else {
+            (self.viewport.y - self.header_height - self.scene_side).max(0.0)
+        }
+    }
+
+    pub(crate) fn route_point(self, x: f32, depth_row: f32) -> Vec2 {
+        let span = (self.stall_stand - self.grove_stand).max(1.0);
+        let t = ((x - self.grove_stand) / span).clamp(0.0, 1.0);
+        let y = self.harvest.y.lerp(self.deposit.y, t);
+        let depth = depth_row * 5.0 * self.world_scale;
+        Vec2::new(x, y - depth)
+    }
+
+    pub(crate) fn actor_z(self, point: Vec2, tie_breaker: f32) -> f32 {
+        1.0 - (point.y - self.scene_center.y) / self.scene_side + tie_breaker
     }
 
     pub(crate) fn world_scale(self) -> f32 {
@@ -392,12 +436,8 @@ impl SceneLayout {
 
     /// How far along the route a cart stands from where the walking monkeys do.
     ///
-    /// All three depth lanes are spent, so a cart cannot sit *behind* the
-    /// workers - a fourth row lifts it 18 texels into a 16-texel grass band.
-    /// Separation is horizontal instead: the cart's dwell points are offset
-    /// back along the route, so its hundred-second unload happens beside the
-    /// queue rather than on top of it, and it draws in front so workers pass
-    /// behind the vehicle rather than through it.
+    /// The cart uses its own bay at each endpoint, offset inside the route so
+    /// its long unload does not cover the worker queue.
     pub(crate) fn cart_offset(self) -> f32 {
         self.zone_size * 0.30
     }
@@ -416,20 +456,25 @@ impl SceneLayout {
     pub(crate) fn support_stand(self, role: SupportRole) -> (f32, u32) {
         let (offset, row) = match role {
             // Nearest the arriving workers: it is the one clearing the depot.
-            SupportRole::Unpacker => (-0.30, 0),
+            SupportRole::Unpacker => (0.08, 0),
             // Under the sign, where the eating already happens.
-            SupportRole::Chef => (-0.02, 1),
+            SupportRole::Chef => (0.40, 1),
             // Behind the deposit, at the back of the ground plane. Far enough
             // out that a full fan of chefs cannot reach the desk.
-            SupportRole::Technologist => (0.32, 2),
+            SupportRole::Technologist => (0.72, 2),
         };
         let x = self.deposit.x + self.zone_size * offset;
-        let limit = self.viewport.x * 0.5 - self.zone_size * 0.22;
+        let limit = self.scene_center.x + self.scene_side * 0.46;
         (x.min(limit), row)
     }
 
+    pub(crate) fn support_point(self, role: SupportRole, spread: f32) -> Vec2 {
+        let (x, row) = self.support_stand(role);
+        self.route_point(x, row as f32 + 1.2) + Vec2::new(spread, -self.zone_size * 0.08)
+    }
+
     pub(crate) fn stall_glow_anchor(self) -> Vec2 {
-        self.deposit + Vec2::new(0.0, self.zone_size * 0.34)
+        self.deposit + Vec2::new(0.0, self.zone_size * 0.20)
     }
 
     /// Snap to the world's texel grid, so pixel-art detail does not crawl at
@@ -571,6 +616,106 @@ struct PointerGuard {
     suppress_hire_for: f32,
 }
 
+/// One touch gesture shared by the UI systems.
+///
+/// Bevy marks a button pressed at touch-start. Mobile scrolling needs to wait
+/// until intent is known, so touch buttons are dispatched manually on release
+/// while mouse buttons continue through `Interaction`.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct UiTouchGesture {
+    pub(crate) id: Option<u64>,
+    pub(crate) start: Vec2,
+    pub(crate) position: Vec2,
+    pub(crate) previous: Vec2,
+    pub(crate) just_pressed: bool,
+    pub(crate) just_released: bool,
+    pub(crate) canceled: bool,
+    pub(crate) consumed: bool,
+    pub(crate) started_in_ui: bool,
+    candidate_action: Option<ButtonAction>,
+}
+
+impl UiTouchGesture {
+    fn is_touch_frame(&self) -> bool {
+        self.id.is_some() || self.just_pressed || self.just_released || self.canceled
+    }
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+struct UiInput<'w, 's> {
+    touch: Res<'w, UiTouchGesture>,
+    regions: Query<
+        'w,
+        's,
+        (&'static ComputedNode, &'static UiGlobalTransform),
+        Or<(
+            With<hud::HudRoot>,
+            With<hud::StoreRoot>,
+            With<hud::InfoPanel>,
+        )>,
+    >,
+}
+
+fn track_ui_touch(
+    touches: Res<Touches>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    ui_regions: Query<
+        (&ComputedNode, &UiGlobalTransform),
+        Or<(
+            With<hud::HudRoot>,
+            With<hud::StoreRoot>,
+            With<hud::InfoPanel>,
+        )>,
+    >,
+    mut gesture: ResMut<UiTouchGesture>,
+) {
+    gesture.just_pressed = false;
+    gesture.just_released = false;
+    gesture.canceled = false;
+
+    if gesture.id.is_none()
+        && let Some(touch) = touches.iter_just_pressed().next()
+    {
+        let position =
+            pointer_in_camera_space(touch.position(), window.resolution.base_scale_factor());
+        gesture.id = Some(touch.id());
+        gesture.start = position;
+        gesture.position = position;
+        gesture.previous = position;
+        gesture.consumed = false;
+        gesture.started_in_ui = ui_regions
+            .iter()
+            .any(|(node, transform)| ui_node_contains(node, transform, position));
+        gesture.candidate_action = None;
+        gesture.just_pressed = true;
+    }
+
+    let Some(id) = gesture.id else { return };
+    if let Some(touch) = touches.get_pressed(id) {
+        gesture.previous = gesture.position;
+        gesture.position =
+            pointer_in_camera_space(touch.position(), window.resolution.base_scale_factor());
+    }
+    if let Some(touch) = touches.iter_just_released().find(|touch| touch.id() == id) {
+        gesture.previous = gesture.position;
+        gesture.position =
+            pointer_in_camera_space(touch.position(), window.resolution.base_scale_factor());
+        gesture.id = None;
+        gesture.just_released = true;
+    } else if touches.iter_just_canceled().any(|touch| touch.id() == id) {
+        gesture.id = None;
+        gesture.canceled = true;
+        gesture.consumed = true;
+        gesture.candidate_action = None;
+    }
+}
+
+fn ui_node_contains(node: &ComputedNode, transform: &UiGlobalTransform, position: Vec2) -> bool {
+    let center = transform.translation * node.inverse_scale_factor;
+    let size = node.size() * node.inverse_scale_factor;
+    contains_inclusive(Rect::from_center_size(center, size), position)
+}
+
 const HIRE_DEBOUNCE_SECONDS: f32 = 0.25;
 
 #[derive(Resource, Debug, Default)]
@@ -609,64 +754,15 @@ pub(crate) enum MenuState {
 
 fn setup(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     commands.spawn((Camera2d, MainCamera));
 
-    // Eager, like every sprite below it. This used to be lazy, built by
-    // whichever system first found it missing - which was always
-    // `worker::spawn_missing_workers`, until a player hired a Chef, an
-    // Unpacker or a Technologist before ever hiring a Worker and got a fully
-    // live, wage-drawing monkey with no sprite: nothing else that reads this
-    // resource can create it, so a save-file or purchase order that never
-    // exercises the one lazy-init branch left every support avatar (and a
-    // cart bought as the very first purchase) invisible forever.
-    commands.insert_resource(worker::WorkerArt::load(
-        &asset_server,
-        &mut texture_atlas_layouts,
-    ));
+    isometric::spawn_world(&mut commands, &mut meshes, &mut materials);
 
     commands.spawn((
-        Sprite {
-            image: asset_server.load("Background/Background_2.png"),
-            image_mode: SpriteImageMode::Scale(SpriteScalingMode::FillCenter),
-            ..default()
-        },
-        Transform::from_xyz(0.0, 0.0, -20.0),
-        Sky,
-        LayoutElement::Sky,
-    ));
-
-    commands.spawn((
-        Sprite::from_color(BROWN, Vec2::ONE),
-        Transform::from_xyz(0.0, 0.0, -11.0),
-        GroundFill,
-        LayoutElement::GroundFill,
-    ));
-
-    commands.spawn((
-        Sprite {
-            image: asset_server.load("Background/Assets.png"),
-            rect: Some(Rect::new(336.0, 384.0, 400.0, 400.0)),
-            image_mode: SpriteImageMode::Tiled {
-                tile_x: true,
-                tile_y: false,
-                stretch_value: 1.0,
-            },
-            ..default()
-        },
-        Transform::from_xyz(0.0, 0.0, -10.0),
-        GroundEdge,
-        LayoutElement::GroundEdge,
-    ));
-
-    commands.spawn((
-        Sprite {
-            image: asset_server.load("Harvest/monki_banana_tree.png"),
-            rect: Some(Rect::new(0.0, 0.0, 128.0, 128.0)),
-            ..default()
-        },
+        Sprite::from_color(Color::NONE, Vec2::ONE),
         Transform::from_xyz(0.0, 0.0, 0.0),
         HarvestZone,
         LayoutElement::HarvestZone,
@@ -680,47 +776,44 @@ fn setup(
     ));
 
     commands.spawn((
-        Sprite {
-            image: asset_server.load("Deposit/monkistall.png"),
-            ..default()
-        },
+        Sprite::from_color(Color::NONE, Vec2::ONE),
         Transform::from_xyz(0.0, 0.0, 0.0),
         DepositZone,
         LayoutElement::DepositZone,
     ));
 
-    let banana_layout = texture_atlas_layouts.add(TextureAtlasLayout::from_grid(
-        UVec2::splat(BANANA_FRAME_SIZE),
-        BANANA_FRAMES as u32,
-        1,
-        None,
-        None,
-    ));
-    commands.spawn((
-        Sprite {
-            image: asset_server.load("Banana/Banana.png"),
-            texture_atlas: Some(TextureAtlas::from(banana_layout)),
-            ..default()
-        },
-        Transform::from_xyz(0.0, 0.0, 3.0),
-        Banana,
-        LayoutElement::Banana,
-        BananaAnimation {
-            timer: Timer::new(Duration::from_secs_f32(1.0 / 12.0), TimerMode::Repeating),
-        },
-    ));
+    commands
+        .spawn((
+            Sprite::from_color(GOLD, Vec2::new(10.0, 5.0)),
+            Transform::from_xyz(0.0, 0.0, 3.0),
+            Banana,
+            LayoutElement::Banana,
+            BananaAnimation {
+                timer: Timer::new(Duration::from_secs_f32(1.0 / 12.0), TimerMode::Repeating),
+            },
+        ))
+        .with_children(|banana| {
+            banana.spawn((
+                Sprite::from_color(GOLD, Vec2::new(9.0, 5.0)),
+                Transform::from_xyz(7.0, -2.0, 0.1).with_rotation(Quat::from_rotation_z(-0.42)),
+            ));
+            banana.spawn((
+                Sprite::from_color(BROWN, Vec2::new(2.0, 3.0)),
+                Transform::from_xyz(11.0, -4.0, 0.2).with_rotation(Quat::from_rotation_z(-0.42)),
+            ));
+        });
 
     commands.spawn((
-        Text2d::new("HARVEST"),
-        TextFont::from_font_size(26.0),
+        Text2d::new("JUNGLE"),
+        TextFont::from_font_size(16.0),
         TextColor(INK),
         Transform::from_xyz(0.0, 0.0, 2.0),
         HarvestLabel,
         LayoutElement::HarvestLabel,
     ));
     commands.spawn((
-        Text2d::new("DEPOSIT"),
-        TextFont::from_font_size(26.0),
+        Text2d::new("VILLAGE"),
+        TextFont::from_font_size(16.0),
         TextColor(INK),
         Transform::from_xyz(0.0, 0.0, 2.0),
         DepositLabel,
@@ -742,35 +835,33 @@ fn refresh_layout(window: Single<&Window, With<PrimaryWindow>>, mut layout: ResM
 fn apply_layout(
     layout: Res<SceneLayout>,
     controller: Res<HarvestController>,
-    mut elements: Query<(&LayoutElement, Option<&mut Sprite>, &mut Transform)>,
+    mut world: Single<&mut Transform, With<isometric::WorldRoot>>,
+    mut elements: Query<
+        (&LayoutElement, Option<&mut Sprite>, &mut Transform),
+        Without<isometric::WorldRoot>,
+    >,
 ) {
-    let ground_height = (layout.viewport.y * 0.5 + layout.ground_top).max(96.0);
-    let ground_center_y = -layout.viewport.y * 0.5 + ground_height * 0.5;
-    let zone_scale = layout.world_scale;
-    let label_y = layout.harvest.y + layout.zone_size * 0.5 + 24.0;
+    let world_translation = layout.scene_center().extend(0.0);
+    if world.translation != world_translation {
+        world.translation = world_translation;
+    }
+    let world_scale = Vec3::new(layout.scene_side(), layout.scene_side(), 1.0);
+    if world.scale != world_scale {
+        world.scale = world_scale;
+    }
+    let label_lift = layout.zone_size * 0.48;
 
     for (element, sprite, mut transform) in &mut elements {
         match element {
-            LayoutElement::Sky => {
-                sprite.expect("sky has sprite").custom_size = Some(layout.viewport);
-            }
-            LayoutElement::GroundFill => {
-                sprite.expect("ground fill has sprite").custom_size =
-                    Some(Vec2::new(layout.viewport.x + 128.0, ground_height));
-                transform.translation = Vec3::new(0.0, ground_center_y, -11.0);
-            }
-            LayoutElement::GroundEdge => {
-                sprite.expect("ground texture has sprite").custom_size =
-                    Some(Vec2::new(layout.viewport.x + 128.0, 16.0));
-                transform.translation = Vec3::new(0.0, layout.ground_top - 8.0, -10.0);
-            }
             LayoutElement::HarvestZone => {
                 transform.translation = layout.harvest.extend(0.0);
-                transform.scale = Vec3::splat(zone_scale);
+                sprite.expect("harvest hit target has sprite").custom_size =
+                    Some(Vec2::splat(layout.zone_size));
             }
             LayoutElement::DepositZone => {
                 transform.translation = layout.deposit.extend(0.0);
-                transform.scale = Vec3::splat(zone_scale);
+                sprite.expect("deposit hit target has sprite").custom_size =
+                    Some(Vec2::splat(layout.zone_size));
             }
             LayoutElement::DepositGlow => {
                 sprite.expect("deposit glow has sprite").custom_size =
@@ -788,22 +879,27 @@ fn apply_layout(
                     1.0
                 };
                 transform.scale = Vec3::splat(layout.banana_size / BANANA_FRAME_SIZE as f32 * lift);
+                transform.rotation = Quat::from_rotation_z(-0.15);
             }
             LayoutElement::HarvestLabel => {
-                transform.translation = Vec3::new(layout.harvest.x, label_y, 2.0);
+                transform.translation =
+                    Vec3::new(layout.harvest.x, layout.harvest.y + label_lift, 6.0);
+                transform.scale = Vec3::splat(layout.world_scale().clamp(0.8, 1.35));
             }
             LayoutElement::DepositLabel => {
-                transform.translation = Vec3::new(layout.deposit.x, label_y, 2.0);
+                transform.translation =
+                    Vec3::new(layout.deposit.x, layout.deposit.y + label_lift, 6.0);
+                transform.scale = Vec3::splat(layout.world_scale().clamp(0.8, 1.35));
             }
         }
     }
 }
 
-/// Run the clock faster, for tests only.
+/// Scale the clock for tests only.
 ///
 /// A worker's cycle is 50 *simulated* seconds, and an end-to-end test that
 /// watches a delivery therefore takes 50 real ones. Scaling `Time<Virtual>` is
-/// the honest way to shorten that: `Time<Fixed>` is driven by virtual time, so
+/// the honest way to change that: `Time<Fixed>` is driven by virtual time, so
 /// `advance_cycles` still sees a constant 50 ms `dt` and the *fixed-step
 /// simulation* is bit-identical per tick. Shortening the cycle constants
 /// instead would test a different game.
@@ -844,7 +940,7 @@ fn apply_test_time_scale(mut virtual_time: ResMut<Time<Virtual>>) {
                 .find_map(|pair| pair.strip_prefix("speed=").map(str::to_owned))
         })
         .and_then(|value| value.parse::<f64>().ok())
-        .filter(|scale| scale.is_finite() && (1.0..=MAX_SCALE).contains(scale))
+        .filter(|scale| scale.is_finite() && (0.1..=MAX_SCALE).contains(scale))
     else {
         return;
     };
@@ -1251,10 +1347,9 @@ fn spawn_floater(commands: &mut Commands, layout: &SceneLayout, delivery: Delive
 #[allow(clippy::too_many_arguments)]
 fn handle_menu(
     keys: Res<ButtonInput<KeyCode>>,
-    touches: Res<Touches>,
-    window: Single<&Window, With<PrimaryWindow>>,
     mut interactions: Query<(&Interaction, &ButtonAction), Changed<Interaction>>,
     buttons: Query<(&ButtonAction, &ComputedNode, &UiGlobalTransform)>,
+    mut ui_touch: ResMut<UiTouchGesture>,
     mut menu: ResMut<MenuState>,
     mut controller: ResMut<HarvestController>,
     mut pending: ResMut<PendingSettlement>,
@@ -1284,28 +1379,47 @@ fn handle_menu(
             MenuState::ConfirmRestart => MenuState::Open,
         });
     }
-
-    for (interaction, action) in &mut interactions {
-        if *interaction == Interaction::Pressed {
-            pressed_actions.push(*action);
-        }
+    if *menu == MenuState::Closed && keys.just_pressed(KeyCode::ArrowLeft) {
+        pressed_actions.push(ButtonAction::PreviousShopTab);
+    }
+    if *menu == MenuState::Closed && keys.just_pressed(KeyCode::ArrowRight) {
+        pressed_actions.push(ButtonAction::NextShopTab);
     }
 
-    for touch in touches.iter_just_pressed() {
-        let position =
-            pointer_in_camera_space(touch.position(), window.resolution.base_scale_factor());
-        for (action, node, transform) in &buttons {
-            let center = transform.translation * node.inverse_scale_factor;
-            let size = node.size() * node.inverse_scale_factor;
-            // `active_in` is the guard that stops a tap on the menu scrim from
-            // reaching the shop card sitting underneath it.
-            if action.active_in(*menu)
-                && contains_inclusive(Rect::from_center_size(center, size), position)
-                && !pressed_actions.contains(action)
-            {
+    if !ui_touch.is_touch_frame() && pointer_guard.suppress_mouse_for == 0.0 {
+        for (interaction, action) in &mut interactions {
+            if *interaction == Interaction::Pressed {
                 pressed_actions.push(*action);
             }
         }
+    }
+
+    if ui_touch.just_pressed {
+        ui_touch.candidate_action = buttons
+            .iter()
+            .find(|(action, node, transform)| {
+                action.active_in(*menu) && ui_node_contains(node, transform, ui_touch.start)
+            })
+            .map(|(action, ..)| *action);
+    }
+
+    if ui_touch.just_released {
+        const TAP_SLOP: f32 = 10.0;
+        if ui_touch.position.distance(ui_touch.start) > TAP_SLOP {
+            ui_touch.consumed = true;
+        }
+        if !ui_touch.consumed
+            && let Some(candidate) = ui_touch.candidate_action
+            && buttons.iter().any(|(action, node, transform)| {
+                *action == candidate
+                    && action.active_in(*menu)
+                    && ui_node_contains(node, transform, ui_touch.position)
+            })
+            && !pressed_actions.contains(&candidate)
+        {
+            pressed_actions.push(candidate);
+        }
+        ui_touch.candidate_action = None;
     }
 
     for action in pressed_actions {
@@ -1315,6 +1429,7 @@ fn handle_menu(
             }
             ButtonAction::Hire(kind)
                 if *menu == MenuState::Closed
+                    && panels.active_tab.0 == hud::ShopTab::Monkeys
                     && panels.info_open.0.is_none()
                     && pointer_guard.suppress_hire_for == 0.0 =>
             {
@@ -1326,7 +1441,17 @@ fn handle_menu(
             {
                 panels.store_expanded.0 = !panels.store_expanded.0;
             }
-            ButtonAction::Info(unit) if *menu == MenuState::Closed => {
+            ButtonAction::PreviousShopTab if *menu == MenuState::Closed => {
+                panels.active_tab.0 = panels.active_tab.0.previous();
+                panels.info_open.0 = None;
+            }
+            ButtonAction::NextShopTab if *menu == MenuState::Closed => {
+                panels.active_tab.0 = panels.active_tab.0.next();
+                panels.info_open.0 = None;
+            }
+            ButtonAction::Info(unit)
+                if *menu == MenuState::Closed && panels.active_tab.0 == hud::ShopTab::Monkeys =>
+            {
                 panels.info_open.0 = if panels.info_open.0 == Some(unit) {
                     None
                 } else {
@@ -1377,6 +1502,7 @@ fn handle_harvest_input(
     camera: Single<(&Camera, &GlobalTransform), With<MainCamera>>,
     menu: Res<MenuState>,
     layout: Res<SceneLayout>,
+    ui_input: UiInput,
     mut controller: ResMut<HarvestController>,
     mut pointer_guard: ResMut<PointerGuard>,
     mut pending: ResMut<PendingSettlement>,
@@ -1418,6 +1544,9 @@ fn handle_harvest_input(
         HarvestInteraction::Idle => {
             let mut touch_start = None;
             for touch in touches.iter_just_pressed() {
+                if ui_input.touch.id == Some(touch.id()) && ui_input.touch.started_in_ui {
+                    continue;
+                }
                 let raw = touch.position();
                 let camera_position =
                     pointer_in_camera_space(raw, window.resolution.base_scale_factor());
@@ -1480,18 +1609,25 @@ fn handle_harvest_input(
 
             if mouse.just_pressed(MouseButton::Left) {
                 let raw = window.cursor_position();
+                let started_in_ui = raw.is_some_and(|position| {
+                    ui_input
+                        .regions
+                        .iter()
+                        .any(|(node, transform)| ui_node_contains(node, transform, position))
+                });
                 let camera_position = raw.map(|position| {
                     pointer_in_camera_space(position, window.resolution.base_scale_factor())
                 });
                 let world = camera_position.and_then(|position| screen_to_world(position, &camera));
                 let in_harvest = world
                     .is_some_and(|position| contains_inclusive(layout.harvest_bounds, position));
-                let accepted = pointer_guard.suppress_mouse_for == 0.0 && in_harvest;
+                let accepted =
+                    pointer_guard.suppress_mouse_for == 0.0 && in_harvest && !started_in_ui;
                 diagnostic_log!(
                     frame_count,
                     "mouse_start",
                     Some(PointerId::Mouse);
-                    "raw_valid={} raw=({:.2},{:.2}) camera=({:.2},{:.2}) world_valid={} world=({:.2},{:.2}) in_harvest={} suppression_seconds={:.3} accepted={}",
+                    "raw_valid={} raw=({:.2},{:.2}) camera=({:.2},{:.2}) world_valid={} world=({:.2},{:.2}) in_harvest={} started_in_ui={} suppression_seconds={:.3} accepted={}",
                     raw.is_some(),
                     raw.map_or(f32::NAN, |position| position.x),
                     raw.map_or(f32::NAN, |position| position.y),
@@ -1501,6 +1637,7 @@ fn handle_harvest_input(
                     world.map_or(f32::NAN, |position| position.x),
                     world.map_or(f32::NAN, |position| position.y),
                     in_harvest,
+                    started_in_ui,
                     pointer_guard.suppress_mouse_for,
                     accepted,
                 );
@@ -2043,6 +2180,8 @@ struct TestButtons {
     hire_technologist: TestPoint,
     hire_cart: TestPoint,
     toggle_store: TestPoint,
+    previous_tab: TestPoint,
+    next_tab: TestPoint,
     resume: TestPoint,
     logs: TestPoint,
     restart: TestPoint,
@@ -2111,6 +2250,8 @@ struct TestState {
     /// Workers still walking the route: hired, less everyone aboard a cart.
     pool: u32,
     store_expanded: bool,
+    selected_tab: &'static str,
+    store_scroll: f32,
     buttons: TestButtons,
 }
 
@@ -2133,6 +2274,7 @@ struct EconomyView<'w> {
     research: Res<'w, Research>,
     carts: Res<'w, Carts>,
     store_expanded: Res<'w, hud::StoreExpanded>,
+    active_tab: Res<'w, hud::ActiveShopTab>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2149,6 +2291,7 @@ fn sync_web_test_state(
     support: Query<(&SupportRole, &SupportCycle), With<SupportUnit>>,
     avatars: Query<Entity, With<support::SupportAvatar>>,
     buttons: Query<(&ButtonAction, &ComputedNode, &UiGlobalTransform)>,
+    store_scroll: Single<&ScrollPosition, With<hud::StoreScroll>>,
     mut warmup_frames: Local<u8>,
 ) {
     use crate::domain::Segment;
@@ -2165,6 +2308,7 @@ fn sync_web_test_state(
         research,
         carts,
         store_expanded,
+        active_tab,
     } = economy;
 
     if *warmup_frames < 3 {
@@ -2180,7 +2324,7 @@ fn sync_web_test_state(
 
     // One slot per button, so four hire buttons cannot collapse onto each
     // other and leave the suite clicking whichever row happened to be last.
-    let mut button_centers = [Vec2::ZERO; 12];
+    let mut button_centers = [Vec2::ZERO; 14];
     for (action, node, transform) in &buttons {
         let index = match action {
             ButtonAction::OpenMenu => 0,
@@ -2191,6 +2335,8 @@ fn sync_web_test_state(
             ButtonAction::Hire(UnitKind::Support(SupportRole::Technologist)) => 4,
             ButtonAction::Hire(UnitKind::Cart) => 11,
             ButtonAction::ToggleStore => 5,
+            ButtonAction::PreviousShopTab => 12,
+            ButtonAction::NextShopTab => 13,
             ButtonAction::Resume => 6,
             ButtonAction::Diagnostics => 7,
             ButtonAction::Restart => 8,
@@ -2300,6 +2446,8 @@ fn sync_web_test_state(
         cart_can_hire: plan_for(UnitKind::Cart).affordable,
         pool: workforce.count().saturating_sub(carts.crewed()),
         store_expanded: store_expanded.0,
+        selected_tab: active_tab.0.label(),
+        store_scroll: store_scroll.y,
         buttons: TestButtons {
             menu: point(button_centers[0]),
             hire_worker: point(button_centers[1]),
@@ -2307,6 +2455,8 @@ fn sync_web_test_state(
             hire_unpacker: point(button_centers[3]),
             hire_technologist: point(button_centers[4]),
             toggle_store: point(button_centers[5]),
+            previous_tab: point(button_centers[12]),
+            next_tab: point(button_centers[13]),
             hire_cart: point(button_centers[11]),
             resume: point(button_centers[6]),
             logs: point(button_centers[7]),
@@ -2401,19 +2551,27 @@ mod tests {
     }
 
     #[test]
-    fn responsive_layout_preserves_left_to_right_flow_and_minimum_targets() {
-        for viewport in [Vec2::new(320.0, 568.0), Vec2::new(1920.0, 1080.0)] {
+    fn responsive_layout_preserves_isometric_flow_and_minimum_targets() {
+        for viewport in [
+            Vec2::new(320.0, 640.0),
+            Vec2::new(390.0, 844.0),
+            Vec2::new(475.0, 653.0),
+            Vec2::new(844.0, 390.0),
+            Vec2::new(1280.0, 720.0),
+        ] {
             let layout = SceneLayout::for_viewport(viewport);
 
             assert!(layout.harvest.x < layout.deposit.x);
-            assert!(layout.banana_size >= 48.0);
+            assert!(layout.harvest.y > layout.deposit.y);
+            assert!(layout.banana_size >= 18.0);
             assert!(contains_inclusive(layout.harvest_bounds, layout.harvest));
             assert!(contains_inclusive(
                 layout.harvest_bounds,
                 layout.banana_home
             ));
             assert!(layout.harvest_bounds.width() >= layout.zone_size);
-            assert!(layout.deposit_bounds.width() >= 148.0);
+            assert!(layout.harvest_bounds.width() >= 44.0);
+            assert!(layout.deposit_bounds.width() >= 80.0);
         }
     }
 
@@ -2439,12 +2597,23 @@ mod tests {
         let desktop = SceneLayout::for_viewport(Vec2::new(1280.0, 720.0));
         let phone = SceneLayout::for_viewport(Vec2::new(390.0, 844.0));
 
-        // A fractional scale would make the monkey shimmer against a scene
-        // whose every other sprite is drawn on the integer grid.
-        assert_eq!(desktop.world_scale, 2.0);
         assert_eq!(phone.world_scale, 1.0);
-        assert_eq!(desktop.snap(10.4), 10.0);
-        assert_eq!(desktop.snap(11.4), 12.0);
+        for layout in [desktop, phone] {
+            let snapped = layout.snap(11.4);
+            let grid_units = snapped / layout.world_scale;
+            assert!((grid_units - grid_units.round()).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn route_projection_is_monotonic_and_depth_ordered() {
+        let layout = SceneLayout::default();
+        let start = layout.route_point(layout.grove_stand, 0.0);
+        let middle = layout.route_point((layout.grove_stand + layout.stall_stand) * 0.5, 0.0);
+        let end = layout.route_point(layout.stall_stand, 0.0);
+        assert!(start.x < middle.x && middle.x < end.x);
+        assert!(start.y > middle.y && middle.y > end.y);
+        assert!(layout.actor_z(start, 0.0) < layout.actor_z(end, 0.0));
     }
 
     #[test]

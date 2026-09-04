@@ -57,15 +57,9 @@ test.describe("support staff", () => {
   test("a chef hired before any worker still gets an avatar", async ({
     page,
   }) => {
-    // Regression guard for the bug this pins: `WorkerArt` (the sprite sheet
-    // every monkey in the game shares) used to be created lazily, by
-    // whichever system first found it missing. In practice that was always
-    // `worker::spawn_missing_workers`, so a player who bought a Chef, an
-    // Unpacker or a Technologist before ever hiring a Worker got a fully
-    // live, wage-drawing monkey with no sprite at all - invisible, but real:
-    // it showed up in the shop's OWNED count and the readout's FEEDING line,
-    // just never on screen. `WorkerArt` now loads at Startup, unconditionally,
-    // like every other sprite in the scene.
+    // Regression guard for support rendering. A player who buys a Chef before
+    // a Worker must still get a visible lo-fi avatar, even though the support
+    // simulation and its bounded presentation pool are separate populations.
     const start = await state(page);
     expect(start.workers).toBe(0);
     expect(start.avatarsDrawn).toBe(0);

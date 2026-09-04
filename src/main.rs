@@ -1,6 +1,7 @@
 mod domain;
 mod game;
 mod hud;
+mod isometric;
 mod persistence;
 mod support;
 mod worker;
@@ -15,7 +16,7 @@ use game::HarvestGamePlugin;
 
 fn main() {
     let mut app = App::new();
-    app.insert_resource(ClearColor(Color::srgb(0.42, 0.76, 0.95)))
+    app.insert_resource(ClearColor(isometric::BOARD_SKY))
         .add_plugins(
             DefaultPlugins
                 .set(AssetPlugin {

@@ -1,15 +1,8 @@
 //! The heads-up display and the pause menu.
 //!
-//! Three bands, matching the scene underneath them: a banner across the top
-//! holding the banana count and the rates, the sky and the monkeys in the
-//! middle, and the store dug into the dirt along the bottom.
-//!
-//! Putting the store underground is what makes the unit rows work. As a card in
-//! the top bar it had to share a 1280 px line with a centred readout and a menu
-//! button, which left it ~316 px - not enough for a hire button and three stat
-//! columns, and nowhere near enough at 390. Along the bottom it has the whole
-//! viewport width and room to grow downwards, so a second unit is another row
-//! rather than a layout problem.
+//! Portrait screens use three stacked bands: economy summary, square village,
+//! and tabbed store. Short landscape screens keep the summary at the top and
+//! place the square village beside the store so both remain usable.
 //!
 //! The bar keeps three cells with equal outer widths, because that is what
 //! centres the readout optically. An earlier layout centred it inside a box
@@ -25,7 +18,8 @@ use crate::{
         Staff, SupportRole, Treasury, UnitKind, Workforce, cycle_time, plan_hire,
     },
     game::{
-        BROWN, BROWN_LIGHT, ButtonAction, CREAM, Feedback, GOLD, INK, MUTED, MenuState, SceneLayout,
+        BROWN, BROWN_LIGHT, ButtonAction, CREAM, Feedback, GOLD, INK, MenuState, SceneLayout,
+        UiTouchGesture,
     },
 };
 
@@ -35,6 +29,9 @@ const NARROW_WIDTH: f32 = 600.0;
 /// width and nothing is wasted beside it. Both outer cells carry it - the left
 /// one is an empty spacer whose only job is to keep the banner centred.
 const MENU_BUTTON_WIDTH: f32 = 88.0;
+/// Mobile gives the summary card the room saved by a shorter MENU target.
+/// The button remains wider than the 44 px minimum touch target.
+const MENU_BUTTON_WIDTH_NARROW: f32 = 64.0;
 /// ...except on the very smallest screens, where two 88 px cells and their gaps
 /// leave the banner 112 px and its rate lines wrap mid-number. The button is
 /// still a 56x52 touch target, comfortably above the 44 px floor.
@@ -45,6 +42,8 @@ const TINY_WIDTH: f32 = 360.0;
 fn menu_button_width(viewport_width: f32) -> f32 {
     if viewport_width < TINY_WIDTH {
         MENU_BUTTON_WIDTH_TINY
+    } else if viewport_width < NARROW_WIDTH {
+        MENU_BUTTON_WIDTH_NARROW
     } else {
         MENU_BUTTON_WIDTH
     }
@@ -58,13 +57,6 @@ const BANNER_MAX_WIDTH_DESKTOP: f32 = 360.0;
 const BANNER_MAX_WIDTH_NARROW: f32 = 244.0;
 const COUNTER_FONT_DESKTOP: f32 = 34.0;
 const COUNTER_FONT_NARROW: f32 = 24.0;
-
-/// The dirt runs from `ground_top` to the bottom of the screen, which is a flat
-/// 22% of the viewport height (`ground_top = -0.28 h`). The store is dug into
-/// it, so this fraction is the ceiling on how tall the store can be - and at
-/// 390 px of landscape height that is only 86 px, which is what the compact
-/// padding below exists for.
-const DIRT_FRACTION: f32 = 0.22;
 
 #[derive(Component)]
 pub(crate) struct HudRoot;
@@ -99,13 +91,10 @@ pub(crate) struct Banner;
 #[derive(Component)]
 pub(crate) struct MenuLabel;
 
-/// A shade darker than the dirt sprite behind it, so the store reads as a
-/// cut-away into the soil rather than as a panel lying on top of it.
-const STORE_SOIL: Color = Color::srgb(0.20, 0.10, 0.05);
-/// Column labels underground. The rest of the HUD is dark-on-cream and this one
-/// panel is the reverse, so it needs its own two tones: `INK` and `BROWN_LIGHT`
-/// on soil are within a few percent of the background and simply vanish.
-const STORE_LABEL: Color = Color::srgb(0.68, 0.55, 0.40);
+/// Warm paper tones shared by the mobile store and its cards.
+const STORE_SOIL: Color = Color::srgb(0.97, 0.93, 0.88);
+const STORE_LABEL: Color = Color::srgb(0.50, 0.39, 0.34);
+const STORE_CARD: Color = Color::srgb(0.91, 0.84, 0.80);
 
 #[derive(Component)]
 pub(crate) struct CounterText;
@@ -120,6 +109,60 @@ pub(crate) struct StoreScroll;
 
 #[derive(Component)]
 pub(crate) struct StoreGrip;
+
+#[derive(Component)]
+pub(crate) struct StoreScrollCue;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShopTab {
+    #[default]
+    Monkeys,
+    Buildings,
+    Research,
+}
+
+impl ShopTab {
+    const ALL: [Self; 3] = [Self::Monkeys, Self::Buildings, Self::Research];
+
+    pub(crate) fn previous(self) -> Self {
+        match self {
+            Self::Monkeys => Self::Research,
+            Self::Buildings => Self::Monkeys,
+            Self::Research => Self::Buildings,
+        }
+    }
+
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Monkeys => Self::Buildings,
+            Self::Buildings => Self::Research,
+            Self::Research => Self::Monkeys,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Monkeys => "MONKEYS",
+            Self::Buildings => "BUILDINGS",
+            Self::Research => "RESEARCH",
+        }
+    }
+}
+
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ActiveShopTab(pub(crate) ShopTab);
+
+#[derive(Component)]
+pub(crate) struct TabStrip;
+
+#[derive(Component, Clone, Copy)]
+pub(crate) struct TabLabel(ShopTab);
+
+#[derive(Component, Clone, Copy)]
+pub(crate) struct TabContent(ShopTab);
+
+#[derive(Component)]
+pub(crate) struct StoreBody;
 
 /// Whether the drawer is pulled up. Persisted with the run, so a player who
 /// opened it stays opened.
@@ -272,6 +315,7 @@ pub(crate) fn setup_hud(commands: &mut Commands) {
                 padding: UiRect::axes(px(16), px(16)),
                 ..default()
             },
+            BackgroundColor(Color::srgb(0.94, 0.91, 0.83)),
             Pickable::IGNORE,
             HudRoot,
         ))
@@ -329,8 +373,8 @@ pub(crate) fn setup_hud(commands: &mut Commands) {
                         // line: the inline form needs ~170 px, and a 320 px
                         // phone leaves the middle cell only 136.
                         banner.spawn((
-                            Text::new("BANANAS"),
-                            TextFont::from_font_size(13.0),
+                            Text::new("TOTAL BANANAS"),
+                            TextFont::from_font_size(11.0),
                             TextColor(BROWN_LIGHT),
                         ));
                         banner.spawn((
@@ -346,8 +390,8 @@ pub(crate) fn setup_hud(commands: &mut Commands) {
                                     display: Display::None,
                                     width: percent(100),
                                     padding: UiRect::top(px(6)),
-                                    flex_direction: FlexDirection::Column,
-                                    row_gap: px(2),
+                                    flex_direction: FlexDirection::Row,
+                                    column_gap: px(5),
                                     // A rule under the count rather than a
                                     // second card: the rates explain the number
                                     // above them, so they belong inside it.
@@ -361,16 +405,10 @@ pub(crate) fn setup_hud(commands: &mut Commands) {
                                 // Aligned on the sign so the three lines read
                                 // as arithmetic rather than as three unrelated
                                 // numbers.
-                                spawn_rate_line(panel, RateLine::Farming, "FARMING", INK, false);
-                                spawn_rate_line(
-                                    panel,
-                                    RateLine::Feeding,
-                                    "FEEDING",
-                                    BROWN_LIGHT,
-                                    false,
-                                );
-                                spawn_rate_line(panel, RateLine::Net, "NET", INK, true);
-                                spawn_rate_line(panel, RateLine::Hungry, "HUNGRY", GOLD, false);
+                                spawn_rate_line(panel, RateLine::Farming, "FARMING", INK);
+                                spawn_rate_line(panel, RateLine::Feeding, "FEEDING", BROWN_LIGHT);
+                                spawn_rate_line(panel, RateLine::Net, "GROW AVG", INK);
+                                spawn_rate_line(panel, RateLine::Hungry, "HUNGRY", GOLD);
                             });
                     });
             });
@@ -413,27 +451,8 @@ pub(crate) fn setup_hud(commands: &mut Commands) {
     spawn_store(commands);
 }
 
-/// The store, dug into the dirt along the bottom of the screen.
-///
-/// Dark on dark rather than a cream card: it is underground, and a cream panel
-/// down there read as a UI element that had fallen off the top bar. The gold
-/// rule along its top edge is the cut line through the soil.
-///
-/// A **table**: one header, one line per unit, fixed column widths. The first
-/// shape put each unit's labels inside its own block, which cost 114 of the
-/// 158 px of desktop dirt for a single unit - so the panel overflowed at unit
-/// two - and, worse, defeated its own purpose: comparing a Chef against a
-/// Worker means reading down a column, and every row repeating its own labels
-/// is exactly what stops you doing that.
-///
-/// Measured capacity, from `store_capacity` in the tests: 2 rows in landscape
-/// (86 px of dirt), 2 at 320x640, 3 on a 720p desktop, 3 in portrait, 5 at
-/// 1080p. Enough for the Chef and the Unpacker. It is **not** enough for all
-/// five MVP units on a small screen, and that is the open decision this shape
-/// defers rather than solves: at four units the panel needs either a scroll
-/// region (`Overflow::scroll_y` plus a wheel/drag handler) or a pull-up drawer
-/// that may temporarily cover the sky. Deciding it now, with one unit built,
-/// would be guessing at which.
+/// The persistent tabbed store. Only the offer list scrolls, leaving the tab
+/// strip and its 48 px navigation targets pinned in place.
 fn spawn_store(commands: &mut Commands) {
     commands
         .spawn((
@@ -462,40 +481,127 @@ fn spawn_store(commands: &mut Commands) {
                 ..default()
             },
             BackgroundColor(STORE_SOIL),
-            BorderColor::all(GOLD),
+            BorderColor::all(BROWN),
             // Explicitly below the pause scrim (`GlobalZIndex(100)`). The store
             // is its own UI root rather than a child of the bar, so its
             // stacking would otherwise be decided by spawn order in another
             // function - and a shop that stayed lit while the rest of the scene
             // dimmed would be a lie about what is interactive.
             GlobalZIndex(1),
-            Pickable::IGNORE,
+            Interaction::default(),
             StoreRoot,
         ))
         .with_children(|store| {
             spawn_store_grip(store);
             store
                 .spawn((
-                    StoreScroll,
+                    TabStrip,
                     Node {
                         width: percent(100),
-                        flex_direction: FlexDirection::Column,
                         align_items: AlignItems::Center,
-                        row_gap: px(6),
-                        // A definite bound is what makes the region scrollable
-                        // rather than merely clipped; `apply_store_layout`
-                        // writes it from the drawer's current height.
-                        min_height: px(0),
-                        overflow: Overflow::scroll_y(),
+                        justify_content: JustifyContent::SpaceBetween,
+                        min_height: px(48),
+                        flex_shrink: 0.0,
                         ..default()
                     },
                 ))
-                .with_children(|list| {
-                    spawn_store_header(list);
-                    for unit in Unit::ROWS {
-                        spawn_unit_row(list, unit);
+                .with_children(|tabs| {
+                    spawn_tab_arrow(tabs, ButtonAction::PreviousShopTab, "<");
+                    tabs.spawn((
+                        Node {
+                            flex_grow: 1.0,
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            column_gap: px(10),
+                            ..default()
+                        },
+                        Pickable::IGNORE,
+                    ))
+                    .with_children(|labels| {
+                        for tab in ShopTab::ALL {
+                            labels.spawn((
+                                Text::new(tab.label()),
+                                TextFont::from_font_size(14.0),
+                                TextColor(STORE_LABEL),
+                                TabLabel(tab),
+                            ));
+                        }
+                    });
+                    spawn_tab_arrow(tabs, ButtonAction::NextShopTab, ">");
+                });
+            store
+                .spawn((
+                    StoreBody,
+                    Node {
+                        width: percent(100),
+                        flex_grow: 1.0,
+                        min_height: px(0),
+                        ..default()
+                    },
+                    Pickable::IGNORE,
+                ))
+                .with_children(|body| {
+                    body.spawn((
+                        StoreScroll,
+                        TabContent(ShopTab::Monkeys),
+                        ScrollPosition::default(),
+                        Node {
+                            width: percent(100),
+                            height: percent(100),
+                            flex_direction: FlexDirection::Column,
+                            align_items: AlignItems::Center,
+                            row_gap: px(8),
+                            overflow: Overflow::scroll_y(),
+                            ..default()
+                        },
+                    ))
+                    .with_children(|list| {
+                        spawn_store_header(list);
+                        for unit in Unit::ROWS {
+                            spawn_unit_row(list, unit);
+                        }
+                    });
+                    for tab in [ShopTab::Buildings, ShopTab::Research] {
+                        body.spawn((
+                            TabContent(tab),
+                            Node {
+                                position_type: PositionType::Absolute,
+                                width: percent(100),
+                                height: percent(100),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                display: Display::None,
+                                ..default()
+                            },
+                            Pickable::IGNORE,
+                            children![(
+                                Text::new(format!("{}\nCOMING SOON", tab.label())),
+                                TextFont::from_font_size(19.0),
+                                TextColor(BROWN),
+                                TextLayout::justify(Justify::Center),
+                            )],
+                        ));
                     }
                 });
+            store.spawn((
+                StoreScrollCue,
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: px(18),
+                    bottom: px(4),
+                    padding: UiRect::axes(px(8), px(3)),
+                    border_radius: BorderRadius::all(px(6)),
+                    ..default()
+                },
+                BackgroundColor(CREAM),
+                Visibility::Hidden,
+                Pickable::IGNORE,
+                children![(
+                    Text::new("SCROLL v"),
+                    TextFont::from_font_size(10.0),
+                    TextColor(BROWN),
+                )],
+            ));
         });
     commands
         .spawn((
@@ -514,7 +620,7 @@ fn spawn_store(commands: &mut Commands) {
                 border: UiRect::all(px(3)),
                 ..default()
             },
-            BackgroundColor(STORE_SOIL),
+            BackgroundColor(BROWN),
             BorderColor::all(GOLD),
             GlobalZIndex(20),
         ))
@@ -532,39 +638,66 @@ fn spawn_store(commands: &mut Commands) {
                 InfoText::Body,
             ));
             panel.spawn((
-                Text::new("Click the i button again to close"),
+                Text::new("Tap the i button again to close"),
                 TextFont::from_font_size(11.0),
                 TextColor(STORE_LABEL),
             ));
         });
 }
 
-/// The drawer's handle: a gold bar that reads as something to pull.
-///
-/// The store has no fully closed state. It rests at the height of the dirt it
-/// is dug into, which is the one size that cannot cover the grass, the walking
-/// route or the deposit - so the player can always see and buy *something* -
-/// and pulls up to two thirds when they want to read the whole table. A drawer
-/// that could close entirely would hide the only progression surface in a game
-/// that opens as a manual clicker.
-fn spawn_store_grip(store: &mut ChildSpawnerCommands) {
-    store.spawn((
+fn spawn_tab_arrow(tabs: &mut ChildSpawnerCommands, action: ButtonAction, label: &'static str) {
+    tabs.spawn((
         Button,
-        ButtonAction::ToggleStore,
-        StoreGrip,
+        action,
         Node {
-            width: px(74),
-            height: px(14),
+            width: px(48),
+            min_height: px(48),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
-            flex_shrink: 0.0,
             border: UiRect::all(px(2)),
-            border_radius: BorderRadius::all(px(7)),
+            border_radius: BorderRadius::all(px(8)),
             ..default()
         },
-        BackgroundColor(BROWN_LIGHT),
-        BorderColor::all(GOLD),
+        BackgroundColor(BROWN),
+        BorderColor::all(BROWN_LIGHT),
+        children![(
+            Text::new(label),
+            TextFont::from_font_size(30.0),
+            TextColor(CREAM),
+        )],
     ));
+}
+
+/// The drawer handle. The store stays present at rest and expands over part of
+/// the portrait board when the player wants more room for the list.
+fn spawn_store_grip(store: &mut ChildSpawnerCommands) {
+    store
+        .spawn((
+            Button,
+            ButtonAction::ToggleStore,
+            StoreGrip,
+            Node {
+                width: px(74),
+                height: px(44),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                flex_shrink: 0.0,
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+        ))
+        .with_child((
+            Node {
+                width: px(74),
+                height: px(12),
+                border: UiRect::all(px(2)),
+                border_radius: BorderRadius::all(px(7)),
+                ..default()
+            },
+            BackgroundColor(BROWN_LIGHT),
+            BorderColor::all(GOLD),
+            Pickable::IGNORE,
+        ));
 }
 
 /// Column widths, shared by the header and every unit line. Fixed rather than
@@ -576,7 +709,7 @@ const COL_COST: f32 = 84.0;
 /// purpose, sitting next to COST rather than under the prose DESCRIPTION
 /// cell, so the figure lines up down one column and stays comparable row to
 /// row - a value anchored to a variable-length description would not.
-const COL_RATE: f32 = 84.0;
+const COL_RATE: f32 = 104.0;
 /// The RATE cell's unscaled font size. `apply_store_layout` scales this down
 /// by the same factor it scales `COL_RATE`'s width by, so the cell's longest
 /// word ("TECHNOLOGIST") keeps the fit it has at full size instead of running
@@ -664,10 +797,17 @@ fn spawn_unit_row(store: &mut ChildSpawnerCommands, unit: Unit) {
     store
         .spawn((
             Node {
+                width: percent(100),
+                max_width: px(620),
                 align_items: AlignItems::Center,
                 column_gap: px(COL_GAP),
+                padding: UiRect::axes(px(10), px(8)),
+                border: UiRect::all(px(2)),
+                border_radius: BorderRadius::all(px(10)),
                 ..default()
             },
+            BackgroundColor(STORE_CARD),
+            BorderColor::all(Color::srgb(0.82, 0.72, 0.67)),
             unit,
         ))
         .with_children(|row| {
@@ -681,7 +821,7 @@ fn spawn_unit_row(store: &mut ChildSpawnerCommands, unit: Unit) {
                 children![(
                     Text::new(unit.name()),
                     TextFont::from_font_size(14.0),
-                    TextColor(CREAM),
+                    TextColor(INK),
                     UnitField {
                         unit,
                         stat: UnitStat::Name,
@@ -704,22 +844,35 @@ fn spawn_unit_row(store: &mut ChildSpawnerCommands, unit: Unit) {
                 Node {
                     width: px(COL_DESCRIPTION),
                     flex_shrink: 0.0,
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(2),
                     ..default()
                 },
-                children![(
+            ))
+            .with_children(|details| {
+                details.spawn((
                     Text::new(unit.description()),
                     TextFont::from_font_size(13.0),
-                    TextColor(CREAM),
+                    TextColor(INK),
                     TextLayout::linebreak(LineBreak::WordBoundary),
-                )],
-            ));
+                ));
+                details.spawn((
+                    Text::new("OWNED 0"),
+                    TextFont::from_font_size(11.0),
+                    TextColor(STORE_LABEL),
+                    UnitField {
+                        unit,
+                        stat: UnitStat::Owned,
+                    },
+                ));
+            });
             row.spawn((
                 Button,
                 ButtonAction::Info(unit),
                 TableCell(COL_INFO),
                 Node {
                     width: px(COL_INFO),
-                    min_height: px(34),
+                    min_height: px(44),
                     justify_content: JustifyContent::Center,
                     align_items: AlignItems::Center,
                     flex_shrink: 0.0,
@@ -727,8 +880,8 @@ fn spawn_unit_row(store: &mut ChildSpawnerCommands, unit: Unit) {
                     border_radius: BorderRadius::all(px(7)),
                     ..default()
                 },
-                BackgroundColor(STORE_SOIL),
-                BorderColor::all(GOLD),
+                BackgroundColor(BROWN),
+                BorderColor::all(BROWN_LIGHT),
                 children![(
                     Text::new("i"),
                     TextFont::from_font_size(18.0),
@@ -788,7 +941,7 @@ fn spawn_hire_button(row: &mut ChildSpawnerCommands, unit: Unit, kind: UnitKind)
         TableCell(COL_COST),
         Node {
             width: px(COL_COST),
-            min_height: px(34),
+            min_height: px(44),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             flex_shrink: 0.0,
@@ -819,7 +972,7 @@ fn spawn_locked_plaque(row: &mut ChildSpawnerCommands, unit: Unit) {
         Node {
             display: Display::None,
             width: px(COL_COST),
-            min_height: px(34),
+            min_height: px(44),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             flex_shrink: 0.0,
@@ -866,53 +1019,33 @@ fn spawn_unit_cell(
     }
 }
 
-fn spawn_rate_line(
-    panel: &mut ChildSpawnerCommands,
-    line: RateLine,
-    label: &str,
-    colour: Color,
-    annotated: bool,
-) {
+fn spawn_rate_line(panel: &mut ChildSpawnerCommands, line: RateLine, label: &str, colour: Color) {
     panel.spawn((
         RateLineRow(line),
         Node {
-            width: percent(100),
-            justify_content: JustifyContent::SpaceBetween,
+            flex_grow: 1.0,
+            flex_basis: px(0),
+            min_width: px(0),
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
-            column_gap: px(6),
+            row_gap: px(1),
             ..default()
         },
         children![
             (
                 Text::new(label),
-                TextFont::from_font_size(14.0),
+                TextFont::from_font_size(9.0),
                 TextColor(colour),
             ),
             (
-                Node {
-                    align_items: AlignItems::Baseline,
-                    column_gap: px(5),
-                    ..default()
-                },
-                children![
-                    (
-                        Text::new("+0.0/min"),
-                        TextFont::from_font_size(14.0),
-                        TextColor(colour),
-                        // A rate is one token. Allowed to wrap it breaks after
-                        // the slash, which reads as two numbers.
-                        TextLayout::linebreak(LineBreak::NoWrap),
-                        line,
-                    ),
-                    (
-                        // Demoted so it annotates the net line rather than
-                        // competing with it. Whitepaper §7: without this,
-                        // players report a lumpy treasury as a bug.
-                        Text::new(if annotated { "avg" } else { "" }),
-                        TextFont::from_font_size(11.0),
-                        TextColor(MUTED),
-                    ),
-                ],
+                Text::new("+0.0/min"),
+                TextFont::from_font_size(14.0),
+                TextColor(colour),
+                // A rate is one token. Allowed to wrap it breaks after the
+                // slash, which reads as two numbers.
+                TextLayout::linebreak(LineBreak::NoWrap),
+                line,
             ),
         ],
     ));
@@ -1127,8 +1260,10 @@ pub fn apply_responsive_hud(
     let narrow = layout.viewport.x < NARROW_WIDTH;
     let pad = bar_padding(layout.viewport.x);
     let cell = menu_button_width(layout.viewport.x);
+    let vertical_pad = if layout.short_landscape() { 4.0 } else { pad };
 
-    set_if_changed(&mut root.padding, UiRect::axes(px(pad), px(pad)));
+    set_if_changed(&mut root.height, px(layout.header_height()));
+    set_if_changed(&mut root.padding, UiRect::axes(px(pad), px(vertical_pad)));
     set_if_changed(
         &mut root.column_gap,
         px(if narrow {
@@ -1160,26 +1295,20 @@ pub fn apply_responsive_hud(
         &mut banner.padding,
         UiRect::axes(
             px(if cell < MENU_BUTTON_WIDTH { 10.0 } else { 18.0 }),
-            px(10.0),
+            px(if layout.short_landscape() { 4.0 } else { 10.0 }),
         ),
+    );
+    set_if_changed(
+        &mut banner.row_gap,
+        px(if layout.short_landscape() { 2.0 } else { 6.0 }),
     );
 }
 
-/// Fit the drawer to the dirt it is dug into, or to two thirds of the screen
-/// when the player has pulled it up.
-///
-/// At rest the store may not grow up onto the grass: a shop panel overlapping
-/// the ground line reads as a rendering fault, and it would cover the monkeys
-/// the player is there to watch. `DIRT_FRACTION` is derived from the same
-/// `ground_top` the scene is laid out against, so the two cannot drift.
-///
-/// That resting height fits two to three rows, which is fewer than the table
-/// has. The rest are reached by scrolling, or by pulling the drawer up - a
-/// deliberate act the player can undo, and the one state that is allowed to
-/// cover the scene. Landscape is the binding case: 390 px of height leaves the
-/// dirt 86 px, and a full row needs about 100, so below `COMPACT_DIRT` the panel
-/// drops its heading and shortens its buttons rather than spilling over.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+/// Partition the viewport with the same measurements used by the world scene.
+/// Portrait stacks the store below the square. Short landscape puts the store
+/// to its right. Expanding the portrait drawer is the only state allowed to
+/// cover part of the board.
+#[allow(clippy::type_complexity)]
 pub fn apply_store_layout(
     layout: Res<SceneLayout>,
     expanded: Res<StoreExpanded>,
@@ -1188,17 +1317,8 @@ pub fn apply_store_layout(
         (
             With<StoreRoot>,
             Without<StoreHeading>,
-            Without<OptionalColumn>,
+            Without<TableCell>,
             Without<StoreScroll>,
-        ),
-    >,
-    mut scroll: Single<
-        &mut Node,
-        (
-            With<StoreScroll>,
-            Without<StoreRoot>,
-            Without<StoreHeading>,
-            Without<OptionalColumn>,
         ),
     >,
     mut heading: Single<
@@ -1206,7 +1326,7 @@ pub fn apply_store_layout(
         (
             With<StoreHeading>,
             Without<StoreRoot>,
-            Without<OptionalColumn>,
+            Without<TableCell>,
             Without<StoreScroll>,
         ),
     >,
@@ -1218,95 +1338,64 @@ pub fn apply_store_layout(
             Without<StoreScroll>,
         ),
     >,
-    // Measured rather than assumed. The first version of this hard-coded a row
-    // pitch and a header height read off a screenshot's *baselines*, which are
-    // not box heights - the header came out 9 px short and the "peek" below
-    // grew into two thirds of a row of legible text, which is exactly the
-    // mid-row fold the quantising was added to prevent.
-    heading_size: Single<&ComputedNode, With<StoreHeading>>,
-    row_sizes: Query<&ComputedNode, With<Unit>>,
+    mut scroll: Single<
+        (&mut ScrollPosition, &ComputedNode),
+        (
+            With<StoreScroll>,
+            Without<StoreRoot>,
+            Without<StoreHeading>,
+            Without<TableCell>,
+        ),
+    >,
+    mut grip: Single<
+        &mut Node,
+        (
+            With<StoreGrip>,
+            Without<StoreRoot>,
+            Without<StoreHeading>,
+            Without<TableCell>,
+            Without<StoreScroll>,
+        ),
+    >,
+    mut scroll_cue: Single<&mut Visibility, With<StoreScrollCue>>,
     mut rate_fonts: Query<(&UnitField, &mut TextFont)>,
 ) {
-    /// Below this much soil the header row is the first thing to go. A unit
-    /// line is self-describing enough without it - "+6.0/min", "1.5/trip" - and
-    /// it buys back a whole unit's worth of height in landscape.
-    const COMPACT_DIRT: f32 = 120.0;
-    /// How much of the screen the drawer covers when pulled up. Two thirds
-    /// leaves the sky and the tops of both zones visible, so the scene is still
-    /// recognisably there behind the shop.
-    const EXPANDED_FRACTION: f32 = 2.0 / 3.0;
-    /// The grip's height plus its border, which the scroll region does not get.
-    const GRIP_HEIGHT: f32 = 18.0;
-    /// Fallbacks for the first frame, before anything has been measured.
-    const ROW_FALLBACK: f32 = 34.0;
-    const HEADER_FALLBACK: f32 = 14.0;
-    /// How much of the next row to leave showing under the clip.
-    ///
-    /// The store is soil-on-soil with no scrollbar, so a list that ends flush
-    /// with the panel edge looks finished rather than scrollable. A sliver of
-    /// the next row's gold button border is the universal "there is more" tell,
-    /// and it is the reason the height below is quantised at all: clipped to an
-    /// arbitrary fraction, the fold lands through the middle of a row's text
-    /// and reads as a rendering fault instead of an affordance.
-    const PEEK: f32 = 8.0;
-
-    let dirt = layout.viewport.y * DIRT_FRACTION;
-    let target = if expanded.0 {
-        (layout.viewport.y * EXPANDED_FRACTION).max(dirt)
+    let base_height = layout.store_height();
+    let target_height = if expanded.0 && !layout.short_landscape() {
+        base_height.max(layout.viewport.y * 0.68)
     } else {
-        dirt
+        base_height
     };
-    let compact = target < COMPACT_DIRT;
-    let pad = bar_padding(layout.viewport.x);
-    let vertical = if compact { 4.0 } else { 10.0 };
-    let gap = if compact { 4.0 } else { 6.0 };
-
-    // Floor *and* ceiling. The store is dug into the dirt, so its gold top edge
-    // is the cut line through the soil and has to sit exactly on the ground
-    // line - if the panel shrinks to fit a short list it slides down and
-    // uncovers the serrated grass-to-dirt seam in the background art, which
-    // reads as a torn sprite. The floor keeps it pinned; the ceiling is what
-    // stops it climbing onto the grass.
-    set_if_changed(&mut store.min_height, px(dirt));
-    set_if_changed(&mut store.max_height, px(target));
-    set_if_changed(&mut store.padding, UiRect::axes(px(pad), px(vertical)));
-    set_if_changed(&mut store.row_gap, px(gap));
-    // A definite bound is what makes the region scroll rather than merely clip.
-    // Quantised to whole rows plus a peek, so the fold never cuts through text.
-    let measured = |size: f32, fallback: f32| if size > 0.0 { size } else { fallback };
-    let row_height = measured(
-        row_sizes
-            .iter()
-            .map(|node| node.size().y * node.inverse_scale_factor)
-            .fold(0.0, f32::max),
-        ROW_FALLBACK,
-    ) + gap;
-    let header_height = if compact {
-        0.0
+    let pad = if layout.store_width() < NARROW_WIDTH {
+        8.0
     } else {
-        measured(
-            heading_size.size().y * heading_size.inverse_scale_factor,
-            HEADER_FALLBACK,
-        ) + gap
+        14.0
     };
 
-    let available = (target - GRIP_HEIGHT - vertical * 2.0).max(0.0);
-    let body = (available - header_height).max(0.0);
-    let whole_rows = (body / row_height).floor().max(1.0);
-    let list = header_height
-        + if whole_rows * row_height + PEEK <= body {
-            // Room for a clean peek at the next row.
-            whole_rows * row_height + PEEK
+    set_if_changed(&mut store.width, px(layout.store_width()));
+    set_if_changed(&mut store.height, px(target_height));
+    set_if_changed(&mut store.min_height, px(0));
+    set_if_changed(&mut store.max_height, px(target_height));
+    set_if_changed(
+        &mut store.left,
+        px(if layout.short_landscape() {
+            layout.scene_side()
         } else {
-            whole_rows * row_height
-        };
-    // A *definite* height, not a maximum. `max_height` lets the node size to its
-    // content and overflow, in which case the only thing still clipping is the
-    // panel's own `clip_y` - at the panel edge, through the middle of whatever
-    // row happens to be there. Capped at the content so a short list does not
-    // leave a band of empty soil under it.
-    let content = header_height + Unit::ROWS.len() as f32 * row_height;
-    set_if_changed(&mut scroll.height, px(list.min(available).min(content)));
+            0.0
+        }),
+    );
+    set_if_changed(&mut store.padding, UiRect::axes(px(pad), px(6)));
+    set_if_changed(&mut store.row_gap, px(5));
+    set_if_changed(
+        &mut grip.display,
+        if layout.short_landscape() {
+            Display::None
+        } else {
+            Display::Flex
+        },
+    );
+
+    let compact = target_height < 220.0;
     set_if_changed(
         &mut heading.display,
         if compact {
@@ -1316,10 +1405,7 @@ pub fn apply_store_layout(
         },
     );
 
-    // Drop the EATS column when the full table will not fit, then scale what is
-    // left to whatever room remains. Both are applied to header and value cells
-    // through the same component, so the two can never disagree about a column.
-    let room = layout.viewport.x - 2.0 * pad;
+    let room = layout.store_width() - 2.0 * pad - 20.0;
     let scale = column_scale(room);
     for (cell, optional, mut node) in &mut cells {
         let shown = optional.is_none();
@@ -1338,9 +1424,21 @@ pub fn apply_store_layout(
     // any smaller scale, because both shrink together.
     for (field, mut font) in &mut rate_fonts {
         if matches!(field.stat, UnitStat::Gain) {
-            set_if_changed(&mut font.font_size, FontSize::Px(RATE_FONT_SIZE * scale));
+            set_if_changed(
+                &mut font.font_size,
+                FontSize::Px((RATE_FONT_SIZE * scale).max(10.0)),
+            );
         }
     }
+
+    let (position, node) = &mut *scroll;
+    let overflow = (node.content_size().y - node.size().y).max(0.0);
+    position.y = position.y.clamp(0.0, overflow);
+    **scroll_cue = if layout.short_landscape() && overflow > 1.0 {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
 }
 
 /// Wheel and drag scrolling for the drawer.
@@ -1350,6 +1448,10 @@ pub fn apply_store_layout(
 /// of them in landscape.
 pub fn scroll_store(
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    window: Single<&Window, With<bevy::window::PrimaryWindow>>,
+    store: Single<(&ComputedNode, &UiGlobalTransform), With<StoreRoot>>,
+    active: Res<ActiveShopTab>,
+    menu: Res<MenuState>,
     mut scroll: Single<(&mut ScrollPosition, &ComputedNode), With<StoreScroll>>,
 ) {
     /// A wheel notch in `Line` mode carries a small number of lines, not pixels.
@@ -1362,7 +1464,13 @@ pub fn scroll_store(
             bevy::input::mouse::MouseScrollUnit::Pixel => event.y,
         })
         .sum();
-    if delta == 0.0 {
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let center = store.1.translation * store.0.inverse_scale_factor;
+    let size = store.0.size() * store.0.inverse_scale_factor;
+    let hovered = crate::game::contains_inclusive(Rect::from_center_size(center, size), cursor);
+    if delta == 0.0 || !hovered || active.0 != ShopTab::Monkeys || *menu != MenuState::Closed {
         return;
     }
 
@@ -1371,6 +1479,89 @@ pub fn scroll_store(
     let next = (position.y - delta).clamp(0.0, overflow);
     if position.y != next {
         position.y = next;
+    }
+}
+
+pub fn handle_store_gesture(
+    mut gesture: ResMut<UiTouchGesture>,
+    menu: Res<MenuState>,
+    mut active: ResMut<ActiveShopTab>,
+    mut info: ResMut<InfoOpen>,
+    tab_strip: Single<(&ComputedNode, &UiGlobalTransform), With<TabStrip>>,
+    mut scroll: Single<(&mut ScrollPosition, &ComputedNode, &UiGlobalTransform), With<StoreScroll>>,
+) {
+    if *menu != MenuState::Closed || gesture.canceled {
+        gesture.consumed |= gesture.canceled;
+        return;
+    }
+    let bounds = |node: &ComputedNode, transform: &UiGlobalTransform| {
+        Rect::from_center_size(
+            transform.translation * node.inverse_scale_factor,
+            node.size() * node.inverse_scale_factor,
+        )
+    };
+    let distance = gesture.position - gesture.start;
+    let moved = distance.length() > 10.0;
+    let in_tabs = crate::game::contains_inclusive(bounds(tab_strip.0, tab_strip.1), gesture.start);
+    let in_list = crate::game::contains_inclusive(bounds(scroll.1, scroll.2), gesture.start);
+
+    if in_tabs && moved && distance.x.abs() > distance.y.abs() * 1.15 {
+        gesture.consumed = true;
+        if gesture.just_released && distance.x.abs() >= 44.0 {
+            active.0 = if distance.x < 0.0 {
+                active.0.next()
+            } else {
+                active.0.previous()
+            };
+            info.0 = None;
+        }
+    } else if in_list && moved {
+        // A list drag owns the gesture even when it begins slightly diagonal.
+        // That is what prevents touch-start over a row from becoming a hire.
+        gesture.consumed = true;
+        if active.0 == ShopTab::Monkeys && distance.y.abs() >= distance.x.abs() * 0.75 {
+            let overflow = (scroll.1.content_size().y - scroll.1.size().y).max(0.0);
+            let delta = gesture.position.y - gesture.previous.y;
+            scroll.0.y = (scroll.0.y - delta).clamp(0.0, overflow);
+        }
+    }
+}
+
+pub fn sync_shop_tabs(
+    active: Res<ActiveShopTab>,
+    layout: Res<SceneLayout>,
+    mut labels: Query<(&TabLabel, &mut TextColor, &mut TextFont)>,
+    mut contents: Query<(&TabContent, &mut Node)>,
+    mut scroll: Single<&mut ScrollPosition, With<StoreScroll>>,
+) {
+    for (label, mut colour, mut font) in &mut labels {
+        let wanted = if label.0 == active.0 {
+            BROWN
+        } else {
+            STORE_LABEL
+        };
+        set_if_changed(&mut colour.0, wanted);
+        set_if_changed(
+            &mut font.font_size,
+            FontSize::Px(if layout.store_width() < 400.0 {
+                10.0
+            } else {
+                14.0
+            }),
+        );
+    }
+    for (content, mut node) in &mut contents {
+        set_if_changed(
+            &mut node.display,
+            if content.0 == active.0 {
+                Display::Flex
+            } else {
+                Display::None
+            },
+        );
+    }
+    if active.is_changed() {
+        scroll.y = 0.0;
     }
 }
 
@@ -1390,11 +1581,25 @@ pub fn sync_menu_visibility(menu: Res<MenuState>, mut views: Query<(&MenuView, &
     }
 }
 
+fn signed_per_minute(rate_per_second: f64) -> String {
+    let rate_per_minute = rate_per_second * 60.0;
+    let displayed = if rate_per_minute.abs() < 0.05 {
+        0.0
+    } else {
+        rate_per_minute
+    };
+    format!("{displayed:+.1}/min")
+}
+
+fn technologist_research_per_sec(multipliers: Multipliers) -> f64 {
+    RESEARCH_PER_TECHNOLOGIST * multipliers.speed
+}
+
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn sync_readout(
     layout: Res<SceneLayout>,
     treasury: Res<Treasury>,
-    workforce: Res<Workforce>,
+    _workforce: Res<Workforce>,
     snapshot: Res<EconomySnapshot>,
     feedback: Res<Feedback>,
     mut counter: Single<(&mut Text, &mut TextFont), With<CounterText>>,
@@ -1402,7 +1607,9 @@ pub fn sync_readout(
     mut rows: Query<(&RateLineRow, &mut Node), Without<RatePanel>>,
     mut lines: Query<(&RateLine, &mut Text, &mut TextFont), Without<CounterText>>,
 ) {
-    let base = if layout.viewport.x < NARROW_WIDTH {
+    let base = if layout.short_landscape() {
+        22.0
+    } else if layout.viewport.x < NARROW_WIDTH {
         COUNTER_FONT_NARROW
     } else {
         COUNTER_FONT_DESKTOP
@@ -1413,18 +1620,11 @@ pub fn sync_readout(
         FontSize::Px(base + feedback.pulse * base * 0.2),
     );
 
-    // Before the first hire there is no production to explain, and three zeroed
-    // lines would be noise on an otherwise clean opening screen. Staff count as
-    // a hire: a player who hand-harvests their way to a Chef before a Worker
-    // has a wage bill and nothing else on screen that would say so.
-    let show = workforce.count() > 0 || snapshot.staff > 0;
+    set_if_changed(&mut panel.display, Display::Flex);
     set_if_changed(
-        &mut panel.display,
-        if show { Display::Flex } else { Display::None },
+        &mut panel.padding,
+        UiRect::top(px(if layout.short_landscape() { 2.0 } else { 6.0 })),
     );
-    if !show {
-        return;
-    }
 
     for (row, mut node) in &mut rows {
         // Every line is permanent except HUNGRY, which appears only when it has
@@ -1439,12 +1639,14 @@ pub fn sync_readout(
     // Three steps, not two. The rates were sized when a lone worker read
     // "+6.0/min"; a staffed economy reads "+85.7/min", which is wide enough to
     // wrap inside a 390 px banner and break as "+85.7/" over "min".
-    let rate_font = if layout.viewport.x < TINY_WIDTH {
-        11.0
+    let rate_font = if layout.short_landscape() {
+        9.0
+    } else if layout.viewport.x < TINY_WIDTH {
+        9.0
     } else if layout.viewport.x < NARROW_WIDTH {
-        12.0
+        10.0
     } else {
-        14.0
+        11.0
     };
     for (line, mut text, mut font) in &mut lines {
         set_if_changed(&mut font.font_size, FontSize::Px(rate_font));
@@ -1475,7 +1677,7 @@ pub fn sync_readout(
         // are three numbers a player has to squint at and multiply to make any
         // use of; per minute they are +6.0, -1.8 and +4.2, and the arithmetic
         // reads off the panel.
-        set_if_changed(&mut text.0, format!("{:+.1}/min", per_second * 60.0));
+        set_if_changed(&mut text.0, signed_per_minute(per_second));
     }
 }
 
@@ -1510,8 +1712,8 @@ pub fn sync_shop_new(
         multipliers: *multipliers,
     };
     let cart_locked = research.level() < CART_TECH_REQUIREMENT;
-    let locked = |unit: Unit| matches!(unit, Unit::Cart) && cart_locked;
     let (into_level, level_cost) = research.progress();
+    let locked = |unit: Unit| matches!(unit, Unit::Cart) && cart_locked;
     let lit: Vec<Unit> = buttons
         .iter()
         .filter(|(_, i, ..)| matches!(i, Interaction::Hovered | Interaction::Pressed))
@@ -1542,44 +1744,37 @@ pub fn sync_shop_new(
                 GOLD
             } else if matches!(field.stat, UnitStat::Gain) && plan.gain_per_min < 0.0 {
                 BROWN_LIGHT
+            } else if matches!(field.stat, UnitStat::Price) {
+                STORE_LABEL
             } else {
-                CREAM
+                INK
             },
         );
-        set_if_changed(
-            &mut text.0,
-            match field.stat {
-                UnitStat::Name => field.unit.name().to_string(),
-                UnitStat::Price if cart_locked && matches!(field.unit, Unit::Cart) => String::new(),
-                UnitStat::Price => format!("{:.1}", plan.cost),
-                // The locked Cart's row carries D22's research progress here
-                // instead of a rate: naming the Technologist, not "cart
-                // technology", because the Technologist is the row directly
-                // above with a button on it. Explicit `\n` rather than relying
-                // on word-wrap: this cell is `NoWrap` (see `spawn_rate_cell`),
-                // so these are the only line breaks either string gets.
-                UnitStat::Gain if cart_locked && matches!(field.unit, Unit::Cart) => {
-                    if staff.count(SupportRole::Technologist) == 0 {
-                        "NEEDS A\nTECHNOLOGIST".to_string()
-                    } else {
-                        format!("RESEARCH\n{into_level:.0}/{level_cost:.0}")
-                    }
+        let owned = match field.unit {
+            Unit::Worker => workforce.count(),
+            Unit::Support(role) => staff.count(role),
+            Unit::Cart => carts.owned(),
+        };
+        let value = match (field.stat, field.unit) {
+            (UnitStat::Name, _) => field.unit.name().to_string(),
+            (UnitStat::Price, Unit::Cart) if cart_locked => String::new(),
+            (UnitStat::Price, _) => format!("{:.1}", plan.cost),
+            (UnitStat::Owned, Unit::Cart) if cart_locked => String::new(),
+            (UnitStat::Owned, _) => format!("OWNED {owned}"),
+            (UnitStat::Gain, Unit::Cart) if cart_locked => {
+                if staff.count(SupportRole::Technologist) == 0 {
+                    "NEEDS A TECHNOLOGIST".to_string()
+                } else {
+                    format!("RESEARCH {into_level:.0}/{level_cost:.0}")
                 }
-                // Live, not the bare 1.0 RES/s constant: Chefs feed the
-                // researchers too (whitepaper §8), so a fed Technologist's
-                // real rate is `RESEARCH_PER_TECHNOLOGIST * M_speed`.
-                UnitStat::Gain
-                    if matches!(field.unit, Unit::Support(SupportRole::Technologist)) =>
-                {
-                    format!("{:.1} RES/s", RESEARCH_PER_TECHNOLOGIST * multipliers.speed)
-                }
-                // Per minute, like the readout above. Recomputed every tick
-                // (D21): what this unit is worth is what it makes everybody
-                // else produce right now, not a static per-unit effect.
-                UnitStat::Gain => format!("{:+.1}/min", plan.gain_per_min),
-                _ => String::new(),
-            },
-        );
+            }
+            (UnitStat::Gain, Unit::Support(SupportRole::Technologist)) => {
+                format!("{:.1}\nRES/s", technologist_research_per_sec(*multipliers))
+            }
+            (UnitStat::Gain, _) => format!("{:+.1}/min", plan.gain_per_min),
+            (UnitStat::Feeding, _) => String::new(),
+        };
+        set_if_changed(&mut text.0, value);
     }
     for (plaque, mut node) in &mut plaques {
         set_if_changed(
@@ -1594,7 +1789,7 @@ pub fn sync_shop_new(
     for (button, interaction, mut background, mut border, mut node) in &mut buttons {
         let affordable = plan_hire(button.0.kind(), world).affordable && !locked(button.0);
         let (fill, edge) = if !affordable {
-            (STORE_SOIL, STORE_LABEL)
+            (STORE_CARD, STORE_LABEL)
         } else {
             match interaction {
                 Interaction::Pressed | Interaction::Hovered => (GOLD, CREAM),
@@ -1698,6 +1893,7 @@ pub fn style_buttons(
         (
             With<ButtonAction>,
             Without<HireButton>,
+            Without<StoreGrip>,
             Changed<Interaction>,
         ),
     >,
@@ -1728,33 +1924,6 @@ pub fn style_buttons(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Height the store needs, from the constants that decide it.
-    ///
-    /// A model, not a measurement - Bevy's text layout is not available here.
-    /// It is deliberately pessimistic (1.4x line height) so it fails before the
-    /// real thing overflows, and it is the only guard that couples the store's
-    /// content to the band it has to live in.
-    fn modelled_store_height(dirt: f32, units: u32) -> f32 {
-        let compact = dirt < 120.0;
-        let line = |font: f32| font * 1.4;
-
-        let pad = if compact { 4.0 } else { 10.0 };
-        let gap = if compact { 4.0 } else { 6.0 };
-        // One line per unit, its height set by the hire button.
-        let row: f32 = 34.0_f32.max(line(14.0));
-        let header = if compact { 0.0 } else { line(10.0) + gap };
-
-        3.0 + pad * 2.0 + header + units as f32 * row + (units.saturating_sub(1)) as f32 * gap
-    }
-
-    /// How many units the store can show before it runs out of dirt.
-    fn store_capacity(dirt: f32) -> u32 {
-        (1..=8)
-            .take_while(|units| modelled_store_height(dirt, *units) <= dirt)
-            .last()
-            .unwrap_or(0)
-    }
 
     #[test]
     fn the_banner_stays_centred_and_fits_at_every_viewport() {
@@ -1792,10 +1961,7 @@ mod tests {
     }
 
     #[test]
-    fn the_store_stays_underground_at_every_viewport() {
-        // The store is dug into the dirt. If it were ever taller than the dirt
-        // band it would cover the ground line and the monkeys walking along it,
-        // which reads as a rendering fault rather than as a design.
+    fn board_and_store_partition_every_supported_viewport() {
         for (width, height) in [
             (320.0, 640.0),
             (390.0, 844.0),
@@ -1804,33 +1970,46 @@ mod tests {
             (1920.0, 1080.0),
         ] {
             let layout = SceneLayout::for_viewport(Vec2::new(width, height));
-            let dirt_top_from_bottom = layout.viewport.y * 0.5 + layout.ground_top();
-
             assert!(
-                (dirt_top_from_bottom - layout.viewport.y * DIRT_FRACTION).abs() < 0.5,
-                "{width}x{height}: dirt is {dirt_top_from_bottom}, not \
-                 {DIRT_FRACTION} of the viewport"
+                layout.scene_side() >= 260.0,
+                "{width}x{height}: board too small"
             );
-            // ...and, more to the point, that what the store puts in the band
-            // fits inside it. The geometry assertion above passes happily while
-            // the content overflows, which is exactly what it did: `max_height`
-            // bounds the node's own box and nothing else, so rows painted up
-            // over the grass and the monkeys. `Overflow::clip_y` is the
-            // backstop; this is the check that stops it ever being needed.
-            let dirt = layout.viewport.y * DIRT_FRACTION;
             assert!(
-                modelled_store_height(dirt, 1) <= dirt,
-                "{width}x{height}: store models {} px into {dirt} px of dirt",
-                modelled_store_height(dirt, 1)
+                layout.store_height() >= 150.0,
+                "{width}x{height}: store too short"
             );
-            // The shape that preceded this one used 114 of 158 px for a single
-            // unit and overflowed at the second. The table has to leave room
-            // for the Chef, which is the next unit due.
-            assert!(
-                store_capacity(dirt) >= 2,
-                "{width}x{height}: only {} unit rows fit",
-                store_capacity(dirt)
-            );
+            if layout.short_landscape() {
+                assert_eq!(layout.scene_side() + layout.store_width(), width);
+            } else {
+                assert!(
+                    (layout.header_height() + layout.scene_side() + layout.store_height() - height)
+                        .abs()
+                        < 0.01
+                );
+            }
         }
+    }
+
+    #[test]
+    fn tabs_cycle_in_both_directions() {
+        assert_eq!(ShopTab::Monkeys.next(), ShopTab::Buildings);
+        assert_eq!(ShopTab::Buildings.next(), ShopTab::Research);
+        assert_eq!(ShopTab::Research.next(), ShopTab::Monkeys);
+        assert_eq!(ShopTab::Monkeys.previous(), ShopTab::Research);
+        assert_eq!(ShopTab::Research.previous(), ShopTab::Buildings);
+        assert_eq!(ShopTab::Buildings.previous(), ShopTab::Monkeys);
+    }
+
+    #[test]
+    fn displayed_rates_normalize_zero_and_follow_chef_speed() {
+        assert_eq!(signed_per_minute(-0.0), "+0.0/min");
+        let multipliers = crate::domain::multipliers_for(
+            FedStaff {
+                chefs: 2,
+                ..default()
+            },
+            Research::default(),
+        );
+        assert!((technologist_research_per_sec(multipliers) - 1.3).abs() < 1e-9);
     }
 }
