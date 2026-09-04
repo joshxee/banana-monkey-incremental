@@ -36,7 +36,6 @@ const FLOATER_RISE: f32 = 78.0;
 pub(crate) const INK: Color = Color::srgb(0.16, 0.08, 0.06);
 pub(crate) const CREAM: Color = Color::srgb(1.0, 0.94, 0.72);
 pub(crate) const BROWN: Color = Color::srgb(0.33, 0.14, 0.08);
-pub(crate) const BROWN_LIGHT: Color = Color::srgb(0.52, 0.25, 0.12);
 pub(crate) const GOLD: Color = Color::srgb(1.0, 0.75, 0.05);
 pub(crate) const MUTED: Color = Color::srgb(0.55, 0.47, 0.36);
 
@@ -100,7 +99,6 @@ impl Plugin for HarvestGamePlugin {
             .init_resource::<PersistenceDirty>()
             .init_resource::<Feedback>()
             .init_resource::<MenuState>()
-            .init_resource::<hud::StoreExpanded>()
             .init_resource::<hud::ActiveShopTab>()
             .init_resource::<hud::InfoOpen>()
             .init_resource::<UiTouchGesture>()
@@ -204,7 +202,6 @@ impl Plugin for HarvestGamePlugin {
                     hud::sync_shop_tabs,
                     hud::sync_shop_new,
                     hud::sync_info,
-                    hud::style_buttons,
                 )
                     .in_set(Present::Render),
             )
@@ -269,7 +266,6 @@ pub(crate) enum ButtonAction {
     OpenMenu,
     Hire(UnitKind),
     Info(hud::Unit),
-    ToggleStore,
     PreviousShopTab,
     NextShopTab,
     Resume,
@@ -282,7 +278,6 @@ pub(crate) enum ButtonAction {
 
 #[derive(bevy::ecs::system::SystemParam)]
 struct MenuPanels<'w> {
-    store_expanded: ResMut<'w, hud::StoreExpanded>,
     info_open: ResMut<'w, hud::InfoOpen>,
     active_tab: ResMut<'w, hud::ActiveShopTab>,
 }
@@ -296,7 +291,6 @@ impl ButtonAction {
             ButtonAction::OpenMenu
             | ButtonAction::Hire(_)
             | ButtonAction::Info(_)
-            | ButtonAction::ToggleStore
             | ButtonAction::PreviousShopTab
             | ButtonAction::NextShopTab => menu == MenuState::Closed,
             ButtonAction::Resume | ButtonAction::Restart => menu == MenuState::Open,
@@ -756,6 +750,7 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    asset_server: Res<AssetServer>,
 ) {
     commands.spawn((Camera2d, MainCamera));
 
@@ -820,8 +815,8 @@ fn setup(
         LayoutElement::DepositLabel,
     ));
 
-    hud::setup_hud(&mut commands);
-    hud::setup_menu(&mut commands);
+    hud::setup_hud(&mut commands, &asset_server);
+    hud::setup_menu(&mut commands, &asset_server);
 }
 
 fn refresh_layout(window: Single<&Window, With<PrimaryWindow>>, mut layout: ResMut<SceneLayout>) {
@@ -1435,11 +1430,6 @@ fn handle_menu(
             {
                 hire_requests.0.push(kind);
                 pointer_guard.suppress_hire_for = HIRE_DEBOUNCE_SECONDS;
-            }
-            ButtonAction::ToggleStore
-                if *menu == MenuState::Closed && panels.info_open.0.is_none() =>
-            {
-                panels.store_expanded.0 = !panels.store_expanded.0;
             }
             ButtonAction::PreviousShopTab if *menu == MenuState::Closed => {
                 panels.active_tab.0 = panels.active_tab.0.previous();
@@ -2179,7 +2169,6 @@ struct TestButtons {
     hire_unpacker: TestPoint,
     hire_technologist: TestPoint,
     hire_cart: TestPoint,
-    toggle_store: TestPoint,
     previous_tab: TestPoint,
     next_tab: TestPoint,
     resume: TestPoint,
@@ -2249,7 +2238,6 @@ struct TestState {
     cart_can_hire: bool,
     /// Workers still walking the route: hired, less everyone aboard a cart.
     pool: u32,
-    store_expanded: bool,
     selected_tab: &'static str,
     store_scroll: f32,
     buttons: TestButtons,
@@ -2273,7 +2261,6 @@ struct EconomyView<'w> {
     snapshot: Res<'w, EconomySnapshot>,
     research: Res<'w, Research>,
     carts: Res<'w, Carts>,
-    store_expanded: Res<'w, hud::StoreExpanded>,
     active_tab: Res<'w, hud::ActiveShopTab>,
 }
 
@@ -2307,7 +2294,6 @@ fn sync_web_test_state(
         snapshot,
         research,
         carts,
-        store_expanded,
         active_tab,
     } = economy;
 
@@ -2324,7 +2310,7 @@ fn sync_web_test_state(
 
     // One slot per button, so four hire buttons cannot collapse onto each
     // other and leave the suite clicking whichever row happened to be last.
-    let mut button_centers = [Vec2::ZERO; 14];
+    let mut button_centers = [Vec2::ZERO; 13];
     for (action, node, transform) in &buttons {
         let index = match action {
             ButtonAction::OpenMenu => 0,
@@ -2333,15 +2319,14 @@ fn sync_web_test_state(
             ButtonAction::Hire(UnitKind::Support(SupportRole::Chef)) => 2,
             ButtonAction::Hire(UnitKind::Support(SupportRole::Unpacker)) => 3,
             ButtonAction::Hire(UnitKind::Support(SupportRole::Technologist)) => 4,
-            ButtonAction::Hire(UnitKind::Cart) => 11,
-            ButtonAction::ToggleStore => 5,
-            ButtonAction::PreviousShopTab => 12,
-            ButtonAction::NextShopTab => 13,
-            ButtonAction::Resume => 6,
-            ButtonAction::Diagnostics => 7,
-            ButtonAction::Restart => 8,
-            ButtonAction::ConfirmRestart => 9,
-            ButtonAction::CancelRestart => 10,
+            ButtonAction::Resume => 5,
+            ButtonAction::Diagnostics => 6,
+            ButtonAction::Restart => 7,
+            ButtonAction::ConfirmRestart => 8,
+            ButtonAction::CancelRestart => 9,
+            ButtonAction::Hire(UnitKind::Cart) => 10,
+            ButtonAction::PreviousShopTab => 11,
+            ButtonAction::NextShopTab => 12,
         };
         button_centers[index] = transform.translation * node.inverse_scale_factor;
     }
@@ -2445,7 +2430,6 @@ fn sync_web_test_state(
         cart_cost: plan_for(UnitKind::Cart).cost,
         cart_can_hire: plan_for(UnitKind::Cart).affordable,
         pool: workforce.count().saturating_sub(carts.crewed()),
-        store_expanded: store_expanded.0,
         selected_tab: active_tab.0.label(),
         store_scroll: store_scroll.y,
         buttons: TestButtons {
@@ -2454,15 +2438,14 @@ fn sync_web_test_state(
             hire_chef: point(button_centers[2]),
             hire_unpacker: point(button_centers[3]),
             hire_technologist: point(button_centers[4]),
-            toggle_store: point(button_centers[5]),
-            previous_tab: point(button_centers[12]),
-            next_tab: point(button_centers[13]),
-            hire_cart: point(button_centers[11]),
-            resume: point(button_centers[6]),
-            logs: point(button_centers[7]),
-            restart: point(button_centers[8]),
-            confirm_restart: point(button_centers[9]),
-            cancel_restart: point(button_centers[10]),
+            previous_tab: point(button_centers[11]),
+            next_tab: point(button_centers[12]),
+            hire_cart: point(button_centers[10]),
+            resume: point(button_centers[5]),
+            logs: point(button_centers[6]),
+            restart: point(button_centers[7]),
+            confirm_restart: point(button_centers[8]),
+            cancel_restart: point(button_centers[9]),
         },
     };
 

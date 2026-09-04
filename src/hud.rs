@@ -1,15 +1,26 @@
 //! The heads-up display and the pause menu.
 //!
 //! Portrait screens use three stacked bands: economy summary, square village,
-//! and tabbed store. Short landscape screens keep the summary at the top and
+//! and a tabbed store. Short landscape screens keep the summary at the top and
 //! place the square village beside the store so both remain usable.
 //!
 //! The bar keeps three cells with equal outer widths, because that is what
 //! centres the readout optically. An earlier layout centred it inside a box
 //! carrying 110 px of right padding, which put it visibly off-centre against a
 //! symmetric scene.
+//!
+//! Colour, border, radius and interaction state (hover/press/affordability)
+//! live in `assets/style/hud.css`, applied through `bevy_flair`'s `Styled`
+//! component and toggled with `ClassList`. Viewport-responsive *numbers*
+//! (widths, font-size tiers, padding tiers) stay here: they are continuous or
+//! compound functions of live geometry (see `SceneLayout`), not the discrete
+//! swaps a media query expresses cleanly.
+//!
+//! The store is a plain scrollable list, not a drawer: it never grows to
+//! cover the board, and there is no handle to pull it open.
 
 use bevy::prelude::*;
+use bevy_flair::prelude::*;
 
 use crate::{
     domain::{
@@ -17,11 +28,13 @@ use crate::{
         FedStaff, Multipliers, RESEARCH_PER_TECHNOLOGIST, Research, SUPPORT_MEAL_PERIOD, Segment,
         Staff, SupportRole, Treasury, UnitKind, Workforce, cycle_time, plan_hire,
     },
-    game::{
-        BROWN, BROWN_LIGHT, ButtonAction, CREAM, Feedback, GOLD, INK, MenuState, SceneLayout,
-        UiTouchGesture,
-    },
+    game::{ButtonAction, Feedback, MenuState, SceneLayout, UiTouchGesture},
 };
+
+/// Every HUD root loads the same stylesheet. `AssetServer::load` caches by
+/// path, so loading it once per root is cheap - each call just clones a
+/// handle to the same asset.
+const HUD_STYLE: &str = "style/hud.css";
 
 /// Below this width the banner and the store both go compact.
 const NARROW_WIDTH: f32 = 600.0;
@@ -69,32 +82,11 @@ pub(crate) struct SideCell;
 pub(crate) struct StoreRoot;
 
 #[derive(Component)]
-pub(crate) struct StoreHeading;
-
-/// A column that a narrow viewport drops. EATS is the one that goes: its value
-/// also appears on the banner's FEEDING line and in the `-1.5` floater, so it
-/// is the least load-bearing of the five.
-#[derive(Component)]
-pub(crate) struct OptionalColumn;
-
-/// A table cell, carrying the width it wants at full size. Every cell in a
-/// column - the header's and every row's - carries the same one, which is what
-/// keeps them aligned when the table is scaled down to fit a phone.
-#[derive(Component, Clone, Copy)]
-pub(crate) struct TableCell(f32);
-
-/// The banner: banana count and, once there is production to explain, rates.
-#[derive(Component)]
 pub(crate) struct Banner;
 
 /// The word on the bar's menu button, which shrinks with its cell.
 #[derive(Component)]
 pub(crate) struct MenuLabel;
-
-/// Warm paper tones shared by the mobile store and its cards.
-const STORE_SOIL: Color = Color::srgb(0.97, 0.93, 0.88);
-const STORE_LABEL: Color = Color::srgb(0.50, 0.39, 0.34);
-const STORE_CARD: Color = Color::srgb(0.91, 0.84, 0.80);
 
 #[derive(Component)]
 pub(crate) struct CounterText;
@@ -102,13 +94,10 @@ pub(crate) struct CounterText;
 #[derive(Component)]
 pub(crate) struct RatePanel;
 
-/// The scrolling list inside the drawer. Separate from [`StoreRoot`] so the
-/// grip stays pinned while the rows move under it.
+/// The scrolling list of unit cards. The store is always this - a plain list,
+/// never a drawer that grows to cover the board.
 #[derive(Component)]
 pub(crate) struct StoreScroll;
-
-#[derive(Component)]
-pub(crate) struct StoreGrip;
 
 #[derive(Component)]
 pub(crate) struct StoreScrollCue;
@@ -164,10 +153,12 @@ pub(crate) struct TabContent(ShopTab);
 #[derive(Component)]
 pub(crate) struct StoreBody;
 
-/// Whether the drawer is pulled up. Persisted with the run, so a player who
-/// opened it stays opened.
-#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct StoreExpanded(pub bool);
+/// The second tier of a unit card - the description prose. The only thing a
+/// short store panel is allowed to hide: price, rate and owned count stay on
+/// the always-visible top tier, because those are what a player checks before
+/// every purchase.
+#[derive(Component)]
+pub(crate) struct UnitDetail;
 
 /// The unit whose live breakdown is open in the information panel.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -247,11 +238,25 @@ impl Unit {
             Unit::Cart => UnitKind::Cart,
         }
     }
+
+    /// The card's accent colour, one per unit, echoing the isometric scene's
+    /// own colourful village blocks. In a text-only shop this is the only
+    /// non-verbal cue distinguishing five rows at a glance, so each is a
+    /// distinct hue from the natural palette and none of them are close to
+    /// the brown/gold chrome the rest of the panel is built from.
+    fn swatch_class(self) -> &'static str {
+        match self {
+            Unit::Worker => "worker",
+            Unit::Support(SupportRole::Chef) => "chef",
+            Unit::Support(SupportRole::Unpacker) => "unpacker",
+            Unit::Support(SupportRole::Technologist) => "technologist",
+            Unit::Cart => "cart",
+        }
+    }
 }
 
 /// Which number in a unit's row a text node holds. One component and one query
 /// beats four of each, and it keeps the columns in a fixed, declared order.
-#[allow(dead_code)]
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UnitStat {
     /// Signing fee, on the hire button.
@@ -266,8 +271,6 @@ pub(crate) enum UnitStat {
     /// rate is one unit for every row, and it visibly decays as a role stops
     /// being the bottleneck.
     Gain,
-    /// What one of them eats, per trip or per shift.
-    Feeding,
     Owned,
     /// The unit's own name, which the Cart greys out while it is locked.
     Name,
@@ -279,14 +282,29 @@ pub(crate) struct UnitField {
     pub(crate) stat: UnitStat,
 }
 
-/// Marks a unit's hire button so [`style_buttons`] leaves its colours alone -
-/// affordability, not hover, is the dominant signal there.
+/// Marks a unit's hire button so [`sync_shop_new`] can toggle its
+/// affordability class without touching colour directly - `hud.css` owns the
+/// colour, this only says which state applies.
 #[derive(Component)]
 pub(crate) struct HireButton(pub(crate) Unit);
 
 /// Stands in for a hire button while its unit is locked.
 #[derive(Component, Clone, Copy)]
 pub(crate) struct LockedPlaque(pub(crate) Unit);
+
+/// A card's colour swatch, the one non-verbal cue distinguishing rows in a
+/// text-only shop - it needs its own `locked` toggle so it dims with the rest
+/// of a locked row rather than staying the one saturated, "available"-looking
+/// thing on it.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct UnitSwatch(pub(crate) Unit);
+
+/// The hire button's price label. A marker rather than inferring "this is the
+/// price text" from lacking a `ClassList`: an implicit invariant like that is
+/// one a future `ClassList` added to this text for an unrelated reason (say,
+/// wanting `:hover` styling on the number) would silently break.
+#[derive(Component)]
+pub(crate) struct PriceText;
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MenuView {
@@ -295,15 +313,7 @@ pub(crate) enum MenuView {
     Restart,
 }
 
-#[derive(Component, Clone, Copy)]
-pub(crate) enum MenuButtonTone {
-    Primary,
-    Emphasized,
-    #[cfg(target_arch = "wasm32")]
-    Secondary,
-}
-
-pub(crate) fn setup_hud(commands: &mut Commands) {
+pub(crate) fn setup_hud(commands: &mut Commands, asset_server: &AssetServer) {
     commands
         .spawn((
             Node {
@@ -315,7 +325,8 @@ pub(crate) fn setup_hud(commands: &mut Commands) {
                 padding: UiRect::axes(px(16), px(16)),
                 ..default()
             },
-            BackgroundColor(Color::srgb(0.94, 0.91, 0.83)),
+            Styled::new(asset_server.load(HUD_STYLE)),
+            ClassList::new("hud-bar"),
             Pickable::IGNORE,
             HudRoot,
         ))
@@ -357,15 +368,10 @@ pub(crate) fn setup_hud(commands: &mut Commands) {
                             width: percent(100),
                             max_width: px(BANNER_MAX_WIDTH_DESKTOP),
                             padding: UiRect::axes(px(18), px(10)),
-                            flex_direction: FlexDirection::Column,
-                            align_items: AlignItems::Center,
                             row_gap: px(6),
-                            border: UiRect::all(px(4)),
-                            border_radius: BorderRadius::all(px(12)),
                             ..default()
                         },
-                        BackgroundColor(CREAM),
-                        BorderColor::all(BROWN),
+                        ClassList::new("banner"),
                         Banner,
                     ))
                     .with_children(|banner| {
@@ -375,12 +381,12 @@ pub(crate) fn setup_hud(commands: &mut Commands) {
                         banner.spawn((
                             Text::new("TOTAL BANANAS"),
                             TextFont::from_font_size(11.0),
-                            TextColor(BROWN_LIGHT),
+                            ClassList::new("banner-label"),
                         ));
                         banner.spawn((
                             Text::new("0.0"),
                             TextFont::from_font_size(COUNTER_FONT_DESKTOP),
-                            TextColor(INK),
+                            ClassList::new("counter-text"),
                             CounterText,
                         ));
 
@@ -390,25 +396,20 @@ pub(crate) fn setup_hud(commands: &mut Commands) {
                                     display: Display::None,
                                     width: percent(100),
                                     padding: UiRect::top(px(6)),
-                                    flex_direction: FlexDirection::Row,
                                     column_gap: px(5),
-                                    // A rule under the count rather than a
-                                    // second card: the rates explain the number
-                                    // above them, so they belong inside it.
-                                    border: UiRect::top(px(2)),
                                     ..default()
                                 },
-                                BorderColor::all(BROWN_LIGHT),
+                                ClassList::new("rate-panel"),
                                 RatePanel,
                             ))
                             .with_children(|panel| {
                                 // Aligned on the sign so the three lines read
                                 // as arithmetic rather than as three unrelated
                                 // numbers.
-                                spawn_rate_line(panel, RateLine::Farming, "FARMING", INK);
-                                spawn_rate_line(panel, RateLine::Feeding, "FEEDING", BROWN_LIGHT);
-                                spawn_rate_line(panel, RateLine::Net, "GROW AVG", INK);
-                                spawn_rate_line(panel, RateLine::Hungry, "HUNGRY", GOLD);
+                                spawn_rate_line(panel, RateLine::Farming, "FARMING", "rate-farming");
+                                spawn_rate_line(panel, RateLine::Feeding, "FEEDING", "rate-feeding");
+                                spawn_rate_line(panel, RateLine::Net, "GROW AVG", "rate-net");
+                                spawn_rate_line(panel, RateLine::Hungry, "HUNGRY", "rate-hungry");
                             });
                     });
             });
@@ -432,28 +433,24 @@ pub(crate) fn setup_hud(commands: &mut Commands) {
                         padding: UiRect::axes(px(10), px(8)),
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
-                        border: UiRect::all(px(3)),
-                        border_radius: BorderRadius::all(px(10)),
                         ..default()
                     },
-                    BackgroundColor(BROWN),
-                    BorderColor::all(CREAM),
+                    ClassList::new("menu-button"),
                 ))
                 .with_child((
                     Text::new("MENU"),
                     TextFont::from_font_size(20.0),
-                    TextColor(CREAM),
                     MenuLabel,
                 ));
             });
         });
 
-    spawn_store(commands);
+    spawn_store(commands, asset_server);
 }
 
-/// The persistent tabbed store. Only the offer list scrolls, leaving the tab
-/// strip and its 48 px navigation targets pinned in place.
-fn spawn_store(commands: &mut Commands) {
+/// The persistent, always-scrollable store. Only the card list scrolls,
+/// leaving the tab strip and its 48 px navigation targets pinned in place.
+fn spawn_store(commands: &mut Commands, asset_server: &AssetServer) {
     commands
         .spawn((
             Node {
@@ -463,25 +460,23 @@ fn spawn_store(commands: &mut Commands) {
                 width: percent(100),
                 padding: UiRect::axes(px(14), px(10)),
                 flex_direction: FlexDirection::Column,
-                // Centred as a block, which keeps the table's own columns
-                // aligned - header and rows are identical widths - while
-                // matching the symmetry the banner enforces up top. Hard-left
-                // it sat in about a thousand pixels of empty soil and read as
-                // unfinished rather than as a deliberate table origin.
+                // Centred as a block, which keeps every card the same width
+                // while matching the symmetry the banner enforces up top.
+                // Hard-left it sat in about a thousand pixels of empty soil
+                // and read as unfinished rather than as a deliberate origin.
                 align_items: AlignItems::Center,
                 row_gap: px(6),
-                border: UiRect::top(px(3)),
                 // `max_height` bounds this node's box but not its children,
                 // which overflow visibly by default. Clipping is the backstop
                 // that makes "the store never covers the grass" true by
-                // construction rather than by arithmetic; the table shape and
+                // construction rather than by arithmetic; the card shape and
                 // `apply_store_layout` going compact are what stop it being
                 // needed.
                 overflow: Overflow::clip_y(),
                 ..default()
             },
-            BackgroundColor(STORE_SOIL),
-            BorderColor::all(BROWN),
+            Styled::new(asset_server.load(HUD_STYLE)),
+            ClassList::new("store-panel"),
             // Explicitly below the pause scrim (`GlobalZIndex(100)`). The store
             // is its own UI root rather than a child of the bar, so its
             // stacking would otherwise be decided by spawn order in another
@@ -492,7 +487,6 @@ fn spawn_store(commands: &mut Commands) {
             StoreRoot,
         ))
         .with_children(|store| {
-            spawn_store_grip(store);
             store
                 .spawn((
                     TabStrip,
@@ -522,7 +516,7 @@ fn spawn_store(commands: &mut Commands) {
                             labels.spawn((
                                 Text::new(tab.label()),
                                 TextFont::from_font_size(14.0),
-                                TextColor(STORE_LABEL),
+                                ClassList::new("tab-label"),
                                 TabLabel(tab),
                             ));
                         }
@@ -556,7 +550,6 @@ fn spawn_store(commands: &mut Commands) {
                         },
                     ))
                     .with_children(|list| {
-                        spawn_store_header(list);
                         for unit in Unit::ROWS {
                             spawn_unit_row(list, unit);
                         }
@@ -577,7 +570,7 @@ fn spawn_store(commands: &mut Commands) {
                             children![(
                                 Text::new(format!("{}\nCOMING SOON", tab.label())),
                                 TextFont::from_font_size(19.0),
-                                TextColor(BROWN),
+                                ClassList::new("coming-soon"),
                                 TextLayout::justify(Justify::Center),
                             )],
                         ));
@@ -593,14 +586,10 @@ fn spawn_store(commands: &mut Commands) {
                     border_radius: BorderRadius::all(px(6)),
                     ..default()
                 },
-                BackgroundColor(CREAM),
+                ClassList::new("scroll-cue"),
                 Visibility::Hidden,
                 Pickable::IGNORE,
-                children![(
-                    Text::new("SCROLL v"),
-                    TextFont::from_font_size(10.0),
-                    TextColor(BROWN),
-                )],
+                children![(Text::new("SCROLL v"), TextFont::from_font_size(10.0))],
             ));
         });
     commands
@@ -614,33 +603,31 @@ fn spawn_store(commands: &mut Commands) {
                 max_width: px(560.0),
                 align_self: AlignSelf::Center,
                 padding: UiRect::all(px(16)),
-                flex_direction: FlexDirection::Column,
                 row_gap: px(8),
                 display: Display::None,
-                border: UiRect::all(px(3)),
                 ..default()
             },
-            BackgroundColor(BROWN),
-            BorderColor::all(GOLD),
+            Styled::new(asset_server.load(HUD_STYLE)),
+            ClassList::new("info-panel"),
             GlobalZIndex(20),
         ))
         .with_children(|panel| {
             panel.spawn((
                 Text::new("UNIT INFO"),
                 TextFont::from_font_size(18.0),
-                TextColor(GOLD),
+                ClassList::new("info-title"),
                 InfoText::Title,
             ));
             panel.spawn((
                 Text::new(""),
                 TextFont::from_font_size(14.0),
-                TextColor(CREAM),
+                ClassList::new("info-body"),
                 InfoText::Body,
             ));
             panel.spawn((
                 Text::new("Tap the i button again to close"),
                 TextFont::from_font_size(11.0),
-                TextColor(STORE_LABEL),
+                ClassList::new("info-hint"),
             ));
         });
 }
@@ -654,271 +641,119 @@ fn spawn_tab_arrow(tabs: &mut ChildSpawnerCommands, action: ButtonAction, label:
             min_height: px(48),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
-            border: UiRect::all(px(2)),
-            border_radius: BorderRadius::all(px(8)),
             ..default()
         },
-        BackgroundColor(BROWN),
-        BorderColor::all(BROWN_LIGHT),
-        children![(
-            Text::new(label),
-            TextFont::from_font_size(30.0),
-            TextColor(CREAM),
-        )],
+        ClassList::new("tab-arrow"),
+        children![(Text::new(label), TextFont::from_font_size(30.0))],
     ));
 }
 
-/// The drawer handle. The store stays present at rest and expands over part of
-/// the portrait board when the player wants more room for the list.
-fn spawn_store_grip(store: &mut ChildSpawnerCommands) {
-    store
-        .spawn((
-            Button,
-            ButtonAction::ToggleStore,
-            StoreGrip,
-            Node {
-                width: px(74),
-                height: px(44),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                flex_shrink: 0.0,
-                ..default()
-            },
-            BackgroundColor(Color::NONE),
-        ))
-        .with_child((
-            Node {
-                width: px(74),
-                height: px(12),
-                border: UiRect::all(px(2)),
-                border_radius: BorderRadius::all(px(7)),
-                ..default()
-            },
-            BackgroundColor(BROWN_LIGHT),
-            BorderColor::all(GOLD),
-            Pickable::IGNORE,
-        ));
-}
-
-/// Column widths, shared by the header and every unit line. Fixed rather than
-/// content-sized: content-sized columns re-align themselves per row, which is
-/// the one thing a comparison table must not do.
-const COL_NAME: f32 = 104.0;
-const COL_COST: f32 = 84.0;
-/// D21: the live marginal rate, recomputed every tick. Narrow and numeric on
-/// purpose, sitting next to COST rather than under the prose DESCRIPTION
-/// cell, so the figure lines up down one column and stays comparable row to
-/// row - a value anchored to a variable-length description would not.
-const COL_RATE: f32 = 104.0;
-/// The RATE cell's unscaled font size. `apply_store_layout` scales this down
-/// by the same factor it scales `COL_RATE`'s width by, so the cell's longest
-/// word ("TECHNOLOGIST") keeps the fit it has at full size instead of running
-/// past a box that shrank under it.
-const RATE_FONT_SIZE: f32 = 12.0;
-/// Cut by exactly `COL_RATE`'s own width plus the gap it added, so the
-/// table's total budget - and therefore `column_scale`'s factor at every
-/// viewport - is unchanged from before D21's column existed. Verified against
-/// a real 390 px render: growing the table instead of trading width for the
-/// new column let RATE's `NoWrap` text run straight through this cell at the
-/// narrowest supported width, on every row, not only the long locked-Cart
-/// message.
-const COL_DESCRIPTION: f32 = 280.0 - COL_RATE - COL_GAP;
-const COL_INFO: f32 = 48.0;
-const COL_GAP: f32 = 10.0;
-
-/// Column width the table needs, with and without the column a narrow screen
-/// drops. Gaps are counted separately because they do not scale with the
-/// columns - see `column_scale`.
-fn table_columns() -> f32 {
-    COL_NAME + COL_COST + COL_RATE + COL_DESCRIPTION + COL_INFO
-}
-
-fn table_gaps() -> f32 {
-    4.0 * COL_GAP
-}
-
-#[allow(dead_code)]
-fn table_width() -> f32 {
-    table_columns() + table_gaps()
-}
-
-/// How far the columns have to shrink to fit `room`, never above 1.
-///
-/// A 320 px phone gives the store 304 px and the four essential columns want
-/// 334, so without this the table is simply clipped: "UNIT" renders as "NIT"
-/// and the OWNED value falls off the right edge. Scaling every column by one
-/// factor keeps the header lined up with the rows, which dropping or wrapping
-/// individual columns would not.
-fn column_scale(room: f32) -> f32 {
-    let columns = table_columns();
-    if columns <= 0.0 {
-        return 1.0;
-    }
-    ((room - table_gaps()) / columns).clamp(0.4, 1.0)
-}
-
-fn spawn_store_header(store: &mut ChildSpawnerCommands) {
-    store
-        .spawn((
-            Node {
-                align_items: AlignItems::Center,
-                column_gap: px(COL_GAP),
-                ..default()
-            },
-            StoreHeading,
-        ))
-        .with_children(|header| {
-            for (label, width) in [
-                ("UNIT", COL_NAME),
-                ("COST", COL_COST),
-                ("RATE", COL_RATE),
-                ("DESCRIPTION", COL_DESCRIPTION),
-                ("INFO", COL_INFO),
-            ] {
-                header.spawn((
-                    TableCell(width),
-                    Node {
-                        width: px(width),
-                        flex_shrink: 0.0,
-                        ..default()
-                    },
-                    children![(
-                        Text::new(label),
-                        TextFont::from_font_size(10.0),
-                        TextColor(STORE_LABEL),
-                    )],
-                ));
-            }
-        });
-}
-
-/// One unit: one line, columns aligned with the header above it.
+/// One unit: one card. A top row that always fits without shrinking - swatch,
+/// name, live rate, owned count, price and the info button - and a second row
+/// that can be hidden under height pressure, holding only the description
+/// prose. Every figure a player checks before a purchase stays on the top
+/// row; only the sentence that explains the unit is allowed to disappear.
 fn spawn_unit_row(store: &mut ChildSpawnerCommands, unit: Unit) {
     store
         .spawn((
             Node {
                 width: percent(100),
-                max_width: px(620),
-                align_items: AlignItems::Center,
-                column_gap: px(COL_GAP),
-                padding: UiRect::axes(px(10), px(8)),
-                border: UiRect::all(px(2)),
-                border_radius: BorderRadius::all(px(10)),
+                max_width: px(560),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::axes(px(12), px(10)),
+                row_gap: px(4),
                 ..default()
             },
-            BackgroundColor(STORE_CARD),
-            BorderColor::all(Color::srgb(0.82, 0.72, 0.67)),
+            ClassList::new("unit-card"),
             unit,
         ))
-        .with_children(|row| {
-            row.spawn((
-                TableCell(COL_NAME),
+        .with_children(|card| {
+            card.spawn((
                 Node {
-                    width: px(COL_NAME),
-                    flex_shrink: 0.0,
+                    width: percent(100),
+                    align_items: AlignItems::Center,
+                    flex_wrap: FlexWrap::Wrap,
+                    column_gap: px(8),
+                    row_gap: px(6),
                     ..default()
                 },
-                children![(
+                Pickable::IGNORE,
+            ))
+            .with_children(|top| {
+                top.spawn((
+                    Node {
+                        width: px(16),
+                        height: px(16),
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                    ClassList::new(&format!("unit-swatch {}", unit.swatch_class())),
+                    UnitSwatch(unit),
+                    Pickable::IGNORE,
+                ));
+                top.spawn((
                     Text::new(unit.name()),
                     TextFont::from_font_size(14.0),
-                    TextColor(INK),
+                    ClassList::new("unit-name"),
                     UnitField {
                         unit,
                         stat: UnitStat::Name,
                     },
-                )],
-            ));
-
-            spawn_hire_button(row, unit, unit.kind());
-            if matches!(unit, Unit::Cart) {
-                // Shown in the button's place while the Cart is locked. A
-                // dimmed button and a unit that does not exist yet are
-                // different states, and a dimmed button says the first when it
-                // means the second - it also *takes taps*, queues a hire that
-                // is silently dropped, and burns the debounce doing it.
-                spawn_locked_plaque(row, unit);
-            }
-            spawn_rate_cell(row, unit);
-            row.spawn((
-                TableCell(COL_DESCRIPTION),
-                Node {
-                    width: px(COL_DESCRIPTION),
-                    flex_shrink: 0.0,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(2),
-                    ..default()
-                },
-            ))
-            .with_children(|details| {
-                details.spawn((
-                    Text::new(unit.description()),
-                    TextFont::from_font_size(13.0),
-                    TextColor(INK),
-                    TextLayout::linebreak(LineBreak::WordBoundary),
                 ));
-                details.spawn((
-                    Text::new("OWNED 0"),
-                    TextFont::from_font_size(11.0),
-                    TextColor(STORE_LABEL),
+                top.spawn((
+                    Text::new(""),
+                    TextFont::from_font_size(13.0),
+                    TextLayout::linebreak(LineBreak::NoWrap),
+                    ClassList::new("unit-rate"),
+                    UnitField {
+                        unit,
+                        stat: UnitStat::Gain,
+                    },
+                ));
+                top.spawn((
+                    Text::new("x0"),
+                    TextFont::from_font_size(12.0),
+                    ClassList::new("unit-owned"),
                     UnitField {
                         unit,
                         stat: UnitStat::Owned,
                     },
                 ));
+                // Pushes the price pill and info button to the row's end
+                // without touching the always-left name/rate/owned trio.
+                top.spawn((
+                    Node {
+                        flex_grow: 1.0,
+                        ..default()
+                    },
+                    Pickable::IGNORE,
+                ));
+                spawn_hire_button(top, unit, unit.kind());
+                if matches!(unit, Unit::Cart) {
+                    // Shown in the button's place while the Cart is locked. A
+                    // dimmed button and a unit that does not exist yet are
+                    // different states, and a dimmed button says the first
+                    // when it means the second - it also *takes taps*, queues
+                    // a hire that is silently dropped, and burns the debounce
+                    // doing it.
+                    spawn_locked_plaque(top, unit);
+                }
+                spawn_info_button(top, unit);
             });
-            row.spawn((
-                Button,
-                ButtonAction::Info(unit),
-                TableCell(COL_INFO),
+            card.spawn((
+                UnitDetail,
                 Node {
-                    width: px(COL_INFO),
-                    min_height: px(44),
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    flex_shrink: 0.0,
-                    border: UiRect::all(px(2)),
-                    border_radius: BorderRadius::all(px(7)),
+                    width: percent(100),
                     ..default()
                 },
-                BackgroundColor(BROWN),
-                BorderColor::all(BROWN_LIGHT),
                 children![(
-                    Text::new("i"),
-                    TextFont::from_font_size(18.0),
-                    TextColor(GOLD),
+                    Text::new(unit.description()),
+                    TextFont::from_font_size(13.0),
+                    ClassList::new("unit-description"),
+                    TextLayout::linebreak(LineBreak::WordBoundary),
                 )],
             ));
         });
-}
-
-/// D21's live marginal rate, recomputed every tick by [`sync_shop_new`].
-///
-/// `NoWrap`, verified against the actual failure it exists to avoid: at
-/// 390 px, word-boundary wrap breaks "+4.2/min" after the slash and leaves an
-/// orphaned "min" on its own line - the exact wrap the old, pre-redesign rate
-/// column's own comment warned about, and confirmed live in this column
-/// before this fix landed. `NoWrap` still honours an explicit `\n`
-/// (`bevy_text::LineBreak::NoWrap` docs), which is what the locked Cart row's
-/// longer messages use instead of relying on word-wrap to break them well.
-fn spawn_rate_cell(row: &mut ChildSpawnerCommands, unit: Unit) {
-    row.spawn((
-        TableCell(COL_RATE),
-        Node {
-            width: px(COL_RATE),
-            flex_shrink: 0.0,
-            ..default()
-        },
-        children![(
-            Text::new(""),
-            TextFont::from_font_size(RATE_FONT_SIZE),
-            TextColor(CREAM),
-            TextLayout::linebreak(LineBreak::NoWrap),
-            UnitField {
-                unit,
-                stat: UnitStat::Gain,
-            },
-        )],
-    ));
 }
 
 impl Unit {
@@ -933,30 +768,46 @@ impl Unit {
     }
 }
 
+/// The hire button's colour, in every state. Set directly from Rust rather
+/// than through `ClassList`: see the note on `.hire-button` in `hud.css` -
+/// bevy_flair does not re-resolve a `Button` entity's style when only its
+/// `ClassList` changes after spawn, and this is the one widget whose colour
+/// genuinely needs to change after spawn on every purchase.
+const HIRE_DIM_BG: Color = Color::srgb(0.9098, 0.8706, 0.8314);
+const HIRE_DIM_BORDER: Color = Color::srgb(0.7373, 0.6784, 0.6235);
+const HIRE_DIM_TEXT: Color = Color::srgb(0.5294, 0.5216, 0.4863);
+const HIRE_AFFORD_BG: Color = Color::srgb(0.5216, 0.2510, 0.1216);
+const HIRE_AFFORD_EDGE: Color = Color::srgb(1.0, 0.7490, 0.0510);
+const HIRE_LIT_BG: Color = Color::srgb(1.0, 0.7490, 0.0510);
+const HIRE_LIT_BORDER: Color = Color::srgb(1.0, 0.9412, 0.7216);
+const HIRE_LIT_TEXT: Color = Color::srgb(0.9961, 0.8824, 0.7216);
+
 fn spawn_hire_button(row: &mut ChildSpawnerCommands, unit: Unit, kind: UnitKind) {
     row.spawn((
         Button,
         ButtonAction::Hire(kind),
         HireButton(unit),
-        TableCell(COL_COST),
         Node {
-            width: px(COL_COST),
+            min_width: px(64),
             min_height: px(44),
+            padding: UiRect::axes(px(10), px(6)),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             flex_shrink: 0.0,
             border: UiRect::all(px(2)),
-            border_radius: BorderRadius::all(px(7)),
             ..default()
         },
-        BackgroundColor(BROWN_LIGHT),
-        BorderColor::all(GOLD),
-        // Just the price. The column header says HIRE, so repeating the word
-        // inside every button costs a word per unit for nothing.
+        ClassList::new("hire-button"),
+        BackgroundColor(HIRE_DIM_BG),
+        BorderColor::all(HIRE_DIM_BORDER),
+        // Just the price. The tab strip's tab name says what these are, so
+        // repeating "HIRE" inside every button costs a word per unit for
+        // nothing.
         children![(
             Text::new("4.0"),
             TextFont::from_font_size(17.0),
-            TextColor(GOLD),
+            TextColor(HIRE_DIM_TEXT),
+            PriceText,
             UnitField {
                 unit,
                 stat: UnitStat::Price,
@@ -968,80 +819,54 @@ fn spawn_hire_button(row: &mut ChildSpawnerCommands, unit: Unit, kind: UnitKind)
 fn spawn_locked_plaque(row: &mut ChildSpawnerCommands, unit: Unit) {
     row.spawn((
         LockedPlaque(unit),
-        TableCell(COL_COST),
         Node {
             display: Display::None,
-            width: px(COL_COST),
+            min_width: px(64),
+            min_height: px(44),
+            padding: UiRect::axes(px(10), px(6)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            flex_shrink: 0.0,
+            ..default()
+        },
+        ClassList::new("locked-plaque"),
+        children![(Text::new("LOCKED"), TextFont::from_font_size(12.0))],
+    ));
+}
+
+fn spawn_info_button(row: &mut ChildSpawnerCommands, unit: Unit) {
+    row.spawn((
+        Button,
+        ButtonAction::Info(unit),
+        Node {
+            width: px(44),
             min_height: px(44),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             flex_shrink: 0.0,
-            border: UiRect::all(px(2)),
-            border_radius: BorderRadius::all(px(7)),
             ..default()
         },
-        BackgroundColor(STORE_SOIL),
-        BorderColor::all(STORE_LABEL),
-        children![(
-            Text::new("LOCKED"),
-            TextFont::from_font_size(12.0),
-            TextColor(STORE_LABEL),
-        )],
+        ClassList::new("unit-info-button"),
+        children![(Text::new("i"), TextFont::from_font_size(18.0))],
     ));
 }
 
-#[allow(dead_code)]
-fn spawn_unit_cell(
-    row: &mut ChildSpawnerCommands,
-    unit: Unit,
-    stat: UnitStat,
-    width: f32,
-    optional: bool,
-) {
-    let mut cell = row.spawn((
-        TableCell(width),
-        Node {
-            width: px(width),
-            flex_shrink: 0.0,
-            ..default()
-        },
-        children![(
-            Text::new("-"),
-            TextFont::from_font_size(14.0),
-            TextColor(CREAM),
-            // A rate is one token. Allowed to wrap it breaks after the slash.
-            TextLayout::linebreak(LineBreak::NoWrap),
-            UnitField { unit, stat },
-        )],
-    ));
-    if optional {
-        cell.insert(OptionalColumn);
-    }
-}
-
-fn spawn_rate_line(panel: &mut ChildSpawnerCommands, line: RateLine, label: &str, colour: Color) {
+fn spawn_rate_line(panel: &mut ChildSpawnerCommands, line: RateLine, label: &str, class: &str) {
     panel.spawn((
         RateLineRow(line),
         Node {
             flex_grow: 1.0,
             flex_basis: px(0),
             min_width: px(0),
-            flex_direction: FlexDirection::Column,
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
             row_gap: px(1),
             ..default()
         },
+        ClassList::new(&format!("rate-line {class}")),
         children![
-            (
-                Text::new(label),
-                TextFont::from_font_size(9.0),
-                TextColor(colour),
-            ),
+            (Text::new(label), TextFont::from_font_size(9.0)),
             (
                 Text::new("+0.0/min"),
                 TextFont::from_font_size(14.0),
-                TextColor(colour),
                 // A rate is one token. Allowed to wrap it breaks after the
                 // slash, which reads as two numbers.
                 TextLayout::linebreak(LineBreak::NoWrap),
@@ -1051,7 +876,7 @@ fn spawn_rate_line(panel: &mut ChildSpawnerCommands, line: RateLine, label: &str
     ));
 }
 
-pub(crate) fn setup_menu(commands: &mut Commands) {
+pub(crate) fn setup_menu(commands: &mut Commands, asset_server: &AssetServer) {
     commands
         .spawn((
             Node {
@@ -1059,12 +884,11 @@ pub(crate) fn setup_menu(commands: &mut Commands) {
                 position_type: PositionType::Absolute,
                 width: percent(100),
                 height: percent(100),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
                 padding: UiRect::all(px(16)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.06, 0.03, 0.02, 0.72)),
+            Styled::new(asset_server.load(HUD_STYLE)),
+            ClassList::new("menu-scrim"),
             GlobalZIndex(100),
             MenuView::Scrim,
         ))
@@ -1072,20 +896,19 @@ pub(crate) fn setup_menu(commands: &mut Commands) {
             scrim
                 .spawn((
                     menu_panel_node(),
-                    BackgroundColor(CREAM),
-                    BorderColor::all(BROWN),
+                    ClassList::new("menu-panel"),
                     MenuView::Main,
                 ))
                 .with_children(|panel| {
                     panel.spawn((
                         Text::new("BANANA BREAK"),
                         TextFont::from_font_size(34.0),
-                        TextColor(INK),
+                        ClassList::new("menu-title"),
                     ));
                     panel.spawn((
                         Text::new("CONTROLS"),
                         TextFont::from_font_size(20.0),
-                        TextColor(BROWN_LIGHT),
+                        ClassList::new("menu-subtitle"),
                     ));
                     let controls = if cfg!(target_arch = "wasm32") {
                         "Drag banana from tree to stall\nPress H to harvest\nPress B to hire a worker\nPress L for input logs"
@@ -1095,24 +918,18 @@ pub(crate) fn setup_menu(commands: &mut Commands) {
                     panel.spawn((
                         Text::new(controls),
                         TextFont::from_font_size(19.0),
-                        TextColor(INK),
+                        ClassList::new("menu-body"),
                         TextLayout::justify(Justify::Center),
                     ));
                     panel.spawn(menu_button_row()).with_children(|row| {
-                        row.spawn(row_menu_button(
-                            ButtonAction::Resume,
-                            MenuButtonTone::Emphasized,
-                        ))
-                        .with_child(menu_button_text("RESUME"));
+                        row.spawn(row_menu_button(ButtonAction::Resume, "emphasized"))
+                            .with_child(menu_button_text("RESUME"));
                         #[cfg(target_arch = "wasm32")]
-                        row.spawn(row_menu_button(
-                            ButtonAction::Diagnostics,
-                            MenuButtonTone::Secondary,
-                        ))
-                        .with_child(menu_button_text("INPUT LOGS"));
+                        row.spawn(row_menu_button(ButtonAction::Diagnostics, "secondary"))
+                            .with_child(menu_button_text("INPUT LOGS"));
                     });
                     panel
-                        .spawn(menu_button(ButtonAction::Restart))
+                        .spawn(menu_button(ButtonAction::Restart, ""))
                         .with_child(menu_button_text("RESTART GAME"));
                 });
 
@@ -1122,27 +939,26 @@ pub(crate) fn setup_menu(commands: &mut Commands) {
                         display: Display::None,
                         ..menu_panel_node()
                     },
-                    BackgroundColor(CREAM),
-                    BorderColor::all(BROWN),
+                    ClassList::new("menu-panel"),
                     MenuView::Restart,
                 ))
                 .with_children(|panel| {
                     panel.spawn((
                         Text::new("RESET RUN?"),
                         TextFont::from_font_size(30.0),
-                        TextColor(INK),
+                        ClassList::new("menu-title"),
                     ));
                     panel.spawn((
                         Text::new("Reset bananas to 0 and\ndismiss every worker?\nThis cannot be undone."),
                         TextFont::from_font_size(19.0),
-                        TextColor(INK),
+                        ClassList::new("menu-body"),
                         TextLayout::justify(Justify::Center),
                     ));
                     panel
-                        .spawn(menu_button(ButtonAction::ConfirmRestart))
+                        .spawn(menu_button(ButtonAction::ConfirmRestart, ""))
                         .with_child(menu_button_text("RESET RUN"));
                     panel
-                        .spawn(menu_button(ButtonAction::CancelRestart))
+                        .spawn(menu_button(ButtonAction::CancelRestart, ""))
                         .with_child(menu_button_text("CANCEL"));
                 });
         });
@@ -1156,29 +972,23 @@ fn menu_panel_node() -> Node {
         flex_direction: FlexDirection::Column,
         align_items: AlignItems::Center,
         row_gap: px(14),
-        border: UiRect::all(px(5)),
-        border_radius: BorderRadius::all(px(14)),
         ..default()
     }
 }
 
-fn menu_button(action: ButtonAction) -> impl Bundle {
+fn menu_button(action: ButtonAction, extra_class: &str) -> impl Bundle {
     (
         Button,
         action,
-        MenuButtonTone::Primary,
         Node {
             width: percent(100),
             min_height: px(52),
             padding: UiRect::axes(px(18), px(10)),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
-            border: UiRect::all(px(3)),
-            border_radius: BorderRadius::all(px(10)),
             ..default()
         },
-        BackgroundColor(BROWN),
-        BorderColor::all(BROWN_LIGHT),
+        ClassList::new(&format!("menu-panel-button {extra_class}")),
     )
 }
 
@@ -1190,11 +1000,10 @@ fn menu_button_row() -> Node {
     }
 }
 
-fn row_menu_button(action: ButtonAction, tone: MenuButtonTone) -> impl Bundle {
+fn row_menu_button(action: ButtonAction, extra_class: &str) -> impl Bundle {
     (
         Button,
         action,
-        tone,
         Node {
             min_width: px(0),
             min_height: px(52),
@@ -1203,30 +1012,14 @@ fn row_menu_button(action: ButtonAction, tone: MenuButtonTone) -> impl Bundle {
             padding: UiRect::axes(px(8), px(10)),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
-            border: UiRect::all(px(3)),
-            border_radius: BorderRadius::all(px(10)),
             ..default()
         },
-        BackgroundColor(match tone {
-            MenuButtonTone::Primary | MenuButtonTone::Emphasized => BROWN,
-            #[cfg(target_arch = "wasm32")]
-            MenuButtonTone::Secondary => BROWN,
-        }),
-        BorderColor::all(match tone {
-            MenuButtonTone::Primary => CREAM,
-            MenuButtonTone::Emphasized => GOLD,
-            #[cfg(target_arch = "wasm32")]
-            MenuButtonTone::Secondary => BROWN_LIGHT,
-        }),
+        ClassList::new(&format!("menu-panel-button {extra_class}")),
     )
 }
 
 fn menu_button_text(label: &'static str) -> impl Bundle {
-    (
-        Text::new(label),
-        TextFont::from_font_size(21.0),
-        TextColor(CREAM),
-    )
+    (Text::new(label), TextFont::from_font_size(21.0))
 }
 
 /// Write only on a real change.
@@ -1238,6 +1031,19 @@ fn menu_button_text(label: &'static str) -> impl Bundle {
 fn set_if_changed<T: PartialEq>(slot: &mut T, value: T) {
     if *slot != value {
         *slot = value;
+    }
+}
+
+/// Same idea, for a class on a [`ClassList`]: `add`/`remove`/`toggle` all mark
+/// the component changed unconditionally, which would re-resolve the whole
+/// entity's style every frame regardless of whether the class actually moved.
+fn set_class(classes: &mut ClassList, class: &'static str, enabled: bool) {
+    if enabled {
+        if !classes.contains(class) {
+            classes.add(class);
+        }
+    } else if classes.contains(class) {
+        classes.remove(class);
     }
 }
 
@@ -1306,66 +1112,20 @@ pub fn apply_responsive_hud(
 
 /// Partition the viewport with the same measurements used by the world scene.
 /// Portrait stacks the store below the square. Short landscape puts the store
-/// to its right. Expanding the portrait drawer is the only state allowed to
-/// cover part of the board.
+/// to its right. The store's height is always `layout.store_height()` - it
+/// never grows to cover the board.
 #[allow(clippy::type_complexity)]
 pub fn apply_store_layout(
     layout: Res<SceneLayout>,
-    expanded: Res<StoreExpanded>,
-    mut store: Single<
-        &mut Node,
-        (
-            With<StoreRoot>,
-            Without<StoreHeading>,
-            Without<TableCell>,
-            Without<StoreScroll>,
-        ),
-    >,
-    mut heading: Single<
-        &mut Node,
-        (
-            With<StoreHeading>,
-            Without<StoreRoot>,
-            Without<TableCell>,
-            Without<StoreScroll>,
-        ),
-    >,
-    mut cells: Query<
-        (&TableCell, Option<&OptionalColumn>, &mut Node),
-        (
-            Without<StoreRoot>,
-            Without<StoreHeading>,
-            Without<StoreScroll>,
-        ),
-    >,
+    mut store: Single<&mut Node, (With<StoreRoot>, Without<StoreScroll>, Without<UnitDetail>)>,
     mut scroll: Single<
         (&mut ScrollPosition, &ComputedNode),
-        (
-            With<StoreScroll>,
-            Without<StoreRoot>,
-            Without<StoreHeading>,
-            Without<TableCell>,
-        ),
+        (With<StoreScroll>, Without<StoreRoot>, Without<UnitDetail>),
     >,
-    mut grip: Single<
-        &mut Node,
-        (
-            With<StoreGrip>,
-            Without<StoreRoot>,
-            Without<StoreHeading>,
-            Without<TableCell>,
-            Without<StoreScroll>,
-        ),
-    >,
+    mut details: Query<&mut Node, (With<UnitDetail>, Without<StoreRoot>, Without<StoreScroll>)>,
     mut scroll_cue: Single<&mut Visibility, With<StoreScrollCue>>,
-    mut rate_fonts: Query<(&UnitField, &mut TextFont)>,
 ) {
-    let base_height = layout.store_height();
-    let target_height = if expanded.0 && !layout.short_landscape() {
-        base_height.max(layout.viewport.y * 0.68)
-    } else {
-        base_height
-    };
+    let height = layout.store_height();
     let pad = if layout.store_width() < NARROW_WIDTH {
         8.0
     } else {
@@ -1373,9 +1133,9 @@ pub fn apply_store_layout(
     };
 
     set_if_changed(&mut store.width, px(layout.store_width()));
-    set_if_changed(&mut store.height, px(target_height));
+    set_if_changed(&mut store.height, px(height));
     set_if_changed(&mut store.min_height, px(0));
-    set_if_changed(&mut store.max_height, px(target_height));
+    set_if_changed(&mut store.max_height, px(height));
     set_if_changed(
         &mut store.left,
         px(if layout.short_landscape() {
@@ -1386,49 +1146,15 @@ pub fn apply_store_layout(
     );
     set_if_changed(&mut store.padding, UiRect::axes(px(pad), px(6)));
     set_if_changed(&mut store.row_gap, px(5));
-    set_if_changed(
-        &mut grip.display,
-        if layout.short_landscape() {
-            Display::None
-        } else {
-            Display::Flex
-        },
-    );
 
-    let compact = target_height < 220.0;
-    set_if_changed(
-        &mut heading.display,
-        if compact {
-            Display::None
-        } else {
-            Display::Flex
-        },
-    );
-
-    let room = layout.store_width() - 2.0 * pad - 20.0;
-    let scale = column_scale(room);
-    for (cell, optional, mut node) in &mut cells {
-        let shown = optional.is_none();
+    // A card's description is the one thing a short store panel is allowed to
+    // hide - price, rate and owned count stay on the always-visible top row.
+    let compact = height < 220.0;
+    for mut node in &mut details {
         set_if_changed(
             &mut node.display,
-            if shown { Display::Flex } else { Display::None },
+            if compact { Display::None } else { Display::Flex },
         );
-        set_if_changed(&mut node.width, px((cell.0 * scale).floor()));
-    }
-    // The RATE cell's font has to shrink with its box, not just the box: cell
-    // width is scaled above, but `NoWrap` text does not reflow to a narrower
-    // box on its own, and "TECHNOLOGIST" - the longest word this cell ever
-    // shows - visibly overlapped DESCRIPTION on a real 390 px render before
-    // this landed. Scaling the font by the same factor as the box preserves
-    // the fit ratio exactly: content that fits at `scale = 1.0` still fits at
-    // any smaller scale, because both shrink together.
-    for (field, mut font) in &mut rate_fonts {
-        if matches!(field.stat, UnitStat::Gain) {
-            set_if_changed(
-                &mut font.font_size,
-                FontSize::Px((RATE_FONT_SIZE * scale).max(10.0)),
-            );
-        }
     }
 
     let (position, node) = &mut *scroll;
@@ -1441,7 +1167,7 @@ pub fn apply_store_layout(
     };
 }
 
-/// Wheel and drag scrolling for the drawer.
+/// Wheel and drag scrolling for the store list.
 ///
 /// The store is soil-on-soil with no scrollbar, so without this the rows below
 /// the fold are unreachable on desktop - and the resting height shows only two
@@ -1530,17 +1256,12 @@ pub fn handle_store_gesture(
 pub fn sync_shop_tabs(
     active: Res<ActiveShopTab>,
     layout: Res<SceneLayout>,
-    mut labels: Query<(&TabLabel, &mut TextColor, &mut TextFont)>,
+    mut labels: Query<(&TabLabel, &mut ClassList, &mut TextFont)>,
     mut contents: Query<(&TabContent, &mut Node)>,
     mut scroll: Single<&mut ScrollPosition, With<StoreScroll>>,
 ) {
-    for (label, mut colour, mut font) in &mut labels {
-        let wanted = if label.0 == active.0 {
-            BROWN
-        } else {
-            STORE_LABEL
-        };
-        set_if_changed(&mut colour.0, wanted);
+    for (label, mut classes, mut font) in &mut labels {
+        set_class(&mut classes, "active", label.0 == active.0);
         set_if_changed(
             &mut font.font_size,
             FontSize::Px(if layout.store_width() < 400.0 {
@@ -1691,15 +1412,14 @@ pub fn sync_shop_new(
     research: Res<Research>,
     committed: Res<Committed>,
     multipliers: Res<Multipliers>,
-    mut fields: Query<(&UnitField, &mut Text, &mut TextColor)>,
-    mut buttons: Query<(
-        &HireButton,
-        &Interaction,
-        &mut BackgroundColor,
-        &mut BorderColor,
-        &mut Node,
-    )>,
+    mut fields: Query<(&UnitField, &mut Text, &mut ClassList), Without<PriceText>>,
+    mut prices: Query<(&UnitField, &mut Text, &mut TextColor), With<PriceText>>,
+    mut buttons: Query<
+        (&HireButton, &Interaction, &mut BackgroundColor, &mut BorderColor, &mut Node),
+        Without<UnitField>,
+    >,
     mut plaques: Query<(&LockedPlaque, &mut Node), Without<HireButton>>,
+    mut swatches: Query<(&UnitSwatch, &mut ClassList), Without<UnitField>>,
 ) {
     let world = EconomyState {
         workforce: *workforce,
@@ -1714,42 +1434,25 @@ pub fn sync_shop_new(
     let cart_locked = research.level() < CART_TECH_REQUIREMENT;
     let (into_level, level_cost) = research.progress();
     let locked = |unit: Unit| matches!(unit, Unit::Cart) && cart_locked;
-    let lit: Vec<Unit> = buttons
-        .iter()
-        .filter(|(_, i, ..)| matches!(i, Interaction::Hovered | Interaction::Pressed))
-        .map(|(b, ..)| b.0)
-        .collect();
-    for (field, mut text, mut colour) in &mut fields {
+
+    for (field, mut text, mut classes) in &mut fields {
         let plan = plan_hire(field.unit.kind(), world);
-        let affordable = plan.affordable && !locked(field.unit);
-        set_if_changed(
-            &mut colour.0,
-            if locked(field.unit) {
-                STORE_LABEL
-            } else if matches!(field.stat, UnitStat::Price)
-                && affordable
-                && lit.contains(&field.unit)
-            {
-                STORE_SOIL
-            } else if matches!(field.stat, UnitStat::Price) && affordable {
-                GOLD
-            } else if matches!(field.stat, UnitStat::Gain)
-                && matches!(field.unit, Unit::Support(SupportRole::Technologist))
-            {
-                // Checked before the generic negative-gain arm below: a
-                // Technologist's own gain_per_min is exactly -wage at every
-                // world state (D14) - always negative - even though the row
-                // is a perfectly good buy. Gold marks "correctly unranked,"
-                // not "underwater."
-                GOLD
-            } else if matches!(field.stat, UnitStat::Gain) && plan.gain_per_min < 0.0 {
-                BROWN_LIGHT
-            } else if matches!(field.stat, UnitStat::Price) {
-                STORE_LABEL
-            } else {
-                INK
-            },
-        );
+        let is_locked = locked(field.unit);
+        set_class(&mut classes, "locked", is_locked);
+        // Checked before the generic negative-gain arm: a Technologist's own
+        // gain_per_min is exactly -wage at every world state (D14) - always
+        // negative - even though the row is a perfectly good buy. Gold marks
+        // "correctly unranked," not "underwater."
+        let gold = !is_locked
+            && matches!(field.stat, UnitStat::Gain)
+            && matches!(field.unit, Unit::Support(SupportRole::Technologist));
+        let negative = !is_locked
+            && !gold
+            && matches!(field.stat, UnitStat::Gain)
+            && plan.gain_per_min < 0.0;
+        set_class(&mut classes, "gold", gold);
+        set_class(&mut classes, "negative", negative);
+
         let owned = match field.unit {
             Unit::Worker => workforce.count(),
             Unit::Support(role) => staff.count(role),
@@ -1757,10 +1460,9 @@ pub fn sync_shop_new(
         };
         let value = match (field.stat, field.unit) {
             (UnitStat::Name, _) => field.unit.name().to_string(),
-            (UnitStat::Price, Unit::Cart) if cart_locked => String::new(),
-            (UnitStat::Price, _) => format!("{:.1}", plan.cost),
+            (UnitStat::Price, _) => unreachable!("price text carries `PriceText`, see `prices`"),
             (UnitStat::Owned, Unit::Cart) if cart_locked => String::new(),
-            (UnitStat::Owned, _) => format!("OWNED {owned}"),
+            (UnitStat::Owned, _) => format!("x{owned}"),
             (UnitStat::Gain, Unit::Cart) if cart_locked => {
                 if staff.count(SupportRole::Technologist) == 0 {
                     "NEEDS A TECHNOLOGIST".to_string()
@@ -1769,10 +1471,9 @@ pub fn sync_shop_new(
                 }
             }
             (UnitStat::Gain, Unit::Support(SupportRole::Technologist)) => {
-                format!("{:.1}\nRES/s", technologist_research_per_sec(*multipliers))
+                format!("{:.1} RES/s", technologist_research_per_sec(*multipliers))
             }
             (UnitStat::Gain, _) => format!("{:+.1}/min", plan.gain_per_min),
-            (UnitStat::Feeding, _) => String::new(),
         };
         set_if_changed(&mut text.0, value);
     }
@@ -1786,18 +1487,26 @@ pub fn sync_shop_new(
             },
         );
     }
+    for (swatch, mut classes) in &mut swatches {
+        set_class(&mut classes, "locked", locked(swatch.0));
+    }
+    // One entry per unit, filled in below and consulted by the price text
+    // loop: the price text is a sibling of `HireButton`'s own colour, not
+    // read through it, since there is no `Children` lookup in this query set.
+    let mut price_colors: Vec<(Unit, Color)> = Vec::with_capacity(Unit::ROWS.len());
     for (button, interaction, mut background, mut border, mut node) in &mut buttons {
         let affordable = plan_hire(button.0.kind(), world).affordable && !locked(button.0);
-        let (fill, edge) = if !affordable {
-            (STORE_CARD, STORE_LABEL)
+        let lit = affordable && matches!(interaction, Interaction::Hovered | Interaction::Pressed);
+        let (bg, edge, text) = if lit {
+            (HIRE_LIT_BG, HIRE_LIT_BORDER, HIRE_LIT_TEXT)
+        } else if affordable {
+            (HIRE_AFFORD_BG, HIRE_AFFORD_EDGE, HIRE_AFFORD_EDGE)
         } else {
-            match interaction {
-                Interaction::Pressed | Interaction::Hovered => (GOLD, CREAM),
-                Interaction::None => (BROWN_LIGHT, GOLD),
-            }
+            (HIRE_DIM_BG, HIRE_DIM_BORDER, HIRE_DIM_TEXT)
         };
-        set_if_changed(&mut *background, BackgroundColor(fill));
+        set_if_changed(&mut *background, BackgroundColor(bg));
         set_if_changed(&mut *border, BorderColor::all(edge));
+        price_colors.push((button.0, text));
         set_if_changed(
             &mut node.display,
             if locked(button.0) {
@@ -1806,6 +1515,18 @@ pub fn sync_shop_new(
                 Display::Flex
             },
         );
+    }
+    for (field, mut text, mut color) in &mut prices {
+        let plan = plan_hire(field.unit.kind(), world);
+        let value = if locked(field.unit) {
+            String::new()
+        } else {
+            format!("{:.1}", plan.cost)
+        };
+        set_if_changed(&mut text.0, value);
+        if let Some((_, hue)) = price_colors.iter().find(|(unit, _)| *unit == field.unit) {
+            set_if_changed(&mut color.0, *hue);
+        }
     }
 }
 
@@ -1879,46 +1600,6 @@ pub fn sync_info(
         }
     }
     let _ = (&carts, &fed, &research); // keep the panel system's live inputs explicit
-}
-
-#[allow(clippy::type_complexity)]
-pub fn style_buttons(
-    mut buttons: Query<
-        (
-            &Interaction,
-            Option<&MenuButtonTone>,
-            &mut BackgroundColor,
-            &mut BorderColor,
-        ),
-        (
-            With<ButtonAction>,
-            Without<HireButton>,
-            Without<StoreGrip>,
-            Changed<Interaction>,
-        ),
-    >,
-) {
-    for (interaction, tone, mut background, mut border) in &mut buttons {
-        match interaction {
-            Interaction::Pressed => {
-                *background = BackgroundColor(GOLD);
-                *border = BorderColor::all(CREAM);
-            }
-            Interaction::Hovered => {
-                *background = BackgroundColor(BROWN_LIGHT);
-                *border = BorderColor::all(GOLD);
-            }
-            Interaction::None => {
-                *background = BackgroundColor(BROWN);
-                *border = BorderColor::all(match tone {
-                    Some(MenuButtonTone::Emphasized) => GOLD,
-                    #[cfg(target_arch = "wasm32")]
-                    Some(MenuButtonTone::Secondary) => BROWN_LIGHT,
-                    _ => CREAM,
-                });
-            }
-        }
-    }
 }
 
 #[cfg(test)]

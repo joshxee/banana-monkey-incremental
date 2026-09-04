@@ -11,6 +11,7 @@ use bevy::{
     prelude::*,
     window::{PresentMode, WindowResolution},
 };
+use bevy_flair::prelude::*;
 
 use game::HarvestGamePlugin;
 
@@ -37,7 +38,8 @@ fn main() {
                     }),
                     ..default()
                 }),
-        );
+        )
+        .add_plugins(FlairPlugin);
 
     let run = persistence::load_run();
     // The *pool*, not the workforce: crewed monkeys get no avatar, so counting

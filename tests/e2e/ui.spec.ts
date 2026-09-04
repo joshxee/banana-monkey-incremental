@@ -9,7 +9,6 @@ type UiState = {
   bananas: number;
   workers: number;
   interaction: string;
-  storeExpanded: boolean;
   selectedTab: "MONKEYS" | "BUILDINGS" | "RESEARCH";
   storeScroll: number;
   viewport: Point;
@@ -17,7 +16,6 @@ type UiState = {
   deposit: Point;
   buttons: {
     hireWorker: Point;
-    toggleStore: Point;
     previousTab: Point;
     nextTab: Point;
   };
@@ -88,12 +86,6 @@ async function touchDrag(page: Page, from: Point, to: Point): Promise<void> {
   await client.detach();
 }
 
-async function touchTap(page: Page, point: Point): Promise<void> {
-  const viewport = (await state(page)).viewport;
-  const client = await canvasPointToClient(page, point, viewport);
-  await page.touchscreen.tap(client.x, client.y);
-}
-
 test("shop arrows and keyboard visit every tab without changing the economy", async ({ page }) => {
   await openFreshGame(page);
   const initial = await state(page);
@@ -145,34 +137,4 @@ test("horizontal tab swipe and vertical list scroll have separate intent", async
   expect(after.selectedTab).toBe("MONKEYS");
   expect(after.workers).toBe(0);
   expect(after.bananas).toBe(affordable.bananas);
-});
-
-test("expanded drawer owns touches over the covered world", async ({ page }, testInfo) => {
-  test.skip(!testInfo.project.name.startsWith("mobile"), "touch project only");
-  await openFreshGame(page);
-
-  for (let index = 0; index < 4; index += 1) {
-    const before = (await state(page)).bananas;
-    await page.keyboard.press("h");
-    await expect.poll(async () => (await state(page)).bananas).toBe(before + 1);
-  }
-
-  const collapsed = await state(page);
-  await touchTap(page, collapsed.buttons.toggleStore);
-  await expect.poll(async () => (await state(page)).storeExpanded).toBe(true);
-
-  const expanded = await state(page);
-  await touchDrag(page, expanded.harvest, expanded.deposit);
-  await expect.poll(async () => (await state(page)).interaction).toBe("idle");
-  expect((await state(page)).bananas).toBe(expanded.bananas);
-
-  const beforeButtonDrag = await state(page);
-  await touchDrag(
-    page,
-    { x: beforeButtonDrag.buttons.hireWorker.x, y: 150 },
-    beforeButtonDrag.buttons.hireWorker,
-  );
-  const afterButtonDrag = await state(page);
-  expect(afterButtonDrag.workers).toBe(0);
-  expect(afterButtonDrag.bananas).toBe(beforeButtonDrag.bananas);
 });

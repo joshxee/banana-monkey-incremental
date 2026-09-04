@@ -14,7 +14,6 @@ type GameState = {
   meal: number;
   canHire: boolean;
   committed: number;
-  storeExpanded: boolean;
   staff: Array<{
     role: string;
     owned: number;
@@ -47,7 +46,6 @@ type GameState = {
     hireChef: Point;
     hireUnpacker: Point;
     hireTechnologist: Point;
-    toggleStore: Point;
     resume: Point;
     restart: Point;
     confirmRestart: Point;

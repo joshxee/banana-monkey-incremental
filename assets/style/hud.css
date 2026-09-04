@@ -1,0 +1,322 @@
+/* HUD chrome: bar, store panel, unit cards, info panel, pause menu.
+ *
+ * Colours are sampled from palette.png (a 31-swatch natural strip - soil
+ * browns, terracotta, sage/olive greens, slate blue-grey). The five existing
+ * scene colours (ink/cream/brown/brown-light/gold, shared with the isometric
+ * board and left untouched there) stay as-is here too, so HUD chrome reads as
+ * part of the same world rather than a different app bolted on top.
+ *
+ * Viewport-responsive *numbers* (widths, font-size tiers, padding tiers) stay
+ * driven by SceneLayout in Rust: they are continuous or compound functions of
+ * live geometry, not discrete swaps a media query expresses cleanly. This
+ * file owns colour, border, radius, spacing-that-never-changes, and
+ * interaction state (:hover/:active), including everything that used to be
+ * scattered across `style_buttons` and per-frame colour branches in
+ * `sync_shop_new`.
+ */
+
+:root {
+  color: #29140F; /* ink */
+}
+
+/* ---- Top bar ---------------------------------------------------------- */
+
+.hud-bar {
+  background-color: #F1F6F0;
+}
+
+.banner {
+  flex-direction: column;
+  align-items: center;
+  background-color: #FFF0B8; /* cream */
+  border: 4px solid #542414; /* brown */
+  border-radius: 12px;
+}
+
+.banner-label {
+  color: #85401F; /* brown-light */
+}
+
+.counter-text {
+  color: #29140F;
+}
+
+.rate-panel {
+  flex-direction: row;
+  border-top: 2px solid #85401F;
+}
+
+.rate-line {
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  overflow: hidden;
+}
+
+.rate-farming {
+  color: #29140F;
+}
+
+.rate-feeding {
+  color: #85401F;
+}
+
+.rate-net {
+  color: #29140F;
+}
+
+.rate-hungry {
+  color: #FFBF0D; /* gold */
+}
+
+.menu-button {
+  background-color: #542414;
+  border: 3px solid #FFF0B8;
+  border-radius: 10px;
+  transition: background-color 0.12s, border-color 0.12s;
+
+  &:hover {
+    background-color: #85401F;
+    border-color: #FFBF0D;
+  }
+
+  &:active {
+    background-color: #FFBF0D;
+    border-color: #FFF0B8;
+  }
+}
+
+.menu-button text {
+  color: #FFF0B8;
+}
+
+/* ---- Store panel -------------------------------------------------------- */
+
+.store-panel {
+  background-color: #FEE1B8; /* warm tan, from palette */
+  border-top: 3px solid #542414;
+}
+
+.tab-arrow {
+  justify-content: center;
+  align-items: center;
+  background-color: #542414;
+  border: 2px solid #85401F;
+  border-radius: 8px;
+  transition: background-color 0.12s, border-color 0.12s;
+
+  &:hover {
+    background-color: #85401F;
+    border-color: #FFBF0D;
+  }
+
+  &:active {
+    background-color: #FFBF0D;
+    border-color: #FFF0B8;
+  }
+}
+
+.tab-arrow text {
+  color: #FFF0B8;
+}
+
+.tab-label {
+  color: #87857C; /* soil grey */
+}
+
+.tab-label.active {
+  color: #542414;
+}
+
+.coming-soon {
+  color: #542414;
+}
+
+.scroll-cue {
+  background-color: #FFF0B8;
+}
+
+.scroll-cue text {
+  color: #542414;
+}
+
+/* ---- Unit cards ---------------------------------------------------------
+ * Two-tier card: a top row that always fits (swatch, name, live rate, owned
+ * badge, price pill, info button - every figure a player checks before every
+ * purchase) and a second row that can be hidden under height pressure
+ * (description prose only, per game-designer/mathematician review: never
+ * hide a number, only ever the sentence that explains it).
+ */
+
+.unit-card {
+  background-color: #F1F6F0;
+  border: 2px solid #D4C692;
+  border-radius: 12px;
+}
+
+.unit-swatch {
+  border-radius: 6px;
+}
+.unit-swatch.worker { background-color: #EB9661; }
+.unit-swatch.chef { background-color: #819447; }
+.unit-swatch.unpacker { background-color: #6C81A1; }
+.unit-swatch.technologist { background-color: #87857C; }
+.unit-swatch.cart { background-color: #405273; }
+/* Locked wins over the per-unit colour above it: a locked row's swatch dims
+ * with its name/owned/price, rather than staying the one saturated,
+ * "available"-looking element on the card. */
+.unit-swatch.locked { background-color: #BCAD9F; }
+
+.unit-name {
+  color: #29140F;
+}
+.unit-name.locked {
+  color: #87857C;
+}
+
+.unit-owned {
+  color: #87857C;
+}
+.unit-owned.locked {
+  color: #BCAD9F;
+}
+
+.unit-rate {
+  color: #29140F;
+}
+.unit-rate.negative {
+  color: #85401F;
+}
+.unit-rate.gold {
+  color: #FFBF0D;
+}
+.unit-rate.locked {
+  color: #87857C;
+}
+
+.unit-description {
+  color: #29140F;
+}
+
+/* Colour is set directly from Rust for this one widget, not by class: bevy_flair
+ * (0.8.1) does not re-resolve style for a `Button` entity when only its
+ * `ClassList` changes after spawn - confirmed by instrumenting `sync_shop_new`
+ * (the class really does flip to `["hire-button", "affordable"]`) while the
+ * rendered colour stayed pinned to the spawn-time resolution regardless of
+ * property or of removing the `:hover`/`:active` variants. Plain `Text`
+ * entities (`.tab-label.active`, `.unit-rate.gold`) and statically-classed
+ * `Button`s (`.menu-panel-button.emphasized`) are unaffected - only a
+ * `Button`'s post-spawn class mutation is stuck. Everything static about the
+ * button (radius, centering) stays here; affordability/hover colour is
+ * `Color`/`BackgroundColor`/`BorderColor` writes in `sync_shop_new`.
+ */
+.hire-button {
+  justify-content: center;
+  align-items: center;
+  border-radius: 7px;
+}
+
+.locked-plaque {
+  justify-content: center;
+  align-items: center;
+  background-color: #FEE1B8;
+  border: 2px solid #87857C;
+  border-radius: 7px;
+  color: #87857C;
+}
+
+.unit-info-button {
+  justify-content: center;
+  align-items: center;
+  background-color: #542414;
+  border: 2px solid #85401F;
+  border-radius: 7px;
+  color: #FFBF0D;
+  transition: background-color 0.12s, border-color 0.12s;
+}
+.unit-info-button:hover {
+  background-color: #85401F;
+  border-color: #FFBF0D;
+}
+.unit-info-button:active {
+  background-color: #FFBF0D;
+  border-color: #FFF0B8;
+  color: #542414;
+}
+
+/* ---- Info panel ---------------------------------------------------------- */
+
+.info-panel {
+  flex-direction: column;
+  background-color: #542414;
+  border: 3px solid #FFBF0D;
+}
+
+.info-title {
+  color: #FFBF0D;
+}
+
+.info-body {
+  color: #FFF0B8;
+}
+
+.info-hint {
+  color: #87857C;
+}
+
+/* ---- Pause menu ----------------------------------------------------------- */
+
+.menu-scrim {
+  justify-content: center;
+  align-items: center;
+  background-color: rgba(15, 8, 5, 0.72);
+}
+
+.menu-panel {
+  flex-direction: column;
+  align-items: center;
+  background-color: #FFF0B8;
+  border: 5px solid #542414;
+  border-radius: 14px;
+}
+
+.menu-title {
+  color: #29140F;
+}
+
+.menu-subtitle {
+  color: #85401F;
+}
+
+.menu-body {
+  color: #29140F;
+}
+
+.menu-panel-button {
+  justify-content: center;
+  align-items: center;
+  background-color: #542414;
+  border: 3px solid #FFF0B8;
+  border-radius: 10px;
+  transition: background-color 0.12s, border-color 0.12s;
+
+  &:hover {
+    background-color: #85401F;
+    border-color: #FFBF0D;
+  }
+
+  &:active {
+    background-color: #FFBF0D;
+    border-color: #FFF0B8;
+  }
+}
+.menu-panel-button.emphasized {
+  border-color: #FFBF0D;
+}
+.menu-panel-button.secondary {
+  border-color: #85401F;
+}
+
+.menu-panel-button text {
+  color: #FFF0B8;
+}
