@@ -614,6 +614,19 @@ fn setup(
 ) {
     commands.spawn((Camera2d, MainCamera));
 
+    // Eager, like every sprite below it. This used to be lazy, built by
+    // whichever system first found it missing - which was always
+    // `worker::spawn_missing_workers`, until a player hired a Chef, an
+    // Unpacker or a Technologist before ever hiring a Worker and got a fully
+    // live, wage-drawing monkey with no sprite: nothing else that reads this
+    // resource can create it, so a save-file or purchase order that never
+    // exercises the one lazy-init branch left every support avatar (and a
+    // cart bought as the very first purchase) invisible forever.
+    commands.insert_resource(worker::WorkerArt::load(
+        &asset_server,
+        &mut texture_atlas_layouts,
+    ));
+
     commands.spawn((
         Sprite {
             image: asset_server.load("Background/Background_2.png"),
@@ -2077,6 +2090,11 @@ struct TestState {
     deposit: TestPoint,
     monkeys: Vec<TestWorker>,
     staff: Vec<TestStaff>,
+    /// `support::SupportAvatar` entities on screen, summed across every role.
+    /// Guards against the resource-ordering bug where a support monkey could
+    /// be fully hired and drawing wages with no sprite at all: this is zero
+    /// only when nothing is hired, never when something is.
+    avatars_drawn: u32,
     /// Bananas reserved by harvesters against meals they have earned but not
     /// yet eaten, and which therefore nothing else may spend.
     committed: f64,
@@ -2129,6 +2147,7 @@ fn sync_web_test_state(
     banana_transform: Single<&Transform, With<Banana>>,
     workers: Query<(&HarvestCycle, &Transform), With<Worker>>,
     support: Query<(&SupportRole, &SupportCycle), With<SupportUnit>>,
+    avatars: Query<Entity, With<support::SupportAvatar>>,
     buttons: Query<(&ButtonAction, &ComputedNode, &UiGlobalTransform)>,
     mut warmup_frames: Local<u8>,
 ) {
@@ -2269,6 +2288,7 @@ fn sync_web_test_state(
                 }
             })
             .collect(),
+        avatars_drawn: avatars.iter().count() as u32,
         committed: committed.0,
         research: research.points(),
         research_level: research.level(),

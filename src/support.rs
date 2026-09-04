@@ -229,7 +229,7 @@ pub(crate) fn sync_support_avatars(
     time: Res<Time>,
     layout: Res<SceneLayout>,
     staff: Res<Staff>,
-    art: Option<Res<WorkerArt>>,
+    art: Res<WorkerArt>,
     units: Query<(&SupportRole, &SupportCycle), With<SupportUnit>>,
     mut avatars: Query<(
         Entity,
@@ -239,11 +239,6 @@ pub(crate) fn sync_support_avatars(
         &mut Sprite,
     )>,
 ) {
-    let Some(art) = art else {
-        // The atlas lands at the end of a tick; avatars appear on the next one.
-        return;
-    };
-
     let per_role = avatars_per_role(&layout);
     for role in SupportRole::ALL {
         let wanted = (staff.count(role) as usize).min(per_role);

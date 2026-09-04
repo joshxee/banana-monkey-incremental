@@ -169,6 +169,53 @@ pub(crate) struct WorkerArt {
 }
 
 impl WorkerArt {
+    /// Loaded once, at [`crate::game::HarvestGamePlugin`]'s `Startup`, like
+    /// every other sprite in the scene.
+    ///
+    /// This used to be lazy: the first system to find the resource missing
+    /// would build and insert it. That worked as long as the first purchase
+    /// of *any* game was a Worker, because only [`spawn_missing_workers`]
+    /// carried the lazy-init branch - `animate_workers`, `spawn_missing_carts`
+    /// and `support::sync_support_avatars` all just read `Option<Res<Self>>`
+    /// and returned early on `None`, forever, if nothing ever triggered the one
+    /// branch that created it. A player who bought a Chef, an Unpacker or a
+    /// Technologist before ever hiring a Worker got a fully-functioning,
+    /// wage-drawing monkey with no sprite at all - invisible, but real: it
+    /// showed up in the shop's OWNED count and the readout's FEEDING line, just
+    /// never on screen. Loading eagerly removes the race instead of chasing it
+    /// through a fourth call site.
+    pub(crate) fn load(
+        asset_server: &AssetServer,
+        layouts: &mut Assets<TextureAtlasLayout>,
+    ) -> Self {
+        Self {
+            idle_image: asset_server.load("Monkey/Character Spritesheets/1-Idle/Idle.png"),
+            run_image: asset_server.load("Monkey/Character Spritesheets/2-Run/Run.png"),
+            idle_layout: layouts.add(TextureAtlasLayout::from_grid(
+                UVec2::splat(FRAME_SIZE),
+                IDLE_FRAMES as u32,
+                1,
+                None,
+                None,
+            )),
+            run_layout: layouts.add(TextureAtlasLayout::from_grid(
+                UVec2::splat(FRAME_SIZE),
+                RUN_FRAMES as u32,
+                1,
+                None,
+                None,
+            )),
+            banana_image: asset_server.load("Banana/Banana.png"),
+            banana_layout: layouts.add(TextureAtlasLayout::from_grid(
+                UVec2::splat(16),
+                12,
+                1,
+                None,
+                None,
+            )),
+        }
+    }
+
     /// The idle sheet, shared with `support`: every monkey in the game is this
     /// spritesheet, and the roles are told apart by what they stand next to.
     pub(crate) fn idle_image(&self) -> Handle<Image> {
@@ -228,9 +275,7 @@ pub fn spawn_missing_workers(
     mut commands: Commands,
     workforce: Res<Workforce>,
     multipliers: Res<Multipliers>,
-    art: Option<Res<WorkerArt>>,
-    asset_server: Res<AssetServer>,
-    mut layouts: ResMut<Assets<TextureAtlasLayout>>,
+    art: Res<WorkerArt>,
     mut restored: ResMut<RestoreWorkers>,
     mut next_lane: ResMut<NextLane>,
     carts: Res<Carts>,
@@ -245,42 +290,6 @@ pub fn spawn_missing_workers(
     if current >= target {
         return;
     }
-
-    let art = match art {
-        Some(art) => art,
-        None => {
-            let art = WorkerArt {
-                idle_image: asset_server.load("Monkey/Character Spritesheets/1-Idle/Idle.png"),
-                run_image: asset_server.load("Monkey/Character Spritesheets/2-Run/Run.png"),
-                idle_layout: layouts.add(TextureAtlasLayout::from_grid(
-                    UVec2::splat(FRAME_SIZE),
-                    IDLE_FRAMES as u32,
-                    1,
-                    None,
-                    None,
-                )),
-                run_layout: layouts.add(TextureAtlasLayout::from_grid(
-                    UVec2::splat(FRAME_SIZE),
-                    RUN_FRAMES as u32,
-                    1,
-                    None,
-                    None,
-                )),
-                banana_image: asset_server.load("Banana/Banana.png"),
-                banana_layout: layouts.add(TextureAtlasLayout::from_grid(
-                    UVec2::splat(16),
-                    12,
-                    1,
-                    None,
-                    None,
-                )),
-            };
-            commands.insert_resource(art);
-            // The resource lands at the end of the tick; the freshly hired
-            // worker is spawned on the next one, a fixed tick later.
-            return;
-        }
-    };
 
     for _ in current..target {
         // A monotonic hand-out, never `existing.count()`. Boarding despawns
@@ -445,14 +454,11 @@ pub fn position_workers(
 #[allow(clippy::type_complexity)]
 pub fn animate_workers(
     time: Res<Time>,
-    art: Option<Res<WorkerArt>>,
+    art: Res<WorkerArt>,
     multipliers: Res<Multipliers>,
     mut workers: Query<(&HarvestCycle, &mut Pose, &mut Sprite, &Children), With<Worker>>,
     mut carried: Query<&mut Visibility, With<CarriedBanana>>,
 ) {
-    let Some(art) = art else {
-        return;
-    };
     // f64: past ~10^5 s of session an f32 mantissa coarsens enough to make the
     // idle loop visibly judder.
     let elapsed = time.elapsed_secs_f64();
@@ -585,13 +591,10 @@ pub fn spawn_missing_carts(
     mut commands: Commands,
     carts: Res<Carts>,
     multipliers: Res<Multipliers>,
-    art: Option<Res<WorkerArt>>,
+    art: Res<WorkerArt>,
     mut restored: ResMut<RestoreCarts>,
     existing: Query<Entity, With<Cart>>,
 ) {
-    let Some(art) = art else {
-        return;
-    };
     let current = existing.iter().count() as u32;
     for index in current..carts.owned() {
         // A restored cart gets a random elapsed phase, exactly as a restored
