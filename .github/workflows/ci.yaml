@@ -34,7 +34,7 @@ jobs:
       - name: Run cargo test
         run: cargo test --locked
       - name: Run economy contract tests
-        run: python3 docs/economy/test_banana.py
+        run: python3 docs/test_banana.py
 
   clippy:
     name: Clippy

@@ -6,13 +6,10 @@ This is a Rust and Bevy incremental game. Favor a small, deterministic core and 
 
 Bevy programs can be compiled and run inside this Nix shell with `nix-shell --run "cargo run"`.
 
-## Specialist gates
+## Specialist review
 
-- The main agent owns planning, implementation, synthesis, and final decisions.
-- After drafting a material implementation plan, consult `mathematician`, `game-designer`, and `game-developer` in parallel. Reconcile their findings before implementation.
-- After implementing and locally verifying a material change set, ask all three to review the diff and evidence. Resolve findings before completion.
-- Specialists advise and review. They edit only when the user explicitly delegates implementation to them, and return `PASS` when they have no domain finding.
-- Material work changes runtime behavior, balance, architecture, UI, or tests. Skip the gates for questions and tiny text or metadata edits.
-- The specialist gates are for feature development and other material game changes. Skip them for CI, release, repository hygiene, infrastructure, and build-fix work unless the task changes game behavior or design.
+- After implementing and locally verifying material game work, ask `mathematician`, `game-designer`, and `game-developer` to review the diff and evidence in parallel. Resolve findings before completion.
+- Material work changes runtime behavior, balance, architecture, UI, or tests. Skip review for questions, text or metadata edits, CI, releases, repository hygiene, infrastructure, and build fixes unless game behavior or design changes.
+- Specialists advise and review; they edit only when explicitly delegated. The main agent owns implementation and final decisions.
 
 The specialist definitions and their project-source indexes live in `.claude/agents/`.

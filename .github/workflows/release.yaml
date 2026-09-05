@@ -33,7 +33,7 @@ jobs:
           cargo clippy --locked -- -D warnings
           cargo fmt --all -- --check
       - name: Run economy contract tests
-        run: python3 docs/economy/test_banana.py
+        run: python3 docs/test_banana.py
       - name: Verify release tag and itch credentials
         env:
           BUTLER_CREDENTIALS: ${{ secrets.BUTLER_CREDENTIALS }}

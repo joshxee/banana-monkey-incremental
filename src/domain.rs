@@ -1,9 +1,9 @@
 //! The economy core: pure, deterministic, and free of Bevy beyond the derives
 //! that let these types live in the world.
 //!
-//! Everything here is traceable to `docs/economy/banana-architecture-v2.md` and
-//! the parameter table in `docs/economy/banana-whitepaper.md` §8. The reference
-//! implementation is `docs/economy/banana_model.py`; where this module and that
+//! Everything here is traceable to `docs/banana-architecture-v2.md` and
+//! the parameter table in `docs/banana-whitepaper.md` §8. The reference
+//! implementation is `docs/banana_model.py`; where this module and that
 //! model disagree, the model is the oracle.
 
 use bevy::prelude::{Component, Resource};
