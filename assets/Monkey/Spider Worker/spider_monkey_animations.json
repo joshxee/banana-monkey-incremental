@@ -1,0 +1,275 @@
+{ "frames": [
+   {
+    "filename": "spider_monkey_animations 0.ase",
+    "frame": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 300
+   },
+   {
+    "filename": "spider_monkey_animations 1.ase",
+    "frame": { "x": 64, "y": 0, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 250
+   },
+   {
+    "filename": "spider_monkey_animations 2.ase",
+    "frame": { "x": 128, "y": 0, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 300
+   },
+   {
+    "filename": "spider_monkey_animations 3.ase",
+    "frame": { "x": 192, "y": 0, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 250
+   },
+   {
+    "filename": "spider_monkey_animations 4.ase",
+    "frame": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 80
+   },
+   {
+    "filename": "spider_monkey_animations 5.ase",
+    "frame": { "x": 256, "y": 0, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 80
+   },
+   {
+    "filename": "spider_monkey_animations 6.ase",
+    "frame": { "x": 0, "y": 64, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 80
+   },
+   {
+    "filename": "spider_monkey_animations 7.ase",
+    "frame": { "x": 64, "y": 64, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 70
+   },
+   {
+    "filename": "spider_monkey_animations 8.ase",
+    "frame": { "x": 128, "y": 64, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 60
+   },
+   {
+    "filename": "spider_monkey_animations 9.ase",
+    "frame": { "x": 192, "y": 64, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 60
+   },
+   {
+    "filename": "spider_monkey_animations 10.ase",
+    "frame": { "x": 192, "y": 64, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 70
+   },
+   {
+    "filename": "spider_monkey_animations 11.ase",
+    "frame": { "x": 256, "y": 64, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 60
+   },
+   {
+    "filename": "spider_monkey_animations 12.ase",
+    "frame": { "x": 0, "y": 128, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 50
+   },
+   {
+    "filename": "spider_monkey_animations 13.ase",
+    "frame": { "x": 64, "y": 128, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 70
+   },
+   {
+    "filename": "spider_monkey_animations 14.ase",
+    "frame": { "x": 128, "y": 128, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 60
+   },
+   {
+    "filename": "spider_monkey_animations 15.ase",
+    "frame": { "x": 192, "y": 128, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 50
+   },
+   {
+    "filename": "spider_monkey_animations 16.ase",
+    "frame": { "x": 256, "y": 128, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 70
+   },
+   {
+    "filename": "spider_monkey_animations 17.ase",
+    "frame": { "x": 0, "y": 192, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 60
+   },
+   {
+    "filename": "spider_monkey_animations 18.ase",
+    "frame": { "x": 64, "y": 192, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 50
+   },
+   {
+    "filename": "spider_monkey_animations 19.ase",
+    "frame": { "x": 128, "y": 192, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 70
+   },
+   {
+    "filename": "spider_monkey_animations 20.ase",
+    "frame": { "x": 192, "y": 192, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 60
+   },
+   {
+    "filename": "spider_monkey_animations 21.ase",
+    "frame": { "x": 256, "y": 192, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 50
+   },
+   {
+    "filename": "spider_monkey_animations 22.ase",
+    "frame": { "x": 192, "y": 64, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 60
+   },
+   {
+    "filename": "spider_monkey_animations 23.ase",
+    "frame": { "x": 128, "y": 64, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 60
+   },
+   {
+    "filename": "spider_monkey_animations 24.ase",
+    "frame": { "x": 64, "y": 64, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 70
+   },
+   {
+    "filename": "spider_monkey_animations 25.ase",
+    "frame": { "x": 0, "y": 64, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 80
+   },
+   {
+    "filename": "spider_monkey_animations 26.ase",
+    "frame": { "x": 256, "y": 0, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 80
+   },
+   {
+    "filename": "spider_monkey_animations 27.ase",
+    "frame": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+    "sourceSize": { "w": 64, "h": 64 },
+    "duration": 100
+   }
+ ],
+ "meta": {
+  "app": "https://www.aseprite.org/",
+  "version": "1.x-dev",
+  "image": "spider_monkey_animations.png",
+  "format": "RGBA8888",
+  "size": { "w": 320, "h": 256 },
+  "scale": "1",
+  "frameTags": [
+   { "name": "idle", "from": 0, "to": 3, "direction": "forward", "color": "#000000ff" },
+   { "name": "rise", "from": 4, "to": 9, "direction": "forward", "color": "#000000ff" },
+   { "name": "walk", "from": 10, "to": 21, "direction": "forward", "color": "#000000ff" },
+   { "name": "settle", "from": 22, "to": 27, "direction": "forward", "color": "#000000ff" }
+  ],
+  "layers": [
+   { "name": "Tail", "opacity": 255, "blendMode": "normal" },
+   { "name": "Far limbs", "opacity": 255, "blendMode": "normal" },
+   { "name": "Body", "opacity": 255, "blendMode": "normal" },
+   { "name": "Near limbs", "opacity": 255, "blendMode": "normal" }
+  ]
+ }
+}
