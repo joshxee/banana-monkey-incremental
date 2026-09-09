@@ -5,6 +5,7 @@ mod headless;
 mod hud;
 mod isometric;
 mod launch;
+mod map;
 mod persistence;
 mod scenario;
 #[cfg(test)]

@@ -432,6 +432,38 @@ The Technologist keeps `+1.0 RESEARCH/s` and a different colour. Being visibly
 the one row the ranking does not price is correct (D14); it should look
 intentional.
 
+**D24 — The grove distance is measured on a map, and the units were rescaled to
+pay for it.** *(Map increment.)*
+
+`GROVE_DISTANCE` was 100 m because somebody chose 100. The village now has a
+map — `assets/maps/start.txt`, a grid of jungle, ring path and town parsed by
+`map.rs` — and travel is the walk across it: A* on the passable tiles, pulled
+taut so that what the economy is charged for is the line a monkey actually
+covers rather than the staircase a grid search returns. The shipped walk from
+the town centre to the nearer banana node is 30 tiles of 2 m, and
+`GROVE_DISTANCE` is now that measurement. A test asserts the equality, so
+redrawing the map fails the build rather than silently moving the balance.
+
+Sixty metres is not a hundred, so the distance and **both** speeds were divided
+by 5/3: worker 5→3 m/s, cart 15→9 m/s. That is a change of units and nothing
+else. Every duration in the whitepaper is a ratio `d/v`, `M_speed` is
+dimensionless, and so the 40 s worker leg, the 13.3 s cart leg, the Chef effect
+and D17's cart advantage all come through untouched — `docs/test_banana.py`
+passes against the rescaled oracle without a single expectation being edited,
+which is the evidence for the claim.
+
+The cart is the trap here and is why the rescale had to be total. It shares
+`GROVE_DISTANCE` with the worker while owning a separate speed, so changing the
+distance and only the worker's speed would have quietly moved a cart's travel
+leg off 13.3 s and taken D17's measured 230–280% advantage with it. §8's warning
+about these levers stands; this is the one move on them that costs nothing.
+
+For the MVP the map holds two banana nodes and the workforce works the nearer,
+so every worker walks one length and `CycleSpec::distance` stays a constant.
+The constant becomes a lie the moment a second node goes live and workers can be
+assigned, and that is the point at which `distance` moves from `CycleSpec`'s
+consts onto the entity.
+
 ---
 
 ## 4. Data Model

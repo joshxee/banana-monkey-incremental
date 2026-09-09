@@ -31,16 +31,16 @@ import random
 
 @dataclass
 class Params:
-    dist: float = 100.0            # metres to the grove, one way
+    dist: float = 60.0             # metres to the grove, one way (D24: measured on the map)
 
-    w_speed: float = 5.0
+    w_speed: float = 3.0
     w_payload: float = 5.0
     w_salary: float = 0.03
     w_snack: float = 0.05          # share of the trip spent eating at the stall
     w_cost_b: float = 4.0
     w_cost_r: float = 1.15
 
-    k_speed: float = 15.0
+    k_speed: float = 9.0
     k_payload: float = 100.0
     k_crew: int = 3
     k_salary: float = 0.20

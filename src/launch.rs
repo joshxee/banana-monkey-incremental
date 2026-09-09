@@ -25,7 +25,11 @@
 
 use bevy::prelude::*;
 
-use crate::scenario::{self, Scenario};
+use crate::{
+    domain::GROVE_DISTANCE,
+    map::{self, Terrain, Tile},
+    scenario::{self, Scenario},
+};
 
 /// Slower than this and a playtest is a screensaver.
 pub const MIN_SPEED: f64 = 0.1;
@@ -58,6 +62,9 @@ pub enum LaunchError {
     /// The caller asked for the usage text, which is not an error but has to
     /// stop the launch the same way one does.
     Help,
+    /// The caller asked for something the launcher can answer on its own, and
+    /// then not start: `--map`. Like [`Self::Help`], a clean exit.
+    Report(String),
     Invalid(String),
 }
 
@@ -74,6 +81,7 @@ impl Launch {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--help" | "-h" | "--scenarios" => return Err(LaunchError::Help),
+                "--map" => return Err(LaunchError::Report(Self::map_report())),
                 _ => {}
             }
             let Some(key) = arg.strip_prefix("--") else {
@@ -160,6 +168,7 @@ impl Launch {
              --scenario  start from a named state instead of the save (saving is off)\n\
              --speed     run the clock N times faster than real time (0.1 to 60)\n\
              --view      `stage` draws the board without the HUD\n\
+             --map       print the shipped map and the walk the economy is balanced against\n\
              \n\
              scenarios:\n",
         );
@@ -179,6 +188,72 @@ impl Launch {
         text
     }
 
+    /// What `--map` prints.
+    ///
+    /// A designer redrawing `assets/maps/start.txt` moves the travel leg, and
+    /// therefore the whole balance (D24). This is the readout that says so
+    /// before `cargo test` does: the shape of the map, every banana node with
+    /// its measured walk, and the constant that walk has to agree with.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn map_report() -> String {
+        let map = map::start();
+        let mut tiles = [0u32; 4];
+        for y in 0..map.height() {
+            for x in 0..map.width() {
+                tiles[match map.terrain(Tile::new(x, y)) {
+                    Terrain::Jungle => 0,
+                    Terrain::Path => 1,
+                    Terrain::Town => 2,
+                    Terrain::Grove => 3,
+                }] += 1;
+            }
+        }
+
+        let centre = map.town_centre();
+        let mut text = format!(
+            "map: {}x{} tiles of {} m\n\
+             \n\
+             terrain:  {} jungle  {} path  {} town  {} grove\n\
+             centre:   ({}, {})\n\
+             \n\
+             banana nodes, nearest first:\n",
+            map.width(),
+            map.height(),
+            map::TILE_METRES,
+            tiles[0],
+            tiles[1],
+            tiles[2],
+            tiles[3],
+            centre.x,
+            centre.y,
+        );
+        for (rank, &grove) in map.groves().iter().enumerate() {
+            let route = map
+                .route(centre, grove)
+                .expect("every node was proved reachable at parse time");
+            text.push_str(&format!(
+                "  ({:>2}, {:>2})  {:7.2} m over {} leg(s){}\n",
+                grove.x,
+                grove.y,
+                route.length(),
+                route.points().len().saturating_sub(1),
+                if rank == 0 { "   <- worked" } else { "" },
+            ));
+        }
+
+        let walked = map.reference_route().length();
+        text.push_str(&format!(
+            "\ntravel leg: the worked node is {walked:.4} m; GROVE_DISTANCE is \
+             {GROVE_DISTANCE:.4} m{}\n",
+            if walked == GROVE_DISTANCE {
+                ""
+            } else {
+                "  ** DISAGREE: re-derive the balance, see D24 **"
+            },
+        ));
+        text
+    }
+
     /// The launch this process was started with. Reads the command line on
     /// native and the page URL on the web, and only under `test-hooks`.
     #[cfg(all(feature = "test-hooks", not(target_arch = "wasm32")))]
@@ -187,6 +262,10 @@ impl Launch {
             Ok(launch) => launch,
             Err(LaunchError::Help) => {
                 print!("{}", Self::usage());
+                std::process::exit(0);
+            }
+            Err(LaunchError::Report(report)) => {
+                print!("{report}");
                 std::process::exit(0);
             }
             Err(LaunchError::Invalid(message)) => {
@@ -203,7 +282,7 @@ impl Launch {
             .unwrap_or_default();
         match Self::from_query(&search) {
             Ok(launch) => launch,
-            Err(LaunchError::Help) => Self::default(),
+            Err(LaunchError::Help) | Err(LaunchError::Report(_)) => Self::default(),
             Err(LaunchError::Invalid(message)) => {
                 // A page cannot refuse to load, so the run starts from the save
                 // and says why. Straight to the console: this runs before the
@@ -273,6 +352,18 @@ mod tests {
         assert!(args(&["--speed", "61"]).is_err());
         assert!(args(&["--speed", "inf"]).is_err());
         assert!(args(&["--speed", "fast"]).is_err());
+    }
+
+    #[test]
+    fn the_map_report_agrees_with_the_constant_it_measures() {
+        let Err(LaunchError::Report(report)) = args(&["--map"]) else {
+            panic!("`--map` reports and then stops the launch");
+        };
+        assert!(report.contains("69x69 tiles"), "{report}");
+        assert!(report.contains("<- worked"), "{report}");
+        // The readout exists to catch a redrawn map before the balance moves
+        // under it, so it had better not be shouting on the shipped one.
+        assert!(!report.contains("DISAGREE"), "{report}");
     }
 
     #[test]
