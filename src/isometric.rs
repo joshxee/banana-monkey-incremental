@@ -41,22 +41,50 @@ const HEIGHT_PER_METRE: f32 = TILE_HALF.x / METRE;
 /// The baked ground plane, under everything that stands on it.
 pub(crate) const GROUND_Z: f32 = -1.0;
 
+/// The floor for anything drawn *over* the board rather than standing on it.
+///
+/// The scene now occupies z 0 to about 137 — a tile's depth, not a hand-picked
+/// layer — which makes the old habit of "a small z means on top" exactly
+/// backwards. A baked mesh is opaque and *writes* depth, while a sprite tests
+/// against it without writing, so a dragged banana left at z = 4 is not merely
+/// mis-sorted: it is behind the hut, the palm and every wall tile, and vanishes
+/// at the one moment the player is holding it.
+///
+/// A dragged banana, a delivery floater and a role badge all belong to the
+/// player's hand rather than to the ground, so they go above the whole world.
+/// `the_world_never_reaches_the_overlay` is what keeps that true as the map
+/// grows.
+pub(crate) const OVERLAY_Z: f32 = 500.0;
+
 /// The most [`stand_z`] will shift anything.
 ///
-/// Small enough that it can never reorder two things genuinely at different
-/// depths: a tenth of a metre of separation is already 0.05 in depth units,
-/// fifty times this.
-const MAX_NUDGE: f32 = 0.001;
+/// Bounded below by the *depth buffer*, not by `f32`. The camera spans z
+/// -1000..1000 into a 32-bit depth target, so one buffer step near the village
+/// is about 1.2e-4 in world z; a nudge finer than that is invisible to any
+/// comparison against an opaque mesh, however well `f32` resolves it. Bounded
+/// above by the smallest separation that must survive: a tenth of a metre
+/// between two monkeys is 0.05 in depth units, twelve times this.
+const MAX_NUDGE: f32 = 0.004;
+
+/// The step between adjacent nudges. Above one depth-buffer step, so that two
+/// things nudged apart really are apart.
+pub(crate) const NUDGE_STEP: f32 = 0.0005;
 
 pub(crate) const BOARD_SKY: Color = Color::srgb(0.83, 0.93, 0.84);
 
+// The wall top is deliberately close to the canopy it rises out of. Opening a
+// gap between them draws a bright green kerb around the entire jungle boundary,
+// which reads as painted trim on a hedge maze rather than as sunlit canopy. And
+// the village is the brightest ground on the board: the clearing used to be,
+// which pulled the eye into an empty corner and away from the only place
+// anything happens.
 const JUNGLE_CANOPY: Color = Color::srgb(0.16, 0.34, 0.19);
-const JUNGLE_WALL_TOP: Color = Color::srgb(0.24, 0.55, 0.24);
+const JUNGLE_WALL_TOP: Color = Color::srgb(0.20, 0.43, 0.22);
 const JUNGLE_WALL_LEFT: Color = Color::srgb(0.10, 0.28, 0.13);
 const JUNGLE_WALL_RIGHT: Color = Color::srgb(0.15, 0.38, 0.17);
 const PATH: Color = Color::srgb(0.84, 0.73, 0.51);
-const TOWN: Color = Color::srgb(0.61, 0.76, 0.43);
-const CLEARING: Color = Color::srgb(0.72, 0.82, 0.52);
+const TOWN: Color = Color::srgb(0.64, 0.79, 0.46);
+const CLEARING: Color = Color::srgb(0.60, 0.71, 0.43);
 
 /// How tall the jungle stands, in metres. Enough to read as a wall a monkey
 /// could not step over, which is what the map says it is.
@@ -106,11 +134,20 @@ pub(crate) fn depth(world: Vec2) -> f32 {
 /// changes order smoothly instead of popping.
 ///
 /// `nudge` separates things that would otherwise sort identically, such as two
-/// monkeys idling on the same spot. It is clamped to [`MAX_NUDGE`] so it can
+/// monkeys idling on the same spot. It is bounded by [`MAX_NUDGE`] so it can
 /// never invert a real depth difference — an unbounded per-entity epsilon is
 /// exactly how a crowd starts flickering once it is large enough for the
 /// epsilons to add up to more than the gaps between its members.
+///
+/// The clamp is a backstop, not the mechanism: two callers that both exceed the
+/// bound do not get an order, they get the *same* z. So an out-of-range nudge is
+/// a caller's bug and says so in a debug build, rather than being saturated away
+/// quietly for the next one to rediscover.
 pub(crate) fn stand_z(world: Vec2, nudge: f32) -> f32 {
+    debug_assert!(
+        nudge.abs() <= MAX_NUDGE,
+        "a nudge of {nudge} is past MAX_NUDGE and would sort arbitrarily"
+    );
     depth(world) + nudge.clamp(-MAX_NUDGE, MAX_NUDGE)
 }
 
@@ -166,9 +203,13 @@ impl MeshBuilder {
     }
 
     fn build(self) -> Mesh {
+        // Both worlds, not `RENDER_WORLD` alone: that path *moves* the vertex
+        // data out of the main-world asset, so the mesh can never be extracted
+        // again. A backgrounded mobile tab that loses its WebGL context would
+        // lose the terrain permanently, and `./serve` is the touch playtest.
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
-            RenderAssetUsages::RENDER_WORLD,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
         );
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colours);
@@ -304,12 +345,17 @@ fn prism(
 }
 
 /// One jungle tile, raised into a wall.
-fn wall_mesh(tile: Tile) -> Mesh {
+///
+/// Built around its own origin and placed by a `Transform`, like the hut and
+/// the palms. Baking the tile's position into the vertices instead would give
+/// every one of the two hundred wall tiles a distinct mesh asset, and Bevy can
+/// only batch consecutive items that share one — two hundred draw calls for a
+/// shape that is the same shape two hundred times.
+fn wall_mesh() -> Mesh {
     let mut builder = MeshBuilder::default();
-    let origin = Vec2::new(tile.x as f32 * METRE, tile.y as f32 * METRE);
     prism(
         &mut builder,
-        origin,
+        Vec2::splat(-METRE * 0.5),
         Vec2::splat(METRE),
         0.0,
         WALL_HEIGHT,
@@ -361,6 +407,28 @@ fn palm_mesh() -> Mesh {
     builder.build()
 }
 
+/// Where the stall stands, in metres: beside the delivery point, never on it.
+///
+/// The town centre tile *is* where a worker unloads, and the queue spreads a few
+/// metres around it. A four-metre hut centred there swallows half the arriving
+/// crowd at the one moment in the cycle the player is watching — the counter
+/// ticks, the floater fires, and the monkey that earned it is inside a building.
+/// So the stall steps aside: square to the walk, so nobody has to route through
+/// it, and to whichever side is *further* from the viewer, so the queue forms in
+/// front of it rather than behind.
+fn stall_stand(map: &Map) -> Vec2 {
+    const ASIDE: f32 = 8.0;
+    let centre = tile_centre(map.town_centre());
+    let outbound = (tile_centre(map.worked_grove().tile) - centre).normalize_or_zero();
+    let across = Vec2::new(outbound.y, -outbound.x);
+    let aside = if depth(across) <= 0.0 {
+        across
+    } else {
+        -across
+    };
+    centre + aside * ASIDE
+}
+
 pub(crate) fn spawn_world(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -371,6 +439,7 @@ pub(crate) fn spawn_world(
     let painted = materials.add(ColorMaterial::from(Color::WHITE));
     let hut = meshes.add(hut_mesh());
     let palm = meshes.add(palm_mesh());
+    let wall = meshes.add(wall_mesh());
 
     commands
         .spawn((WorldRoot, Transform::default(), Visibility::default()))
@@ -383,33 +452,34 @@ pub(crate) fn spawn_world(
 
             for tile in wall_tiles(map) {
                 let at = tile_centre(tile);
+                let anchor = project(at);
                 root.spawn((
-                    Mesh2d(meshes.add(wall_mesh(tile))),
+                    Mesh2d(wall.clone()),
                     MeshMaterial2d(painted.clone()),
-                    Transform::from_xyz(0.0, 0.0, stand_z(at, 0.0)),
+                    Transform::from_xyz(anchor.x, anchor.y, stand_z(at, 0.0)),
                 ));
             }
 
             // Anything with height is its own entity, anchored at the ground it
             // stands on. That is the whole discipline: the hut covers a monkey
             // behind it and not one in front, without any per-frame sorting.
-            let standing = std::iter::once((map.town_centre(), hut)).chain(
+            //
+            // A multi-tile footprint can only carry one depth, so each takes its
+            // centre's: half a footprint of error either way, rather than a
+            // whole one at a corner. Keeping footprints small is what keeps that
+            // invisible.
+            let standing = std::iter::once((stall_stand(map), hut)).chain(
                 map.groves()
                     .iter()
                     .map(|grove| grove.tile)
                     .chain(map.home_trees().iter().copied())
-                    .map(|tile| (tile, palm.clone())),
+                    .map(|tile| (tile_centre(tile), palm.clone())),
             );
-            for (tile, mesh) in standing {
-                let at = tile_centre(tile);
+            for (at, mesh) in standing {
                 let anchor = project(at);
                 root.spawn((
                     Mesh2d(mesh),
                     MeshMaterial2d(painted.clone()),
-                    // A multi-tile footprint can only carry one depth, so it
-                    // takes its centre's: half a footprint of error either way,
-                    // rather than a whole one at a corner. Keeping footprints
-                    // small is what keeps that invisible.
                     Transform::from_xyz(anchor.x, anchor.y, stand_z(at, 0.0)),
                 ));
             }
@@ -444,9 +514,45 @@ mod tests {
         // that stops a crowd swapping who is on top.
         let behind = Vec2::new(10.0, 10.0);
         let front = Vec2::new(10.0, 10.1);
-        assert!(stand_z(front, -1.0) > stand_z(behind, 1.0));
-        // Two things on the same spot are separated, and stably.
-        assert!(stand_z(behind, 0.0005) > stand_z(behind, 0.0));
+        assert!(stand_z(front, -MAX_NUDGE) > stand_z(behind, MAX_NUDGE));
+        // Two things on the same spot are separated, and by more than one step
+        // of the depth buffer, which is what makes the separation real rather
+        // than merely present in the float.
+        assert!(stand_z(behind, NUDGE_STEP) - stand_z(behind, 0.0) >= 1.2e-4);
+    }
+
+    #[test]
+    fn the_world_never_reaches_the_overlay() {
+        // A dragged banana, a floater and a badge are drawn over the board at
+        // `OVERLAY_Z`. The board's own z is a tile's *depth*, so it grows with
+        // the map - and the day it grows past the overlay, the banana the
+        // player is holding disappears behind a tree.
+        let map = crate::map::start();
+        let deepest = (0..map.height())
+            .flat_map(|y| (0..map.width()).map(move |x| Tile::new(x, y)))
+            .map(|tile| stand_z(tile_centre(tile), MAX_NUDGE))
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            deepest < OVERLAY_Z,
+            "the board reaches z {deepest}, at or past the overlay at {OVERLAY_Z}"
+        );
+        const { assert!(GROUND_Z < 0.0) };
+    }
+
+    #[test]
+    fn the_stall_stands_beside_the_delivery_point_and_behind_the_queue() {
+        // A hut centred on the town centre swallows half the unloading queue at
+        // the one moment in the cycle the player is watching it.
+        let map = crate::map::start();
+        let centre = tile_centre(map.town_centre());
+        let stall = stall_stand(map);
+        // Clear of the queue, which spreads a few metres around the centre.
+        assert!(stall.distance(centre) > 6.0, "the stall is on the queue");
+        // And further from the viewer, so the queue forms in front of it.
+        assert!(stand_z(stall, 0.0) < stand_z(centre, 0.0));
+        // Square to the walk, so nobody has to route through the building.
+        let outbound = (tile_centre(map.worked_grove().tile) - centre).normalize();
+        assert!((stall - centre).normalize().dot(outbound).abs() < 1e-3);
     }
 
     #[test]

@@ -558,13 +558,18 @@ impl SceneLayout {
     /// arrives, is unloaded, is fed, and the research desk sits behind the whole
     /// business.
     pub(crate) fn support_stand(self, role: SupportRole) -> Vec2 {
+        // Square to the walk and on the opposite side from the stall, so the
+        // arriving queue has the ground between them. Spread far enough apart
+        // that a full fan of each still leaves the three roles tellable apart:
+        // projected, the closest two stations are 72 px at unit zoom against a
+        // fan half-width of 21.
         let offset = match role {
             // Nearest the arriving workers: it is the one clearing the depot.
-            SupportRole::Unpacker => Vec2::new(3.0, -3.0),
-            // Beside the stall, where the eating already happens.
-            SupportRole::Chef => Vec2::new(6.0, 1.0),
-            // Behind the delivery point, out of the traffic.
-            SupportRole::Technologist => Vec2::new(-2.0, 6.0),
+            SupportRole::Unpacker => Vec2::new(-3.0, 4.0),
+            // Further along the same line, where the eating happens.
+            SupportRole::Chef => Vec2::new(-7.0, 9.0),
+            // Behind the delivery point, at the back of the traffic.
+            SupportRole::Technologist => Vec2::new(-1.0, -5.0),
         };
         self.town_centre + offset
     }
@@ -988,12 +993,14 @@ fn apply_layout(
                 // The hand-harvest target is the home tree, not the worked
                 // node: the worked node is thirty tiles out and never shares a
                 // screen with the town centre (D24).
-                transform.translation = layout.banana_home().extend(4.0);
+                transform.translation = layout.banana_home().extend(isometric::OVERLAY_Z);
                 sprite.expect("harvest hit target has sprite").custom_size =
                     Some(Vec2::splat(zone_size));
             }
             LayoutElement::DepositZone => {
-                transform.translation = layout.board(layout.town_centre()).extend(4.0);
+                transform.translation = layout
+                    .board(layout.town_centre())
+                    .extend(isometric::OVERLAY_Z);
                 sprite.expect("deposit hit target has sprite").custom_size =
                     Some(Vec2::splat(zone_size));
             }
@@ -1021,12 +1028,15 @@ fn apply_layout(
                 transform.rotation = Quat::from_rotation_z(-0.15);
             }
             LayoutElement::HarvestLabel => {
-                transform.translation = layout.board_raised(layout.grove(), 6.0).extend(600.0);
+                transform.translation = layout
+                    .board_raised(layout.grove(), 6.0)
+                    .extend(isometric::OVERLAY_Z);
                 transform.scale = Vec3::splat(layout.world_scale().clamp(0.8, 1.35));
             }
             LayoutElement::DepositLabel => {
-                transform.translation =
-                    layout.board_raised(layout.town_centre(), 6.0).extend(600.0);
+                transform.translation = layout
+                    .board_raised(layout.town_centre(), 6.0)
+                    .extend(isometric::OVERLAY_Z);
                 transform.scale = Vec3::splat(layout.world_scale().clamp(0.8, 1.35));
             }
         }
@@ -1485,7 +1495,7 @@ fn spawn_floater(commands: &mut Commands, layout: &SceneLayout, delivery: Delive
         Text2d::new(label),
         TextFont::from_font_size(size),
         TextColor(colour),
-        Transform::from_translation(origin.extend(5.0)),
+        Transform::from_translation(origin.extend(isometric::OVERLAY_Z)),
         Floater {
             elapsed: 0.0,
             origin,
@@ -1618,7 +1628,7 @@ fn handle_menu(
                 cancel_harvest(&mut controller, &mut pending);
                 restart.0 = true;
                 feedback.success = None;
-                banana.translation = layout.banana_home().extend(3.0);
+                banana.translation = layout.banana_home().extend(isometric::OVERLAY_Z);
                 requested = Some(MenuState::Closed);
             }
             ButtonAction::CancelRestart if *menu == MenuState::ConfirmRestart => {
@@ -1631,7 +1641,7 @@ fn handle_menu(
     if let Some(next) = requested {
         if next != MenuState::Closed {
             cancel_harvest(&mut controller, &mut pending);
-            banana.translation = layout.banana_home().extend(3.0);
+            banana.translation = layout.banana_home().extend(isometric::OVERLAY_Z);
         }
         *menu = next;
     }
@@ -1672,7 +1682,7 @@ fn handle_harvest_input(
             );
             cancel_harvest(&mut controller, &mut pending);
             diagnostic_trace.clear();
-            banana.translation = layout.banana_home().extend(3.0);
+            banana.translation = layout.banana_home().extend(isometric::OVERLAY_Z);
         }
         return;
     }
@@ -1740,7 +1750,7 @@ fn handle_harvest_input(
                     position,
                 };
                 diagnostic_trace.begin(PointerId::Touch(id), raw);
-                banana.translation = position.extend(4.0);
+                banana.translation = position.extend(isometric::OVERLAY_Z);
                 diagnostic_log!(
                     frame_count,
                     "drag_begin",
@@ -1793,7 +1803,7 @@ fn handle_harvest_input(
                         position,
                     };
                     diagnostic_trace.begin(PointerId::Mouse, raw);
-                    banana.translation = position.extend(4.0);
+                    banana.translation = position.extend(isometric::OVERLAY_Z);
                     diagnostic_log!(
                         frame_count,
                         "drag_begin",
@@ -1827,7 +1837,7 @@ fn handle_harvest_input(
                 );
                 cancel_harvest(&mut controller, &mut pending);
                 diagnostic_trace.clear();
-                banana.translation = layout.banana_home().extend(3.0);
+                banana.translation = layout.banana_home().extend(isometric::OVERLAY_Z);
             } else if let Some(touch) = touches.get_released(id) {
                 let raw = touch.position();
                 let camera_position =
@@ -1894,7 +1904,7 @@ fn handle_harvest_input(
                         pointer: PointerId::Touch(id),
                         position,
                     };
-                    banana.translation = position.extend(4.0);
+                    banana.translation = position.extend(isometric::OVERLAY_Z);
                 }
             } else if !diagnostic_trace.missing_reported {
                 diagnostic_log!(
@@ -1945,7 +1955,7 @@ fn handle_harvest_input(
                         pointer: PointerId::Mouse,
                         position,
                     };
-                    banana.translation = position.extend(4.0);
+                    banana.translation = position.extend(isometric::OVERLAY_Z);
                 }
             } else {
                 diagnostic_log!(
@@ -1956,7 +1966,7 @@ fn handle_harvest_input(
                 );
                 cancel_harvest(&mut controller, &mut pending);
                 diagnostic_trace.clear();
-                banana.translation = layout.banana_home().extend(3.0);
+                banana.translation = layout.banana_home().extend(isometric::OVERLAY_Z);
             }
         }
         HarvestInteraction::KeyboardHarvest { .. } => {}
@@ -1975,7 +1985,7 @@ fn finish_pointer_drag(
         pending.0 = Some(SettlementSource::Pointer(pointer));
     } else {
         cancel_harvest(controller, pending);
-        banana.translation = layout.banana_home().extend(3.0);
+        banana.translation = layout.banana_home().extend(isometric::OVERLAY_Z);
     }
 }
 
@@ -2009,7 +2019,7 @@ fn move_keyboard_harvest(
         .banana_home()
         .lerp(layout.board(layout.town_centre()), eased);
     position.y += (std::f32::consts::PI * progress).sin() * 72.0;
-    banana.translation = position.extend(4.0);
+    banana.translation = position.extend(isometric::OVERLAY_Z);
 
     controller.interaction = HarvestInteraction::KeyboardHarvest {
         elapsed,
@@ -2048,7 +2058,7 @@ fn queue_manual_settlement(
             kind: DeliveryKind::Manual,
         });
         controller.interaction = HarvestInteraction::Idle;
-        banana.translation = layout.banana_home().extend(3.0);
+        banana.translation = layout.banana_home().extend(isometric::OVERLAY_Z);
     }
     diagnostic_log!(
         frame_count,
@@ -2182,7 +2192,8 @@ fn update_floaters(
         let progress = (floater.elapsed / FLOATER_SECONDS).clamp(0.0, 1.0);
         // Ease out, so it leaps off the stall and settles as it fades.
         let eased = 1.0 - (1.0 - progress) * (1.0 - progress);
-        transform.translation = (floater.origin + Vec2::new(0.0, FLOATER_RISE * eased)).extend(5.0);
+        transform.translation =
+            (floater.origin + Vec2::new(0.0, FLOATER_RISE * eased)).extend(isometric::OVERLAY_Z);
         color.0.set_alpha(1.0 - eased);
 
         if progress >= 1.0 {

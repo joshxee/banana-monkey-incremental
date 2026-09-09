@@ -543,6 +543,33 @@ it can interleave with a moving monkey. Seen from above the jungle is its
 canopy, so its depths stay flat and only the tiles touching walkable ground are
 raised into a wall — the edge is the part that has to look like a barrier.
 
+The rule has a second half, and it is the half that bites. Because z is now a
+tile's *depth* rather than a hand-picked layer, the board occupies z 0..137 and
+grows with the map — so the old habit of "a small z means on top" is exactly
+backwards. A baked mesh is opaque and *writes* depth while a sprite tests
+against it without writing, so a dragged banana left at z = 4 is not merely
+mis-sorted: it is behind the hut, the palm and every wall tile, and disappears
+at the one moment the player is holding it. Anything belonging to the player's
+hand rather than to the ground — a dragged banana, a delivery floater, a role
+badge, a label — goes above the whole world at `OVERLAY_Z`, and a test asserts
+the board can never reach it.
+
+The nudge that separates two things on one spot is bounded below by the *depth
+buffer* rather than by `f32`. The camera spans z -1000..1000 into a 32-bit
+target, so one buffer step near the village is about 1.2e-4 in world z; a finer
+nudge is invisible to any comparison against an opaque mesh however well `f32`
+resolves it. And the clamp is a backstop, not the mechanism: two callers that
+both exceed it do not get an order, they get the same z, so an out-of-range
+nudge is a caller's bug and says so in a debug build.
+
+The stall stands *beside* the delivery point, never on it. The town centre tile
+is where a worker unloads and the queue spreads a few metres around it, so a
+four-metre hut centred there swallows half the arriving crowd at exactly the
+moment the player is watching — the counter ticks, the floater fires, and the
+monkey that earned it is inside a building. It steps aside square to the walk,
+so nobody routes through it, and to whichever side is further from the viewer,
+so the queue forms in front.
+
 One known limit, stated so it is not rediscovered: a multi-tile footprint can
 carry only one depth. The hut takes its centre's, which is half a footprint of
 error either way rather than a whole one at a corner. Keeping footprints small

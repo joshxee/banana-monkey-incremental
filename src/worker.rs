@@ -28,6 +28,21 @@ const MONKEY_EDGE: Color = Color::srgb(0.34, 0.17, 0.10);
 const LANES: u32 = 3;
 /// Metres between lanes, measured across the route rather than along it.
 const LANE_SPACING: f32 = 1.6;
+
+/// Metres a cart stands off the route, one lane beyond the frontmost worker row.
+///
+/// A vehicle is what walkers pass behind, and drawing it in front is also what
+/// keeps its long dwell at the depot off the top of the unloading queue. This
+/// used to be spelled `Lane(u32::MAX)`, which is not a lane in front of row
+/// zero: `u32::MAX % 3` *is* row zero, and its stagger is worker zero's, so the
+/// cart and the first monkey hired stood on the same ground.
+const CART_LANE_METRES: f32 = ((LANES as f32 - 1.0) * 0.5 + 1.0) * LANE_SPACING;
+
+/// How far either side of a walker its direction of travel is measured over.
+///
+/// Only matters at a corner, and only to the *offsets*: the walker itself
+/// always stands on the route. See `walk_step`.
+const SMOOTHING_METRES: f64 = 1.5;
 #[derive(Component)]
 pub struct Worker;
 
@@ -113,11 +128,6 @@ impl NextLane {
 pub struct Lane(u32);
 
 impl Lane {
-    /// The cart's lane. Deliberately in front of every worker row: a vehicle is
-    /// what walkers pass behind, and drawing it there is also what keeps its
-    /// long dwell at the depot off the top of the unloading queue.
-    pub(crate) const CART: Self = Self(u32::MAX);
-
     /// Depth row, front to back.
     fn row(self) -> u32 {
         self.0 % LANES
@@ -146,7 +156,7 @@ impl Lane {
     /// identically. Bounded because an epsilon that grows with the hire index
     /// eventually exceeds a real depth difference, and a crowd starts flickering.
     fn nudge(self) -> f32 {
-        (self.0 % 8) as f32 * 0.0001
+        (self.0 % 8) as f32 * isometric::NUDGE_STEP
     }
 }
 
@@ -302,30 +312,53 @@ pub(crate) fn spawn_monkey_outline(parent: &mut ChildSpawnerCommands, size: Vec2
 }
 
 #[allow(clippy::type_complexity)]
-/// Where a walker stands, in metres: a point on the route, pushed off the
-/// centre line and along it by its lane.
+/// A point on the route, in metres, pushed off the centre line by `across`
+/// metres and along it by `along` metres.
 ///
 /// The offsets are presentation and only presentation. Every monkey advances by
 /// the same dimensionless fraction, so a wider lane shows as a slightly higher
 /// apparent speed - never as a different cycle time. Letting arrival be driven
 /// by the drawn position instead is the one construction `map` exists to
 /// prevent: a drawn path and a cycle time that are two different journeys.
-fn walk_point(route: &Route, fraction: f64, lane: Lane) -> Vec2 {
-    let step = route.sample(fraction);
-    let along = Vec2::new(step.heading.x as f32, step.heading.y as f32);
+fn walk_step(route: &Route, fraction: f64, sideways: f32, forward: f32) -> (Vec2, Vec2) {
+    let ground = |at: bevy::math::DVec2| Vec2::new(at.x as f32, at.y as f32);
+    let at = ground(route.sample(fraction).at);
+
+    // The direction of travel, sampled either side of the point rather than
+    // taken from the leg the point happens to sit on. A leg's heading rotates
+    // *instantly* at a corner, which would swing the offsets with it and
+    // teleport an outer-lane monkey sideways by twice its lane width. Averaging
+    // across a couple of metres turns that jump into a turn.
+    let span = (SMOOTHING_METRES / route.length().max(f64::EPSILON)).min(0.5);
+    let behind = ground(route.sample(fraction - span).at);
+    let ahead = ground(route.sample(fraction + span).at);
+    let along = (ahead - behind).normalize_or_zero();
     // Ninety degrees off the direction of travel, so a crowd spreads across the
     // route however the route happens to be pointing.
     let across = Vec2::new(-along.y, along.x);
-    Vec2::new(step.at.x as f32, step.at.y as f32)
-        + across * lane.lane_metres()
-        + along * lane.stagger_metres()
+
+    (at + across * sideways + along * forward, along)
 }
 
-/// Which way a walker is travelling, in metres, at a point on the route.
-fn heading(route: &Route, fraction: f64, outbound: bool) -> Vec2 {
-    let step = route.sample(fraction);
-    let along = Vec2::new(step.heading.x as f32, step.heading.y as f32);
-    if outbound { along } else { -along }
+/// Where a walker of a given lane stands, and which way it faces.
+fn walk_point(route: &Route, fraction: f64, lane: Lane) -> (Vec2, Vec2) {
+    walk_step(route, fraction, lane.lane_metres(), lane.stagger_metres())
+}
+
+/// Where a cart stands, and which way it faces.
+///
+/// Which side of the route leans towards the viewer depends on the route's
+/// *bearing*, so the offset cannot be a constant: a fixed sign puts the cart in
+/// front of the queue on this map and behind it on one that runs the other way.
+fn cart_point(route: &Route, fraction: f64) -> (Vec2, Vec2) {
+    let (_, along) = walk_step(route, fraction, 0.0, 0.0);
+    let across = Vec2::new(-along.y, along.x);
+    let nearer = if isometric::depth(across) >= 0.0 {
+        CART_LANE_METRES
+    } else {
+        -CART_LANE_METRES
+    };
+    walk_step(route, fraction, nearer, 0.0)
 }
 
 /// Everything `position_workers` touches on one worker.
@@ -361,8 +394,8 @@ pub fn position_workers(
             Segment::Unload | Segment::Snack => (0.0, false),
         };
 
-        let point = walk_point(&route.0, fraction, *lane);
-        let travel = heading(&route.0, fraction, outbound);
+        let (point, along) = walk_point(&route.0, fraction, *lane);
+        let travel = if outbound { along } else { -along };
         let facing_right = isometric::project(travel).x >= 0.0;
 
         let back = lane.row() as f32;
@@ -453,6 +486,22 @@ pub fn animate_workers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::map::Map;
+
+    /// A route with a real corner in it. The shipped walk is a single straight
+    /// leg, so anything asserted only against that is asserting nothing.
+    fn bent_route() -> Route {
+        Map::parse(concat!(
+            "#########\n",
+            "#.......#\n",
+            "#.@.#.*.#\n",
+            "#...#...#\n",
+            "#.......#\n",
+            "#########",
+        ))
+        .expect("the test map parses")
+        .reference_route()
+    }
 
     #[test]
     fn lanes_spread_across_the_route_and_sort_by_depth() {
@@ -461,26 +510,23 @@ mod tests {
         // spreads perpendicular to wherever the route happens to point, and the
         // near lane draws over the far one.
         let route = WorkedRoute::start();
-        let points: Vec<Vec2> = (0..LANES)
+        let placed: Vec<(Vec2, Vec2)> = (0..LANES)
             .map(|row| walk_point(&route.0, 0.5, Lane(row)))
             .collect();
-        let centre = route.0.sample(0.5);
-        let along = Vec2::new(centre.heading.x as f32, centre.heading.y as f32);
 
-        for pair in points.windows(2) {
+        for pair in placed.windows(2) {
             // Rows run front to back, so each one draws behind the last - which
             // is what the shade cue in `position_workers` is also saying.
             assert!(
-                isometric::stand_z(pair[1], 0.0) < isometric::stand_z(pair[0], 0.0),
-                "lanes are not depth ordered front to back: {points:?}"
+                isometric::stand_z(pair[1].0, 0.0) < isometric::stand_z(pair[0].0, 0.0),
+                "lanes are not depth ordered front to back: {placed:?}"
             );
             // Spread is across the walk, not along it: a lane must not make one
             // monkey's journey longer than another's.
-            let offset = pair[1] - pair[0];
+            let offset = (pair[1].0 - pair[0].0).dot(pair[0].1);
             assert!(
-                offset.dot(along).abs() < 1e-3,
-                "a lane pushed a monkey along its own route by {}",
-                offset.dot(along)
+                offset.abs() < 1e-3,
+                "a lane pushed a monkey along its route by {offset}"
             );
         }
     }
@@ -505,28 +551,99 @@ mod tests {
     }
 
     #[test]
+    fn a_cart_keeps_its_own_lane_in_front_of_every_worker() {
+        // Spelling this `Lane(u32::MAX)` did not put the cart in front of row
+        // zero, it put the cart *in* row zero - `u32::MAX % 3` is 0, and its
+        // stagger is worker zero's - so a cart and the first monkey hired stood
+        // on the same ground.
+        let route = WorkedRoute::start();
+        let (cart, _) = cart_point(&route.0, 0.5);
+        for row in 0..LANES {
+            // At the same point on the walk and with the stagger taken out: a
+            // worker genuinely further along the route than the cart is nearer
+            // the viewer and *should* draw in front, so comparing whole
+            // positions would be asking the lane question and the stagger
+            // question at once.
+            let (worker, _) = walk_step(&route.0, 0.5, Lane(row).lane_metres(), 0.0);
+            assert!(
+                isometric::stand_z(cart, 0.0) > isometric::stand_z(worker, 0.0),
+                "worker row {row} draws in front of the cart"
+            );
+        }
+    }
+
+    #[test]
     fn a_lane_changes_apparent_speed_and_never_cycle_time() {
         // The one rule the swarm must not break (D24). Offsets are drawn, not
         // simulated: every monkey is at the same fraction at the same tick, so
-        // an outer lane covers slightly more ground in the same time and that
-        // is the whole of the difference.
-        let route = WorkedRoute::start();
-        let nominal = route.0.length() as f32;
+        // an outer lane covers slightly more ground in the same time and that is
+        // the whole of the difference.
+        //
+        // Measured on a route that *turns*. On a straight one the offsets are
+        // constant and this can only ever pass, which is the trap the first
+        // version of this test fell into.
+        let walk = |route: &Route, lane: Lane| {
+            let mut walked = 0.0;
+            let mut previous = walk_point(route, 0.0, lane).0;
+            for step in 1..=400 {
+                let at = walk_point(route, f64::from(step) / 400.0, lane).0;
+                walked += previous.distance(at);
+                previous = at;
+            }
+            walked
+        };
+
+        // On the shipped walk - one straight leg - two per cent is the
+        // threshold below which a desynchronised crowd is invisible rather than
+        // reading as a bug.
+        let shipped = WorkedRoute::start().0;
+        let nominal = shipped.length() as f32;
         for row in 0..LANES {
-            let lane = Lane(row);
-            let walked: f32 = (0..200)
-                .map(|step| {
-                    let a = walk_point(&route.0, f64::from(step) / 200.0, lane);
-                    let b = walk_point(&route.0, f64::from(step + 1) / 200.0, lane);
-                    a.distance(b)
-                })
-                .sum();
-            // Within two per cent of nominal is the threshold below which a
-            // desynchronised swarm is invisible rather than reading as a bug.
+            let walked = walk(&shipped, Lane(row));
             assert!(
                 (walked - nominal).abs() / nominal < 0.02,
                 "lane {row} walks {walked} m against a nominal {nominal} m"
             );
+        }
+
+        // Around a corner an outer lane genuinely covers more ground - that is
+        // what the outside of a turn costs, not a defect. What has to hold is
+        // that the excess is bounded by the offset times the total turning, so
+        // it stays proportional to the lane rather than running away with the
+        // route's shape.
+        let bent = bent_route();
+        let nominal = bent.length() as f32;
+        for row in 0..LANES {
+            let lane = Lane(row);
+            // Both offsets count: a stagger along the route swings with the
+            // heading at a corner just as a lateral offset does.
+            let offset = lane.lane_metres().abs() + lane.stagger_metres().abs();
+            let bound = offset * std::f32::consts::PI + 0.05;
+            let excess = (walk(&bent, lane) - nominal).abs();
+            assert!(
+                excess <= bound,
+                "lane {row} is {excess} m over a bent walk, past a bound of {bound}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_outer_lane_turns_a_corner_instead_of_teleporting_across_it() {
+        // Taking the offset axis from the current leg's heading swings it
+        // through the whole turn in one frame, and an outer-lane monkey jumps
+        // sideways by twice its lane width. Nothing on the shipped map turns
+        // yet, so only a bent route can see this.
+        let route = bent_route();
+        let lane = Lane(0);
+        let mut previous = walk_point(&route, 0.0, lane).0;
+        for step in 1..=400 {
+            let at = walk_point(&route, f64::from(step) / 400.0, lane).0;
+            let jump = previous.distance(at);
+            assert!(
+                jump < 0.2,
+                "an outer lane jumped {jump} m in one four-hundredth of a walk"
+            );
+            previous = at;
         }
     }
 }
@@ -774,11 +891,12 @@ pub fn position_carts(
         // workers pass behind it instead of through it. That is one lane's
         // worth of ground towards the viewer, which the depth rule then
         // handles on its own.
-        let point = walk_point(&route.0, fraction, Lane::CART);
+        let (point, _) = cart_point(&route.0, fraction);
+        let screen = layout.board(point);
         transform.translation = Vec3::new(
-            layout.snap(layout.board(point).x),
-            layout.snap(layout.board(point).y + CART_BOX_TEXELS.y * 0.5 * scale),
-            isometric::stand_z(point, 0.0002),
+            layout.snap(screen.x),
+            layout.snap(screen.y + CART_BOX_TEXELS.y * 0.5 * scale),
+            isometric::stand_z(point, isometric::NUDGE_STEP),
         );
         transform.scale = Vec3::splat(scale);
         facing_left = !matches!(cycle.segment(), Segment::ToDepot) || boarding.is_some();

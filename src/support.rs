@@ -74,12 +74,16 @@ pub(crate) fn slot_offset_texels(slot: usize, drawn: usize) -> f32 {
 
 /// How many monkeys of one role the scene has room to draw.
 ///
-/// Three stations around a single deposit is a fixed amount of space, and the
-/// deposit shrinks with the viewport: at 320 px the zone is half its desktop
-/// size, so three roles of three simply do not fit and something has to give.
-/// What gives is the *crowd*, not the layout - the count is still exact in the
-/// badge and in the shop's OWNED column, and a phone shows one monkey per role
-/// rather than a smear of overlapping ones.
+/// Three stations around one delivery point is a fixed amount of ground, and a
+/// fan wide enough to overlap its neighbour turns three roles into one smear.
+/// What gives is the *crowd*, not the layout - the count stays exact in the
+/// badge and in the shop's OWNED column.
+///
+/// Both sides of the comparison scale with zoom, so unlike the screen-space
+/// version this replaced, the answer does not move with the viewport: it is a
+/// property of how far apart `SceneLayout::support_stand` puts the stations.
+/// Move a station and this is what silently changes how full the deposit looks,
+/// which is why `a_full_role_still_fits_three_monkeys` pins it.
 pub(crate) fn avatars_per_role(layout: &SceneLayout) -> usize {
     let scale = layout.world_scale();
     let stations: Vec<Vec2> = SupportRole::ALL
@@ -290,7 +294,7 @@ pub(crate) fn sync_support_avatars(
             layout.snap(screen.y + half_height),
             // Bounded, so a wide fan can never sort in front of a role standing
             // genuinely nearer the viewer.
-            isometric::stand_z(point, (avatar.slot % 8) as f32 * 0.0001),
+            isometric::stand_z(point, (avatar.slot % 8) as f32 * isometric::NUDGE_STEP),
         );
 
         let starving = avatar.slot < hungry[role_index(avatar.role)];
@@ -397,16 +401,21 @@ pub(crate) fn sync_support_badges(
             continue;
         }
 
-        let point = layout.support_point(badge.0, 0.0);
+        // `support_point` answers in metres on the ground, so this has to be
+        // projected like every other station. Reading it as screen pixels
+        // pinned every badge to the same corner of the window whatever the
+        // role was doing.
+        let screen = layout.board(layout.support_point(badge.0, 0.0));
         transform.translation = Vec3::new(
             // Centred over the role's fan and lifted clear of it. Placed
             // *beside* the group it covered the outermost monkeys - and at a
             // crowded deposit those were the chefs' hats, which are the only
             // thing telling that role apart.
-            layout.snap(point.x),
-            layout.snap(point.y + (FRAME_SIZE as f32 * 0.5 + 13.0) * scale),
-            // In front of every monkey, including the front depth row.
-            2.5,
+            layout.snap(screen.x),
+            layout.snap(screen.y + (FRAME_SIZE as f32 * 0.5 + 13.0) * scale),
+            // A badge counts monkeys rather than standing among them, so it
+            // belongs over the board, not in it.
+            isometric::OVERLAY_Z,
         );
         // Tracks the world scale so a phone does not get a badge twice its
         // intended size against a 32 px monkey - but only partly, because a
@@ -542,12 +551,34 @@ mod tests {
 
     #[test]
     fn every_support_avatar_stays_inside_the_board() {
+        // Stations are ground positions in metres, so they have to be projected
+        // before being compared against a board measured in pixels. Comparing
+        // the two directly, as this did when `support_stand` changed units,
+        // passes by coincidence and asserts nothing.
         let layout = SceneLayout::default();
         let half = layout.scene_side() * 0.5;
-        for role in SupportRole::ALL {
-            let point = layout.support_point(role, 0.0);
-            assert!((point.x - layout.scene_center().x).abs() < half);
-            assert!((point.y - layout.scene_center().y).abs() < half);
+        for (role, at) in stations(&layout) {
+            let screen = layout.board(at) - layout.scene_center();
+            assert!(
+                screen.x.abs() < half && screen.y.abs() < half,
+                "{role:?} projects to {screen:?}, outside a board of {half}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_role_still_fits_three_monkeys() {
+        // The deposit looking populated is the whole point of drawing a fan at
+        // all. Moving a station quietly costs a monkey per role, which is a
+        // direct hit on "the field fills up" that nothing else would catch.
+        for viewport in [
+            Vec2::new(320.0, 640.0),
+            Vec2::new(390.0, 844.0),
+            Vec2::new(1280.0, 720.0),
+            Vec2::new(1920.0, 1080.0),
+        ] {
+            let layout = SceneLayout::for_viewport(viewport);
+            assert_eq!(avatars_per_role(&layout), AVATARS_PER_ROLE, "{viewport:?}");
         }
     }
 }
