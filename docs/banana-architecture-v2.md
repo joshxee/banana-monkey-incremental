@@ -514,6 +514,47 @@ otherwise one monkey walking off-screen and nothing else. It is deliberately
 *not* in `Map::groves`: being nearer than the worked node, it would otherwise
 take over as `worked_grove` and move the travel leg without anybody noticing.
 
+**D25 — One projection, and depth is decided by feet.**
+*(Map increment.)*
+
+The board used to be a unit square holding an invented route, scaled to fit the
+window. It is now a view of the map: `isometric::project` takes a position in
+metres on the ground plane and returns a point on a 2:1 isometric plane, and
+every actor, tree, hut and tile goes through it. `SceneLayout` stopped being the
+world and became a camera — two numbers, an origin and a zoom — so the drawn
+village and the walked economy are the same place by construction rather than by
+two sets of coordinates agreeing.
+
+The layering rule is one function. `stand_z(ground, nudge)` sorts a thing by the
+tile its **feet** are on, never by where its artwork reaches. That is what makes
+the hut cover the monkey behind it while the monkey in front walks past
+unobscured, and because depth is continuous rather than per-tile, crossing a
+building's front edge changes the order smoothly instead of popping. The `nudge`
+that separates two monkeys idling on one spot is *clamped*: an unbounded
+per-entity epsilon is precisely how a crowd starts flickering once there are
+enough of them for the epsilons to add up to more than the gaps between them.
+
+What is drawn follows from that rule rather than from convenience. The ground
+plane is flat, cannot occlude anything and never changes, so it is one baked
+mesh with per-vertex colour — one draw call for 4761 tiles, where an entity per
+tile would be 4761 sprites to cull and sort every frame. Anything with *height*
+is its own entity anchored to its ground position, because that is the only way
+it can interleave with a moving monkey. Seen from above the jungle is its
+canopy, so its depths stay flat and only the tiles touching walkable ground are
+raised into a wall — the edge is the part that has to look like a barrier.
+
+One known limit, stated so it is not rediscovered: a multi-tile footprint can
+carry only one depth. The hut takes its centre's, which is half a footprint of
+error either way rather than a whole one at a corner. Keeping footprints small
+is what keeps that invisible, and it is the reason to be wary of large buildings
+later.
+
+The board is aimed at the midpoint of the walk rather than at the town centre.
+That is an interim: pointed at the town centre, the grove sat off the top of the
+screen and took the whole outbound leg with it, and a fixed board has to hold
+both ends of the economy for a playtest to mean anything. A camera the player
+can pan and zoom replaces it, and is what the mobile brief actually asks for.
+
 ---
 
 ## 4. Data Model

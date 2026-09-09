@@ -11,6 +11,7 @@ use crate::{
     },
     hud, isometric,
     launch::{Launch, View},
+    map::{self, Map},
     persistence,
     support::{self, SupportUnit},
     worker::{self, Cart, RestoredCycle, Worker},
@@ -161,7 +162,9 @@ impl Plugin for SimulationPlugin {
 
 impl Plugin for PresentationPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SceneLayout>()
+        app.insert_resource(map::Village::start())
+            .insert_resource(map::WorkedRoute::start())
+            .init_resource::<SceneLayout>()
             .init_resource::<HarvestController>()
             .init_resource::<PendingSettlement>()
             .init_resource::<Feedback>()
@@ -336,28 +339,28 @@ impl ButtonAction {
     }
 }
 
+/// Where the board sits on screen, and how the ground plane maps onto it.
+///
+/// This used to *be* the world: a unit square holding an invented route, scaled
+/// to fit. It is now only a camera. Every position it reports is the projection
+/// of a real position in metres on `map`'s ground plane, which is what lets the
+/// drawn village and the walked economy be the same place.
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SceneLayout {
     pub(crate) viewport: Vec2,
-    zone_size: f32,
-    harvest: Vec2,
-    deposit: Vec2,
-    banana_home: Vec2,
-    banana_size: f32,
-    harvest_bounds: Rect,
-    deposit_bounds: Rect,
     scene_center: Vec2,
     scene_side: f32,
     header_height: f32,
     short_landscape: bool,
-    /// Where a worker stands to pick, and where it stands to unload. The route
-    /// between the two is the whole visible economy.
-    pub(crate) grove_stand: f32,
-    pub(crate) stall_stand: f32,
-    /// Whole-number sprite scale, shared with the tree and the stall so every
-    /// texel in the scene is the same size. A fractional scale here would make
-    /// a walking monkey shimmer against a world drawn on the integer grid.
-    pub(crate) world_scale: f32,
+    /// The camera, in two numbers: where the projected origin lands on screen,
+    /// and how many screen pixels a projected pixel is worth. [`Self::board`]
+    /// is the only road from metres to screen, and these are all it needs.
+    origin: Vec2,
+    zoom: f32,
+    /// Ground anchors, in metres, kept so a hit test never re-walks the map.
+    town_centre: Vec2,
+    grove: Vec2,
+    home_tree: Vec2,
 }
 
 impl Default for SceneLayout {
@@ -367,15 +370,25 @@ impl Default for SceneLayout {
 }
 
 impl SceneLayout {
+    /// How much of the ground is on screen, across the board's short side.
+    ///
+    /// Twenty tiles is the mobile brief: far enough in that a monkey reads as a
+    /// monkey, which is the constraint that made the home tree necessary in the
+    /// first place (D24). The board never zooms out to frame the whole 69-tile
+    /// map, because at that zoom a monkey is two pixels.
+    const TILES_ACROSS: f32 = 20.0;
+
     pub(crate) fn for_viewport(viewport: Vec2) -> Self {
         Self::for_view(viewport, View::Full)
     }
 
-    /// The stage view has no banner and no store to make room for, so the
-    /// board takes the largest square the window holds, centred. Without this
-    /// the HUD's reserve stayed and a 1280x720 stage was a 416 px board with
-    /// three quarters of the window empty.
     pub(crate) fn for_view(viewport: Vec2, view: View) -> Self {
+        Self::for_map(viewport, view, map::start())
+    }
+
+    /// The stage view has no banner and no store to make room for, so the
+    /// board takes the largest square the window holds, centred.
+    pub(crate) fn for_map(viewport: Vec2, view: View, map: &Map) -> Self {
         let width = viewport.x.max(320.0);
         let height = viewport.y.max(320.0);
         let stage = view == View::Stage;
@@ -395,37 +408,74 @@ impl SceneLayout {
         } else {
             Vec2::new(0.0, height * 0.5 - header_height - scene_side * 0.5)
         };
-        let harvest = scene_center + Vec2::new(-0.315, 0.060) * scene_side;
-        let deposit = scene_center + Vec2::new(0.315, -0.130) * scene_side;
-        let zone_size = scene_side * 0.18;
-        let banana_size = (scene_side * 0.050).clamp(18.0, 36.0);
-        let banana_home = harvest + Vec2::new(zone_size * 0.18, -zone_size * 0.52);
-        let banana_hitbox = Rect::from_center_size(banana_home, Vec2::splat(zone_size * 0.8));
-        let harvest_bounds =
-            Rect::from_center_size(harvest, Vec2::splat(zone_size)).union(banana_hitbox);
+
+        // Whole-number zoom, so a walking monkey's texels stay on the grid
+        // instead of shimmering against a world drawn on it. Rounding is what
+        // makes [`Self::TILES_ACROSS`] a target rather than a promise: a phone
+        // lands on twelve tiles and a large desktop board on twenty-two, both
+        // at a scale that keeps the pixel art honest.
+        let zoom = (scene_side / (Self::TILES_ACROSS * isometric::TILE_HALF.x * 2.0))
+            .round()
+            .max(1.0);
+        let town_centre = isometric::tile_centre(map.town_centre());
+        let grove = isometric::tile_centre(map.worked_grove().tile);
+        let home_tree = map
+            .home_trees()
+            .first()
+            .map_or(town_centre, |&tile| isometric::tile_centre(tile));
 
         Self {
             viewport: Vec2::new(width, height),
-            zone_size,
-            harvest,
-            deposit,
-            banana_home,
-            banana_size,
-            harvest_bounds,
-            deposit_bounds: Rect::from_center_size(
-                deposit + Vec2::new(0.0, zone_size * 0.02),
-                Vec2::splat(zone_size + 36.0),
-            ),
             scene_center,
             scene_side,
             header_height,
             short_landscape,
-            grove_stand: harvest.x + zone_size * 0.28,
-            stall_stand: deposit.x - zone_size * 0.34,
-            world_scale: scene_side / 390.0,
+            // Halfway along the walk, so a fixed board holds both ends of the
+            // economy at once: the town centre where every delivery lands and
+            // the grove thirty tiles out. Pointing it at the town centre alone
+            // put the grove off the top of the screen and the whole outbound
+            // leg with it. This is the interim a board with no controls needs;
+            // it is replaced by a camera the player can pan and zoom.
+            origin: scene_center - isometric::project(town_centre.midpoint(grove)) * zoom,
+            zoom,
+            town_centre,
+            grove,
+            home_tree,
         }
     }
 
+    /// Screen position of a ground position, in metres.
+    ///
+    /// The one road from the world to the screen. `WorldRoot` carries the same
+    /// two numbers as a `Transform`, so a baked mesh under it lands exactly
+    /// where this says it would.
+    pub(crate) fn board(self, world: Vec2) -> Vec2 {
+        self.origin + isometric::project(world) * self.zoom
+    }
+
+    /// Screen position of something standing `metres` tall at `world`.
+    pub(crate) fn board_raised(self, world: Vec2, metres: f32) -> Vec2 {
+        self.origin + isometric::raise(isometric::project(world), metres) * self.zoom
+    }
+
+    pub(crate) fn world_root(self) -> Transform {
+        Transform::from_translation(self.origin.extend(0.0))
+            .with_scale(Vec3::new(self.zoom, self.zoom, 1.0))
+    }
+
+    pub(crate) fn town_centre(self) -> Vec2 {
+        self.town_centre
+    }
+
+    pub(crate) fn grove(self) -> Vec2 {
+        self.grove
+    }
+
+    pub(crate) fn home_tree(self) -> Vec2 {
+        self.home_tree
+    }
+
+    #[cfg(test)]
     pub(crate) fn scene_center(self) -> Vec2 {
         self.scene_center
     }
@@ -458,69 +508,76 @@ impl SceneLayout {
         }
     }
 
-    pub(crate) fn route_point(self, x: f32, depth_row: f32) -> Vec2 {
-        let span = (self.stall_stand - self.grove_stand).max(1.0);
-        let t = ((x - self.grove_stand) / span).clamp(0.0, 1.0);
-        let y = self.harvest.y.lerp(self.deposit.y, t);
-        let depth = depth_row * 5.0 * self.world_scale;
-        Vec2::new(x, y - depth)
-    }
-
-    pub(crate) fn actor_z(self, point: Vec2, tie_breaker: f32) -> f32 {
-        1.0 - (point.y - self.scene_center.y) / self.scene_side + tie_breaker
-    }
-
+    /// Sprite scale. Every texel in the scene is the same size, so an actor
+    /// scales with the board and with nothing else.
     pub(crate) fn world_scale(self) -> f32 {
-        self.world_scale
+        self.zoom
     }
 
-    /// How far along the route a cart stands from where the walking monkeys do.
-    ///
-    /// The cart uses its own bay at each endpoint, offset inside the route so
-    /// its long unload does not cover the worker queue.
-    pub(crate) fn cart_offset(self) -> f32 {
-        self.zone_size * 0.30
+    /// How wide a hand-harvest target is on screen.
+    pub(crate) fn zone_size(self) -> f32 {
+        (self.scene_side * 0.18).max(48.0)
     }
 
-    /// Where each support role stands, as a ground-plane x and a depth row.
-    ///
-    /// All three are stations around the deposit rather than points on the
-    /// route, and they are laid out left to right in the order the cycle
-    /// touches them: a worker arrives, is unloaded, is fed, and the research
-    /// desk sits behind the whole business. Everything faces left, into the
-    /// traffic.
-    ///
-    /// The Technologist is clamped inside the viewport because at 320 px the
-    /// deposit's own zone is already against the right edge, so an unclamped
-    /// desk would sit off-screen on a phone.
-    pub(crate) fn support_stand(self, role: SupportRole) -> (f32, u32) {
-        let (offset, row) = match role {
-            // Nearest the arriving workers: it is the one clearing the depot.
-            SupportRole::Unpacker => (0.08, 0),
-            // Under the sign, where the eating already happens.
-            SupportRole::Chef => (0.40, 1),
-            // Behind the deposit, at the back of the ground plane. Far enough
-            // out that a full fan of chefs cannot reach the desk.
-            SupportRole::Technologist => (0.72, 2),
-        };
-        let x = self.deposit.x + self.zone_size * offset;
-        let limit = self.scene_center.x + self.scene_side * 0.46;
-        (x.min(limit), row)
+    pub(crate) fn banana_size(self) -> f32 {
+        (self.scene_side * 0.050).clamp(18.0, 36.0)
     }
 
-    pub(crate) fn support_point(self, role: SupportRole, spread: f32) -> Vec2 {
-        let (x, row) = self.support_stand(role);
-        self.route_point(x, row as f32 + 1.2) + Vec2::new(spread, -self.zone_size * 0.08)
+    /// Where the loose banana sits when nobody is dragging it: at the home
+    /// tree, which is the node the player picks by hand (D24).
+    pub(crate) fn banana_home(self) -> Vec2 {
+        self.board_raised(self.home_tree, 1.4)
+    }
+
+    pub(crate) fn harvest_bounds(self) -> Rect {
+        Rect::from_center_size(self.banana_home(), Vec2::splat(self.zone_size()))
+    }
+
+    pub(crate) fn deposit_bounds(self) -> Rect {
+        Rect::from_center_size(
+            self.board(self.town_centre),
+            Vec2::splat(self.zone_size() + 36.0),
+        )
     }
 
     pub(crate) fn stall_glow_anchor(self) -> Vec2 {
-        self.deposit + Vec2::new(0.0, self.zone_size * 0.20)
+        self.board_raised(self.town_centre, 1.0)
+    }
+
+    /// How far along the route a cart stands from where the walking monkeys do,
+    /// in metres. The cart uses its own bay at each end so its long unload does
+    /// not cover the worker queue.
+    pub(crate) fn cart_offset(self) -> f32 {
+        4.0
+    }
+
+    /// Where each support role stands, in metres, relative to the town centre.
+    ///
+    /// All three are stations around the delivery point rather than points on
+    /// the route, laid out in the order the cycle touches them: a worker
+    /// arrives, is unloaded, is fed, and the research desk sits behind the whole
+    /// business.
+    pub(crate) fn support_stand(self, role: SupportRole) -> Vec2 {
+        let offset = match role {
+            // Nearest the arriving workers: it is the one clearing the depot.
+            SupportRole::Unpacker => Vec2::new(3.0, -3.0),
+            // Beside the stall, where the eating already happens.
+            SupportRole::Chef => Vec2::new(6.0, 1.0),
+            // Behind the delivery point, out of the traffic.
+            SupportRole::Technologist => Vec2::new(-2.0, 6.0),
+        };
+        self.town_centre + offset
+    }
+
+    /// Where one member of a role's fan stands, in metres.
+    pub(crate) fn support_point(self, role: SupportRole, spread: f32) -> Vec2 {
+        self.support_stand(role) + Vec2::new(spread, spread * 0.5)
     }
 
     /// Snap to the world's texel grid, so pixel-art detail does not crawl at
     /// the low speeds a walking monkey moves at.
     pub(crate) fn snap(self, value: f32) -> f32 {
-        (value / self.world_scale).round() * self.world_scale
+        (value / self.zoom).round() * self.zoom
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -812,10 +869,11 @@ fn setup(
     mut materials: ResMut<Assets<ColorMaterial>>,
     asset_server: Res<AssetServer>,
     launch: Res<Launch>,
+    village: Res<map::Village>,
 ) {
     commands.spawn((Camera2d, MainCamera));
 
-    isometric::spawn_world(&mut commands, &mut meshes, &mut materials);
+    isometric::spawn_world(&mut commands, &mut meshes, &mut materials, &village);
 
     commands.spawn((
         Sprite::from_color(Color::NONE, Vec2::ONE),
@@ -912,36 +970,45 @@ fn apply_layout(
         Without<isometric::WorldRoot>,
     >,
 ) {
-    let world_translation = layout.scene_center().extend(0.0);
-    if world.translation != world_translation {
-        world.translation = world_translation;
+    // The baked terrain is one child of this root, so moving the root is the
+    // whole of panning and zooming - and it carries exactly the two numbers
+    // `SceneLayout::board` uses, so meshes and actors cannot drift apart.
+    let root = layout.world_root();
+    if world.translation != root.translation {
+        world.translation = root.translation;
     }
-    let world_scale = Vec3::new(layout.scene_side(), layout.scene_side(), 1.0);
-    if world.scale != world_scale {
-        world.scale = world_scale;
+    if world.scale != root.scale {
+        world.scale = root.scale;
     }
-    let label_lift = layout.zone_size * 0.48;
 
+    let zone_size = layout.zone_size();
     for (element, sprite, mut transform) in &mut elements {
         match element {
             LayoutElement::HarvestZone => {
-                transform.translation = layout.harvest.extend(0.0);
+                // The hand-harvest target is the home tree, not the worked
+                // node: the worked node is thirty tiles out and never shares a
+                // screen with the town centre (D24).
+                transform.translation = layout.banana_home().extend(4.0);
                 sprite.expect("harvest hit target has sprite").custom_size =
-                    Some(Vec2::splat(layout.zone_size));
+                    Some(Vec2::splat(zone_size));
             }
             LayoutElement::DepositZone => {
-                transform.translation = layout.deposit.extend(0.0);
+                transform.translation = layout.board(layout.town_centre()).extend(4.0);
                 sprite.expect("deposit hit target has sprite").custom_size =
-                    Some(Vec2::splat(layout.zone_size));
+                    Some(Vec2::splat(zone_size));
             }
             LayoutElement::DepositGlow => {
                 sprite.expect("deposit glow has sprite").custom_size =
-                    Some(Vec2::splat(layout.zone_size + 36.0));
-                transform.translation = layout.deposit.extend(-0.5);
+                    Some(Vec2::splat(zone_size + 36.0));
+                transform.translation = layout
+                    .stall_glow_anchor()
+                    .extend(isometric::stand_z(layout.town_centre(), 0.0) - 0.002);
             }
             LayoutElement::Banana => {
                 if matches!(controller.interaction, HarvestInteraction::Idle) {
-                    transform.translation = layout.banana_home.extend(3.0);
+                    transform.translation = layout
+                        .banana_home()
+                        .extend(isometric::stand_z(layout.home_tree(), 0.0) + 0.001);
                 }
                 let lift = if matches!(controller.interaction, HarvestInteraction::Dragging { .. })
                 {
@@ -949,17 +1016,17 @@ fn apply_layout(
                 } else {
                     1.0
                 };
-                transform.scale = Vec3::splat(layout.banana_size / BANANA_FRAME_SIZE as f32 * lift);
+                transform.scale =
+                    Vec3::splat(layout.banana_size() / BANANA_FRAME_SIZE as f32 * lift);
                 transform.rotation = Quat::from_rotation_z(-0.15);
             }
             LayoutElement::HarvestLabel => {
-                transform.translation =
-                    Vec3::new(layout.harvest.x, layout.harvest.y + label_lift, 6.0);
+                transform.translation = layout.board_raised(layout.grove(), 6.0).extend(600.0);
                 transform.scale = Vec3::splat(layout.world_scale().clamp(0.8, 1.35));
             }
             LayoutElement::DepositLabel => {
                 transform.translation =
-                    Vec3::new(layout.deposit.x, layout.deposit.y + label_lift, 6.0);
+                    layout.board_raised(layout.town_centre(), 6.0).extend(600.0);
                 transform.scale = Vec3::splat(layout.world_scale().clamp(0.8, 1.35));
             }
         }
@@ -1551,7 +1618,7 @@ fn handle_menu(
                 cancel_harvest(&mut controller, &mut pending);
                 restart.0 = true;
                 feedback.success = None;
-                banana.translation = layout.banana_home.extend(3.0);
+                banana.translation = layout.banana_home().extend(3.0);
                 requested = Some(MenuState::Closed);
             }
             ButtonAction::CancelRestart if *menu == MenuState::ConfirmRestart => {
@@ -1564,7 +1631,7 @@ fn handle_menu(
     if let Some(next) = requested {
         if next != MenuState::Closed {
             cancel_harvest(&mut controller, &mut pending);
-            banana.translation = layout.banana_home.extend(3.0);
+            banana.translation = layout.banana_home().extend(3.0);
         }
         *menu = next;
     }
@@ -1605,7 +1672,7 @@ fn handle_harvest_input(
             );
             cancel_harvest(&mut controller, &mut pending);
             diagnostic_trace.clear();
-            banana.translation = layout.banana_home.extend(3.0);
+            banana.translation = layout.banana_home().extend(3.0);
         }
         return;
     }
@@ -1631,7 +1698,7 @@ fn handle_harvest_input(
                     pointer_in_camera_space(raw, window.resolution.base_scale_factor());
                 let world = screen_to_world(camera_position, &camera);
                 let accepted = world
-                    .is_some_and(|position| contains_inclusive(layout.harvest_bounds, position));
+                    .is_some_and(|position| contains_inclusive(layout.harvest_bounds(), position));
                 diagnostic_log!(
                     frame_count,
                     "touch_start",
@@ -1645,10 +1712,10 @@ fn handle_harvest_input(
                     world.is_some(),
                     world.map_or(f32::NAN, |position| position.x),
                     world.map_or(f32::NAN, |position| position.y),
-                    layout.harvest_bounds.min.x,
-                    layout.harvest_bounds.min.y,
-                    layout.harvest_bounds.max.x,
-                    layout.harvest_bounds.max.y,
+                    layout.harvest_bounds().min.x,
+                    layout.harvest_bounds().min.y,
+                    layout.harvest_bounds().max.x,
+                    layout.harvest_bounds().max.y,
                     accepted,
                     window.width(),
                     window.height(),
@@ -1699,7 +1766,7 @@ fn handle_harvest_input(
                 });
                 let world = camera_position.and_then(|position| screen_to_world(position, &camera));
                 let in_harvest = world
-                    .is_some_and(|position| contains_inclusive(layout.harvest_bounds, position));
+                    .is_some_and(|position| contains_inclusive(layout.harvest_bounds(), position));
                 let accepted =
                     pointer_guard.suppress_mouse_for == 0.0 && in_harvest && !started_in_ui;
                 diagnostic_log!(
@@ -1760,14 +1827,14 @@ fn handle_harvest_input(
                 );
                 cancel_harvest(&mut controller, &mut pending);
                 diagnostic_trace.clear();
-                banana.translation = layout.banana_home.extend(3.0);
+                banana.translation = layout.banana_home().extend(3.0);
             } else if let Some(touch) = touches.get_released(id) {
                 let raw = touch.position();
                 let camera_position =
                     pointer_in_camera_space(raw, window.resolution.base_scale_factor());
                 let position = screen_to_world(camera_position, &camera);
                 let in_deposit = position
-                    .is_some_and(|position| contains_inclusive(layout.deposit_bounds, position));
+                    .is_some_and(|position| contains_inclusive(layout.deposit_bounds(), position));
                 diagnostic_log!(
                     frame_count,
                     "touch_release",
@@ -1781,10 +1848,10 @@ fn handle_harvest_input(
                     position.is_some(),
                     position.map_or(f32::NAN, |position| position.x),
                     position.map_or(f32::NAN, |position| position.y),
-                    layout.deposit_bounds.min.x,
-                    layout.deposit_bounds.min.y,
-                    layout.deposit_bounds.max.x,
-                    layout.deposit_bounds.max.y,
+                    layout.deposit_bounds().min.x,
+                    layout.deposit_bounds().min.y,
+                    layout.deposit_bounds().max.x,
+                    layout.deposit_bounds().max.y,
                     in_deposit,
                 );
                 finish_pointer_drag(
@@ -1852,7 +1919,7 @@ fn handle_harvest_input(
                 .and_then(|position| screen_to_world(position, &camera));
             if mouse.just_released(MouseButton::Left) {
                 let in_deposit = position
-                    .is_some_and(|position| contains_inclusive(layout.deposit_bounds, position));
+                    .is_some_and(|position| contains_inclusive(layout.deposit_bounds(), position));
                 diagnostic_log!(
                     frame_count,
                     "mouse_release",
@@ -1889,7 +1956,7 @@ fn handle_harvest_input(
                 );
                 cancel_harvest(&mut controller, &mut pending);
                 diagnostic_trace.clear();
-                banana.translation = layout.banana_home.extend(3.0);
+                banana.translation = layout.banana_home().extend(3.0);
             }
         }
         HarvestInteraction::KeyboardHarvest { .. } => {}
@@ -1904,11 +1971,11 @@ fn finish_pointer_drag(
     pending: &mut PendingSettlement,
     banana: &mut Transform,
 ) {
-    if position.is_some_and(|position| contains_inclusive(layout.deposit_bounds, position)) {
+    if position.is_some_and(|position| contains_inclusive(layout.deposit_bounds(), position)) {
         pending.0 = Some(SettlementSource::Pointer(pointer));
     } else {
         cancel_harvest(controller, pending);
-        banana.translation = layout.banana_home.extend(3.0);
+        banana.translation = layout.banana_home().extend(3.0);
     }
 }
 
@@ -1938,7 +2005,9 @@ fn move_keyboard_harvest(
     let elapsed = elapsed + time.delta_secs();
     let progress = (elapsed / KEYBOARD_HARVEST_SECONDS).clamp(0.0, 1.0);
     let eased = progress * progress * (3.0 - 2.0 * progress);
-    let mut position = layout.banana_home.lerp(layout.deposit, eased);
+    let mut position = layout
+        .banana_home()
+        .lerp(layout.board(layout.town_centre()), eased);
     position.y += (std::f32::consts::PI * progress).sin() * 72.0;
     banana.translation = position.extend(4.0);
 
@@ -1979,7 +2048,7 @@ fn queue_manual_settlement(
             kind: DeliveryKind::Manual,
         });
         controller.interaction = HarvestInteraction::Idle;
-        banana.translation = layout.banana_home.extend(3.0);
+        banana.translation = layout.banana_home().extend(3.0);
     }
     diagnostic_log!(
         frame_count,
@@ -2085,7 +2154,7 @@ fn update_feedback(
     let drag_highlight = matches!(
         controller.interaction,
         HarvestInteraction::Dragging { position, .. }
-            if contains_inclusive(layout.deposit_bounds, position)
+            if contains_inclusive(layout.deposit_bounds(), position)
     );
 
     let mut pulse = 0.0;
@@ -2465,18 +2534,18 @@ fn sync_web_test_state(
                 .map_or(Vec2::ZERO, |touch| touch.position()),
         ),
         banana: screen(banana_transform.translation.truncate()),
-        harvest: screen(layout.harvest),
+        harvest: screen(layout.board(layout.grove())),
         harvest_bounds: TestBounds {
             min: screen(Vec2::new(
-                layout.harvest_bounds.min.x,
-                layout.harvest_bounds.max.y,
+                layout.harvest_bounds().min.x,
+                layout.harvest_bounds().max.y,
             )),
             max: screen(Vec2::new(
-                layout.harvest_bounds.max.x,
-                layout.harvest_bounds.min.y,
+                layout.harvest_bounds().max.x,
+                layout.harvest_bounds().min.y,
             )),
         },
-        deposit: screen(layout.deposit),
+        deposit: screen(layout.board(layout.town_centre())),
         monkeys: workers
             .iter()
             .map(|(cycle, transform)| {
@@ -2665,34 +2734,43 @@ mod tests {
         ] {
             let layout = SceneLayout::for_viewport(viewport);
 
-            assert!(layout.harvest.x < layout.deposit.x);
-            assert!(layout.harvest.y > layout.deposit.y);
-            assert!(layout.banana_size >= 18.0);
-            assert!(contains_inclusive(layout.harvest_bounds, layout.harvest));
+            assert!(layout.board(layout.grove()).x < layout.board(layout.town_centre()).x);
+            assert!(layout.board(layout.grove()).y > layout.board(layout.town_centre()).y);
+            assert!(layout.banana_size() >= 18.0);
             assert!(contains_inclusive(
-                layout.harvest_bounds,
-                layout.banana_home
+                layout.harvest_bounds(),
+                layout.banana_home()
             ));
-            assert!(layout.harvest_bounds.width() >= layout.zone_size);
-            assert!(layout.harvest_bounds.width() >= 44.0);
-            assert!(layout.deposit_bounds.width() >= 80.0);
+            // `Rect::from_center_size` rounds through a half-extent, so this is
+            // the same number twice rather than a real inequality.
+            assert!(layout.harvest_bounds().width() >= layout.zone_size() - 1e-3);
+            assert!(layout.harvest_bounds().width() >= 44.0);
+            assert!(layout.deposit_bounds().width() >= 80.0);
         }
     }
 
     #[test]
-    fn the_worker_route_runs_between_the_two_zones_at_every_viewport() {
+    fn the_board_holds_the_whole_walk_at_every_viewport() {
         for viewport in [
             Vec2::new(320.0, 568.0),
             Vec2::new(390.0, 844.0),
             Vec2::new(1920.0, 1080.0),
         ] {
             let layout = SceneLayout::for_viewport(viewport);
-
-            assert!(layout.grove_stand < layout.stall_stand);
-            // Workers stand clear of both sprite centres, so they do not walk
-            // through the tree or the stall.
-            assert!(layout.grove_stand > layout.harvest.x);
-            assert!(layout.stall_stand < layout.deposit.x);
+            // Both ends of the economy have to be on the board, or a playtest
+            // of the walk can only ever see half of it.
+            let focus = layout.town_centre().midpoint(layout.grove());
+            assert!(
+                layout.board(focus).distance(layout.scene_center()) < 1e-3,
+                "{viewport:?}: the board is not pointed at the walk"
+            );
+            // A `WorldRoot` transform and `board` are two spellings of the same
+            // two numbers; if they drift, the baked terrain slides out from
+            // under the monkeys walking on it.
+            let root = layout.world_root();
+            let projected = isometric::project(layout.grove());
+            let through_root = root.transform_point(projected.extend(0.0)).truncate();
+            assert!((through_root - layout.board(layout.grove())).length() < 1e-3);
         }
     }
 
@@ -2701,23 +2779,35 @@ mod tests {
         let desktop = SceneLayout::for_viewport(Vec2::new(1280.0, 720.0));
         let phone = SceneLayout::for_viewport(Vec2::new(390.0, 844.0));
 
-        assert_eq!(phone.world_scale, 1.0);
+        assert_eq!(phone.world_scale(), 1.0);
         for layout in [desktop, phone] {
             let snapped = layout.snap(11.4);
-            let grid_units = snapped / layout.world_scale;
+            let grid_units = snapped / layout.world_scale();
             assert!((grid_units - grid_units.round()).abs() < 0.001);
         }
     }
 
     #[test]
-    fn route_projection_is_monotonic_and_depth_ordered() {
+    fn the_walk_to_the_grove_recedes_from_the_viewer() {
+        // The worked node is north-west of the town, which in this projection
+        // is *away*: a monkey setting out has to pass behind everything it
+        // started in front of, and arrive drawn behind the stall it left.
         let layout = SceneLayout::default();
-        let start = layout.route_point(layout.grove_stand, 0.0);
-        let middle = layout.route_point((layout.grove_stand + layout.stall_stand) * 0.5, 0.0);
-        let end = layout.route_point(layout.stall_stand, 0.0);
-        assert!(start.x < middle.x && middle.x < end.x);
-        assert!(start.y > middle.y && middle.y > end.y);
-        assert!(layout.actor_z(start, 0.0) < layout.actor_z(end, 0.0));
+        let route = map::WorkedRoute::start();
+        let leaving = route.0.sample(0.0).at;
+        let arriving = route.0.sample(1.0).at;
+        let ground = |at: bevy::math::DVec2| Vec2::new(at.x as f32, at.y as f32);
+
+        assert!(
+            isometric::stand_z(ground(arriving), 0.0) < isometric::stand_z(ground(leaving), 0.0)
+        );
+        // And it climbs the screen the whole way, rather than doubling back.
+        let mut previous = layout.board(ground(leaving));
+        for step in 1..=20 {
+            let at = layout.board(ground(route.0.sample(f64::from(step) / 20.0).at));
+            assert!(at.y > previous.y, "the walk doubled back at step {step}");
+            previous = at;
+        }
     }
 
     #[test]

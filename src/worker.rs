@@ -14,6 +14,8 @@ use crate::{
         CART_CREW, Carts, CycleSpec, HarvestCycle, Multipliers, Segment, Workforce, cycle_time,
     },
     game::{Delivery, DeliveryKind, DeliveryQueue, SceneLayout},
+    isometric,
+    map::{Route, WorkedRoute},
 };
 
 const FRAME_SIZE: u32 = 22;
@@ -24,6 +26,8 @@ const MONKEY_EDGE: Color = Color::srgb(0.34, 0.17, 0.10);
 /// Three lanes is enough to keep a crowd legible without turning the route into
 /// a parade ground.
 const LANES: u32 = 3;
+/// Metres between lanes, measured across the route rather than along it.
+const LANE_SPACING: f32 = 1.6;
 #[derive(Component)]
 pub struct Worker;
 
@@ -109,22 +113,40 @@ impl NextLane {
 pub struct Lane(u32);
 
 impl Lane {
+    /// The cart's lane. Deliberately in front of every worker row: a vehicle is
+    /// what walkers pass behind, and drawing it there is also what keeps its
+    /// long dwell at the depot off the top of the unloading queue.
+    pub(crate) const CART: Self = Self(u32::MAX);
+
     /// Depth row, front to back.
     fn row(self) -> u32 {
         self.0 % LANES
     }
 
-    /// A small along-route offset, in source texels, so that workers sharing a
-    /// row are not pixel-identical.
+    /// A small along-route offset, in metres, so that workers sharing a row are
+    /// not identical.
     ///
     /// Without it, workers 0 and 3 occupy the same lane at the same phase with
     /// the same animation frame and draw exactly on top of each other: hire
     /// four in a burst and the player counts three monkeys while the store
     /// reads OWNED 4. Removing spawn jitter is what exposed this - phases used
     /// to differ, so positions did too.
-    fn stagger_texels(self) -> f32 {
+    fn stagger_metres(self) -> f32 {
         const SPREAD: u32 = 5;
-        (self.0 / LANES % SPREAD) as f32 * 4.0 - 8.0
+        (self.0 / LANES % SPREAD) as f32 * 1.2 - 2.4
+    }
+
+    /// Metres to either side of the route's centre line, so the rows read as a
+    /// crowd walking together rather than a queue.
+    fn lane_metres(self) -> f32 {
+        (self.row() as f32 - (LANES as f32 - 1.0) * 0.5) * LANE_SPACING
+    }
+
+    /// A stable, bounded separation for two actors that would otherwise sort
+    /// identically. Bounded because an epsilon that grows with the hire index
+    /// eventually exceeds a real depth difference, and a crowd starts flickering.
+    fn nudge(self) -> f32 {
+        (self.0 % 8) as f32 * 0.0001
     }
 }
 
@@ -280,52 +302,79 @@ pub(crate) fn spawn_monkey_outline(parent: &mut ChildSpawnerCommands, size: Vec2
 }
 
 #[allow(clippy::type_complexity)]
+/// Where a walker stands, in metres: a point on the route, pushed off the
+/// centre line and along it by its lane.
+///
+/// The offsets are presentation and only presentation. Every monkey advances by
+/// the same dimensionless fraction, so a wider lane shows as a slightly higher
+/// apparent speed - never as a different cycle time. Letting arrival be driven
+/// by the drawn position instead is the one construction `map` exists to
+/// prevent: a drawn path and a cycle time that are two different journeys.
+fn walk_point(route: &Route, fraction: f64, lane: Lane) -> Vec2 {
+    let step = route.sample(fraction);
+    let along = Vec2::new(step.heading.x as f32, step.heading.y as f32);
+    // Ninety degrees off the direction of travel, so a crowd spreads across the
+    // route however the route happens to be pointing.
+    let across = Vec2::new(-along.y, along.x);
+    Vec2::new(step.at.x as f32, step.at.y as f32)
+        + across * lane.lane_metres()
+        + along * lane.stagger_metres()
+}
+
+/// Which way a walker is travelling, in metres, at a point on the route.
+fn heading(route: &Route, fraction: f64, outbound: bool) -> Vec2 {
+    let step = route.sample(fraction);
+    let along = Vec2::new(step.heading.x as f32, step.heading.y as f32);
+    if outbound { along } else { -along }
+}
+
+/// Everything `position_workers` touches on one worker.
+type WorkerView<'a> = (
+    Entity,
+    &'a HarvestCycle,
+    &'a Lane,
+    Option<Mut<'a, JustHired>>,
+    Mut<'a, Transform>,
+    Mut<'a, Sprite>,
+);
+
 pub fn position_workers(
     time: Res<Time>,
     mut commands: Commands,
     layout: Res<SceneLayout>,
+    route: Res<WorkedRoute>,
     multipliers: Res<Multipliers>,
-    mut workers: Query<
-        (
-            Entity,
-            &HarvestCycle,
-            &Lane,
-            Option<&mut JustHired>,
-            &mut Transform,
-            &mut Sprite,
-        ),
-        With<Worker>,
-    >,
+    mut workers: Query<WorkerView, With<Worker>>,
 ) {
     for (entity, cycle, lane, hired, mut transform, mut sprite) in &mut workers {
-        let progress = cycle.segment_fraction(CycleSpec::WORKER, *multipliers) as f32;
-        let (x, facing_right) = match cycle.segment() {
-            Segment::ToGrove => (
-                layout.stall_stand + (layout.grove_stand - layout.stall_stand) * progress,
-                false,
-            ),
-            Segment::Pick => (layout.grove_stand, false),
-            Segment::ToDepot => (
-                layout.grove_stand + (layout.stall_stand - layout.grove_stand) * progress,
-                true,
-            ),
+        let progress = cycle.segment_fraction(CycleSpec::WORKER, *multipliers);
+        // How far along the walk, measured from the town centre. The economy
+        // decides this and the map decides where it is: a monkey advances by
+        // the shared, dimensionless segment fraction, so its lane changes how
+        // fast it *appears* to move and never how long its cycle takes.
+        let (fraction, outbound) = match cycle.segment() {
+            Segment::ToGrove => (progress, true),
+            Segment::Pick => (1.0, true),
+            Segment::ToDepot => (1.0 - progress, false),
             // Unloading and then eating both happen at the stall, so the
             // monkey stays put and keeps facing it.
-            Segment::Unload | Segment::Snack => (layout.stall_stand, true),
+            Segment::Unload | Segment::Snack => (0.0, false),
         };
 
-        // Project the route and its parallel crowd lanes in one place. Screen
-        // y also drives the stable painter's order through `actor_z`.
+        let point = walk_point(&route.0, fraction, *lane);
+        let travel = heading(&route.0, fraction, outbound);
+        let facing_right = isometric::project(travel).x >= 0.0;
+
         let back = lane.row() as f32;
-        let point = layout.route_point(x + lane.stagger_texels() * layout.world_scale, back);
-        let half_height = FRAME_SIZE as f32 * 0.5 * layout.world_scale;
+        let screen = layout.board(point);
+        let half_height = FRAME_SIZE as f32 * 0.5 * layout.world_scale();
 
         let translation = Vec3::new(
-            layout.snap(point.x),
-            layout.snap(point.y + half_height),
-            layout.actor_z(point, lane.0 as f32 * 0.0001),
+            layout.snap(screen.x),
+            layout.snap(screen.y + half_height),
+            isometric::stand_z(point, lane.nudge()),
         );
-        let scale = Vec3::splat(layout.world_scale);
+        let scale = Vec3::splat(layout.world_scale());
         // Written only on change: a worker stands still through Pick and
         // Unload, and transform propagation is `Changed<Transform>`-driven.
         if transform.translation != translation {
@@ -406,15 +455,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn isometric_lanes_are_separated_and_depth_sorted() {
-        let layout = SceneLayout::for_viewport(Vec2::new(1280.0, 720.0));
-        let x = (layout.grove_stand + layout.stall_stand) * 0.5;
+    fn lanes_spread_across_the_route_and_sort_by_depth() {
+        // Lanes are metres across the ground now, not rows of screen y, so the
+        // property is the one that actually matters: a crowd walking together
+        // spreads perpendicular to wherever the route happens to point, and the
+        // near lane draws over the far one.
+        let route = WorkedRoute::start();
         let points: Vec<Vec2> = (0..LANES)
-            .map(|lane| layout.route_point(x, lane as f32))
+            .map(|row| walk_point(&route.0, 0.5, Lane(row)))
             .collect();
+        let centre = route.0.sample(0.5);
+        let along = Vec2::new(centre.heading.x as f32, centre.heading.y as f32);
+
         for pair in points.windows(2) {
-            assert!(pair[1].y < pair[0].y);
-            assert!(layout.actor_z(pair[1], 0.0) > layout.actor_z(pair[0], 0.0));
+            // Rows run front to back, so each one draws behind the last - which
+            // is what the shade cue in `position_workers` is also saying.
+            assert!(
+                isometric::stand_z(pair[1], 0.0) < isometric::stand_z(pair[0], 0.0),
+                "lanes are not depth ordered front to back: {points:?}"
+            );
+            // Spread is across the walk, not along it: a lane must not make one
+            // monkey's journey longer than another's.
+            let offset = pair[1] - pair[0];
+            assert!(
+                offset.dot(along).abs() < 1e-3,
+                "a lane pushed a monkey along its own route by {}",
+                offset.dot(along)
+            );
         }
     }
 
@@ -427,13 +494,39 @@ mod tests {
         for index in 0..LANES * 5 {
             let lane = Lane(index);
             assert!(
-                seen.insert((lane.row(), lane.stagger_texels().to_bits())),
+                seen.insert((lane.row(), lane.stagger_metres().to_bits())),
                 "worker {index} collides with an earlier one"
             );
         }
         // And the spread stays inside the route rather than walking off it.
         for index in 0..200u32 {
-            assert!(Lane(index).stagger_texels().abs() <= 8.0);
+            assert!(Lane(index).stagger_metres().abs() <= 2.4);
+        }
+    }
+
+    #[test]
+    fn a_lane_changes_apparent_speed_and_never_cycle_time() {
+        // The one rule the swarm must not break (D24). Offsets are drawn, not
+        // simulated: every monkey is at the same fraction at the same tick, so
+        // an outer lane covers slightly more ground in the same time and that
+        // is the whole of the difference.
+        let route = WorkedRoute::start();
+        let nominal = route.0.length() as f32;
+        for row in 0..LANES {
+            let lane = Lane(row);
+            let walked: f32 = (0..200)
+                .map(|step| {
+                    let a = walk_point(&route.0, f64::from(step) / 200.0, lane);
+                    let b = walk_point(&route.0, f64::from(step + 1) / 200.0, lane);
+                    a.distance(b)
+                })
+                .sum();
+            // Within two per cent of nominal is the threshold below which a
+            // desynchronised swarm is invisible rather than reading as a bug.
+            assert!(
+                (walked - nominal).abs() / nominal < 0.02,
+                "lane {row} walks {walked} m against a nominal {nominal} m"
+            );
         }
     }
 }
@@ -645,6 +738,7 @@ type CartAvatarQuery<'w, 's> = Query<
 /// scale follow for free. All this loop decides is how many of them are visible.
 pub fn position_carts(
     layout: Res<SceneLayout>,
+    route: Res<WorkedRoute>,
     multipliers: Res<Multipliers>,
     carts_res: Res<Carts>,
     mut carts: CartAvatarQuery,
@@ -659,13 +753,12 @@ pub fn position_carts(
     let mut carried: Vec<(Entity, f32)> = Vec::new();
 
     for (entity, cycle, boarding, mut transform) in &mut carts {
-        let progress = cycle.segment_fraction(CycleSpec::CART, *multipliers) as f32;
-        // Its own bay at each end, on the *inside* of the route: pushed left at
-        // the depot and right at the grove, so the cart never parks on the
-        // unloading queue and never reverses into the palm.
-        let dwell = layout.cart_offset();
-        let (grove, stall) = (layout.grove_stand + dwell, layout.stall_stand - dwell);
-        let x = if boarding.is_some() {
+        let progress = cycle.segment_fraction(CycleSpec::CART, *multipliers);
+        // Its own bay at each end, on the *inside* of the route, so the cart
+        // never parks on the unloading queue and never reverses into the palm.
+        let dwell = f64::from(layout.cart_offset()) / route.0.length();
+        let (grove, stall) = (1.0 - dwell, dwell);
+        let fraction = if boarding.is_some() {
             // An unlaunched cart waits at the depot, visibly filling up.
             stall
         } else {
@@ -677,11 +770,15 @@ pub fn position_carts(
             }
         };
 
-        let point = layout.route_point(x, -1.0);
+        // A vehicle draws in *front* of the walkers rather than beside them:
+        // workers pass behind it instead of through it. That is one lane's
+        // worth of ground towards the viewer, which the depth rule then
+        // handles on its own.
+        let point = walk_point(&route.0, fraction, Lane::CART);
         transform.translation = Vec3::new(
-            layout.snap(point.x),
-            layout.snap(point.y + CART_BOX_TEXELS.y * 0.5 * scale),
-            layout.actor_z(point, 0.02),
+            layout.snap(layout.board(point).x),
+            layout.snap(layout.board(point).y + CART_BOX_TEXELS.y * 0.5 * scale),
+            isometric::stand_z(point, 0.0002),
         );
         transform.scale = Vec3::splat(scale);
         facing_left = !matches!(cycle.segment(), Segment::ToDepot) || boarding.is_some();
@@ -699,7 +796,7 @@ pub fn position_carts(
                 Segment::Snack => 0.0,
             }
         };
-        carried.push((entity, load));
+        carried.push((entity, load as f32));
     }
 
     for (parent, mut transform, mut visibility, mut sprite) in &mut loads {

@@ -149,6 +149,17 @@ pub struct Route {
     length: f64,
 }
 
+/// A place on a walk, and the direction of travel there.
+///
+/// The heading is what a monkey faces, and — turned ninety degrees — the axis a
+/// swarm offset is measured along, so the two always come from the same place.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Step {
+    pub at: DVec2,
+    /// Unit length, or zero on a route that goes nowhere.
+    pub heading: DVec2,
+}
+
 impl Route {
     fn new(points: Vec<DVec2>) -> Self {
         let length = points.windows(2).map(|leg| leg[0].distance(leg[1])).sum();
@@ -163,6 +174,47 @@ impl Route {
     /// Metres, walked.
     pub fn length(&self) -> f64 {
         self.length
+    }
+
+    /// Where a walker a given fraction of the way along stands, and which way
+    /// it faces.
+    ///
+    /// By *arc length*, not by leg index: a walk with a long leg and a short
+    /// one is still covered at one speed, which is the only reading under which
+    /// the drawn journey and the economy's `2d/v` are the same journey.
+    ///
+    /// A linear scan. Routes on this map have one or two legs, and the scan is
+    /// what keeps `Route` a plain polyline rather than something that has to
+    /// maintain prefix sums; revisit it if a route ever grows to many corners.
+    pub fn sample(&self, fraction: f64) -> Step {
+        let target = self.length * fraction.clamp(0.0, 1.0);
+        let mut walked = 0.0;
+        for leg in self.points.windows(2) {
+            let span = leg[0].distance(leg[1]);
+            if walked + span >= target {
+                let along = if span > 0.0 {
+                    (target - walked) / span
+                } else {
+                    0.0
+                };
+                return Step {
+                    at: leg[0].lerp(leg[1], along),
+                    heading: (leg[1] - leg[0]).normalize_or_zero(),
+                };
+            }
+            walked += span;
+        }
+        // A route of one point, or a fraction that floating point walked off
+        // the end of: both stand at the far end, facing the way they came.
+        let at = *self.points.last().expect("a route has at least one point");
+        let heading = self
+            .points
+            .len()
+            .checked_sub(2)
+            .map_or(DVec2::ZERO, |previous| {
+                (at - self.points[previous]).normalize_or_zero()
+            });
+        Step { at, heading }
     }
 }
 
@@ -213,6 +265,46 @@ pub struct Map {
     /// Nearest first. See [`Map::parse`].
     groves: Vec<Grove>,
     home_trees: Vec<Tile>,
+}
+
+/// The map, as a resource.
+///
+/// The map is compiled in, so this holds a reference to a static rather than
+/// owned data. It exists anyway, and is worth the newtype, because a system
+/// that reads the map should *say so in its signature*: reaching for
+/// [`start()`] from inside a system makes the map an ambient dependency, and
+/// the readability of `SimulationPlugin` and `PresentationPlugin` rests on
+/// their systems declaring what they touch.
+#[derive(bevy::prelude::Resource, Clone, Copy)]
+pub struct Village(&'static Map);
+
+impl Village {
+    pub fn start() -> Self {
+        Self(start())
+    }
+}
+
+impl std::ops::Deref for Village {
+    type Target = Map;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+/// The walk the workforce is on, computed once.
+///
+/// [`Map::route`] allocates and clears three vectors the size of the map on
+/// every call, so it is emphatically not something to ask per frame. The route
+/// is fixed for as long as the worked node is, so it is measured at startup and
+/// read from here.
+#[derive(bevy::prelude::Resource)]
+pub struct WorkedRoute(pub Route);
+
+impl WorkedRoute {
+    pub fn start() -> Self {
+        Self(start().reference_route())
+    }
 }
 
 /// The map every run begins on.
