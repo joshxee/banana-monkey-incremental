@@ -9,7 +9,9 @@ use crate::{
         SupportRole, Treasury, UnitKind, Workforce, cart_crew_shortfall, multipliers_for,
         plan_hire, research_per_sec, restart_run,
     },
-    hud, isometric, persistence,
+    hud, isometric,
+    launch::{Launch, View},
+    persistence,
     support::{self, SupportUnit},
     worker::{self, Cart, RestoredCycle, Worker},
 };
@@ -53,12 +55,31 @@ macro_rules! diagnostic_log {
     };
 }
 
-pub struct HarvestGamePlugin;
+/// The economy: every system that may write simulation state, and nothing
+/// that needs a window, a GPU or an asset.
+///
+/// Runs under `MinimalPlugins` exactly as it runs under `DefaultPlugins`, which
+/// is what lets `headless::Headless` step it one 20 Hz tick at a time in a
+/// unit test. Inputs arrive through three request resources - [`HireRequests`],
+/// [`RestartRequest`] and the [`DeliveryQueue`] - and every consequence leaves
+/// through the [`Settled`] message, so a test never has to fake a pointer to
+/// exercise the economy, and the presentation never has to be loaded to see
+/// what it did.
+///
+/// The run state itself - `Treasury`, `Workforce`, `Staff`, `Research`, `Carts`
+/// and the two restore budgets - is not initialised here. `scenario::install`
+/// inserts it, from a save or from a named scenario, before this plugin is
+/// added.
+pub struct SimulationPlugin;
+
+/// Everything the player sees and touches. Reads simulation state, never
+/// writes it, and needs `DefaultPlugins` underneath.
+pub struct PresentationPlugin;
 
 /// The simulation, at a fixed 20 Hz. Mirrors stages 1-7 of the architecture
 /// doc's §7 schedule; stages 8 and 9 arrive with the units that need them.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Sim {
+pub(crate) enum Sim {
     Purchase,
     Spawn,
     /// Stage 4. Derives `M_speed`/`M_unpack`/`M_tech` from the world, between
@@ -79,34 +100,25 @@ enum Present {
     Export,
 }
 
-impl Plugin for HarvestGamePlugin {
+impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SceneLayout>()
-            .init_resource::<Multipliers>()
+        app.init_resource::<Multipliers>()
             .init_resource::<Carts>()
             .init_resource::<worker::NextLane>()
+            .init_resource::<worker::RestoreWorkers>()
             .init_resource::<worker::RestoreCarts>()
             .init_resource::<Staff>()
             .init_resource::<Research>()
             .init_resource::<FedStaff>()
             .init_resource::<Committed>()
             .init_resource::<EconomySnapshot>()
-            .init_resource::<HarvestController>()
-            .init_resource::<PendingSettlement>()
             .init_resource::<DeliveryQueue>()
             .init_resource::<HireRequests>()
             .init_resource::<RestartRequest>()
             .init_resource::<PersistenceDirty>()
-            .init_resource::<Feedback>()
-            .init_resource::<MenuState>()
-            .init_resource::<hud::ActiveShopTab>()
-            .init_resource::<hud::InfoOpen>()
-            .init_resource::<UiTouchGesture>()
-            .init_resource::<PointerGuard>()
-            .init_resource::<DiagnosticPointerTrace>()
+            .add_message::<Settled>()
+            .add_message::<Restarted>()
             .insert_resource(Time::<Fixed>::from_hz(SIM_HZ))
-            .add_systems(Startup, setup)
-            .add_systems(Startup, apply_test_time_scale)
             .configure_sets(
                 FixedUpdate,
                 (
@@ -116,16 +128,6 @@ impl Plugin for HarvestGamePlugin {
                     Sim::Advance,
                     Sim::Settle,
                     Sim::Snapshot,
-                )
-                    .chain(),
-            )
-            .configure_sets(
-                Update,
-                (
-                    Present::Layout,
-                    Present::Input,
-                    Present::Render,
-                    Present::Export,
                 )
                     .chain(),
             )
@@ -153,6 +155,34 @@ impl Plugin for HarvestGamePlugin {
                     settle.in_set(Sim::Settle),
                     snapshot_economy.in_set(Sim::Snapshot),
                 ),
+            );
+    }
+}
+
+impl Plugin for PresentationPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<SceneLayout>()
+            .init_resource::<HarvestController>()
+            .init_resource::<PendingSettlement>()
+            .init_resource::<Feedback>()
+            .init_resource::<MenuState>()
+            .init_resource::<hud::ActiveShopTab>()
+            .init_resource::<hud::InfoOpen>()
+            .init_resource::<UiTouchGesture>()
+            .init_resource::<PointerGuard>()
+            .init_resource::<DiagnosticPointerTrace>()
+            .init_resource::<Launch>()
+            .init_resource::<persistence::SaveMode>()
+            .add_systems(Startup, (setup, apply_launch_speed))
+            .configure_sets(
+                Update,
+                (
+                    Present::Layout,
+                    Present::Input,
+                    Present::Render,
+                    Present::Export,
+                )
+                    .chain(),
             )
             .add_systems(
                 Update,
@@ -175,7 +205,9 @@ impl Plugin for HarvestGamePlugin {
                     (
                         track_ui_touch,
                         hud::handle_store_gesture,
-                        handle_menu,
+                        // Not in the stage view: with no menu drawn, Escape
+                        // would open an invisible one that blocks the drag.
+                        handle_menu.run_if(|launch: Res<Launch>| launch.view == View::Full),
                         hud::sync_menu_visibility,
                     )
                         .chain(),
@@ -196,8 +228,9 @@ impl Plugin for HarvestGamePlugin {
                     support::sync_support_avatars,
                     support::sync_support_badges,
                     animate_banana,
-                    update_feedback,
-                    update_floaters,
+                    // Before the two systems that consume what it produces, so
+                    // a delivery pulses and floats on the frame it settled.
+                    (present_settlements, update_feedback, update_floaters).chain(),
                     hud::sync_readout,
                     hud::sync_shop_tabs,
                     hud::sync_shop_new,
@@ -303,7 +336,7 @@ impl ButtonAction {
     }
 }
 
-#[derive(Resource, Debug, Clone, Copy)]
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SceneLayout {
     pub(crate) viewport: Vec2,
     zone_size: f32,
@@ -335,16 +368,29 @@ impl Default for SceneLayout {
 
 impl SceneLayout {
     pub(crate) fn for_viewport(viewport: Vec2) -> Self {
+        Self::for_view(viewport, View::Full)
+    }
+
+    /// The stage view has no banner and no store to make room for, so the
+    /// board takes the largest square the window holds, centred. Without this
+    /// the HUD's reserve stayed and a 1280x720 stage was a 416 px board with
+    /// three quarters of the window empty.
+    pub(crate) fn for_view(viewport: Vec2, view: View) -> Self {
         let width = viewport.x.max(320.0);
         let height = viewport.y.max(320.0);
-        let short_landscape = width > height * 1.35 && height < 560.0;
-        let header_height = 104.0;
-        let scene_side = if short_landscape {
+        let stage = view == View::Stage;
+        let short_landscape = !stage && width > height * 1.35 && height < 560.0;
+        let header_height = if stage { 0.0 } else { 104.0 };
+        let scene_side = if stage {
+            width.min(height)
+        } else if short_landscape {
             (height - header_height).min(width * 0.48)
         } else {
             width.min(height * 0.58)
         };
-        let scene_center = if short_landscape {
+        let scene_center = if stage {
+            Vec2::ZERO
+        } else if short_landscape {
             Vec2::new(-width * 0.5 + scene_side * 0.5, -header_height * 0.5)
         } else {
             Vec2::new(0.0, height * 0.5 - header_height - scene_side * 0.5)
@@ -551,9 +597,27 @@ pub(crate) enum DeliveryKind {
 }
 
 impl DeliveryKind {
-    fn is_income(self) -> bool {
+    pub(crate) fn is_income(self) -> bool {
         !matches!(self, DeliveryKind::Snack | DeliveryKind::Wage)
     }
+}
+
+/// One delivery that has just moved the treasury, in the order it did so.
+///
+/// The simulation's only output besides its resources. Presentation turns each
+/// one into a pulse and a rising "+n"; a headless test reads them back as the
+/// ledger of what the economy did and when. Written in `FixedUpdate`, so a
+/// frame that ran several ticks carries several of these.
+/// The run went back to nothing. Presentation clears whatever was still in
+/// the air over the old one.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Restarted;
+
+#[derive(Message, Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Settled {
+    pub(crate) delivery: Delivery,
+    /// The treasury immediately after this delivery was applied.
+    pub(crate) balance: f64,
 }
 
 /// Counted rather than a flag, so clicking twice between two fixed ticks does
@@ -562,7 +626,7 @@ impl DeliveryKind {
 pub(crate) struct HireRequests(pub(crate) Vec<UnitKind>);
 
 #[derive(Resource, Debug, Default)]
-struct RestartRequest(bool);
+pub(crate) struct RestartRequest(pub(crate) bool);
 
 #[derive(Resource, Debug)]
 struct PersistenceDirty {
@@ -635,32 +699,28 @@ impl UiTouchGesture {
     }
 }
 
+/// Every UI surface a pointer can land on instead of the board.
+type UiRegions<'w, 's> = Query<
+    'w,
+    's,
+    (&'static ComputedNode, &'static UiGlobalTransform),
+    Or<(
+        With<hud::HudRoot>,
+        With<hud::StoreRoot>,
+        With<hud::InfoPanel>,
+    )>,
+>;
+
 #[derive(bevy::ecs::system::SystemParam)]
 struct UiInput<'w, 's> {
     touch: Res<'w, UiTouchGesture>,
-    regions: Query<
-        'w,
-        's,
-        (&'static ComputedNode, &'static UiGlobalTransform),
-        Or<(
-            With<hud::HudRoot>,
-            With<hud::StoreRoot>,
-            With<hud::InfoPanel>,
-        )>,
-    >,
+    regions: UiRegions<'w, 's>,
 }
 
 fn track_ui_touch(
     touches: Res<Touches>,
     window: Single<&Window, With<PrimaryWindow>>,
-    ui_regions: Query<
-        (&ComputedNode, &UiGlobalTransform),
-        Or<(
-            With<hud::HudRoot>,
-            With<hud::StoreRoot>,
-            With<hud::InfoPanel>,
-        )>,
-    >,
+    ui_regions: UiRegions,
     mut gesture: ResMut<UiTouchGesture>,
 ) {
     gesture.just_pressed = false;
@@ -751,6 +811,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     asset_server: Res<AssetServer>,
+    launch: Res<Launch>,
 ) {
     commands.spawn((Camera2d, MainCamera));
 
@@ -815,13 +876,28 @@ fn setup(
         LayoutElement::DepositLabel,
     ));
 
-    hud::setup_hud(&mut commands, &asset_server);
-    hud::setup_menu(&mut commands, &asset_server);
+    // The stage view is the board and its actors with nothing in front of
+    // them: a playtest of "one monkey walks to the grove" does not need the
+    // store, the banner or the menu drawn over it. Every HUD system reaches
+    // its nodes through `Single`, so with none spawned they simply skip.
+    if launch.view == View::Full {
+        hud::setup_hud(&mut commands, &asset_server);
+        hud::setup_menu(&mut commands, &asset_server);
+    }
 }
 
-fn refresh_layout(window: Single<&Window, With<PrimaryWindow>>, mut layout: ResMut<SceneLayout>) {
-    let next = SceneLayout::for_viewport(Vec2::new(window.width(), window.height()));
-    if next.viewport != layout.viewport {
+fn refresh_layout(
+    window: Single<&Window, With<PrimaryWindow>>,
+    launch: Res<Launch>,
+    mut layout: ResMut<SceneLayout>,
+) {
+    let next = SceneLayout::for_view(Vec2::new(window.width(), window.height()), launch.view);
+    // The whole layout, not just the viewport it was derived from. The view is
+    // the second input now, and a stage launch at exactly the default 1280x720
+    // resolution produced an identical viewport - so a viewport-only guard left
+    // the board sitting in the HUD's reserve with three quarters of the window
+    // empty, which is precisely what the stage view exists to avoid.
+    if next != *layout {
         *layout = next;
     }
 }
@@ -890,11 +966,11 @@ fn apply_layout(
     }
 }
 
-/// Scale the clock for tests only.
+/// Scale the clock for playtests and browser tests.
 ///
-/// A worker's cycle is 50 *simulated* seconds, and an end-to-end test that
-/// watches a delivery therefore takes 50 real ones. Scaling `Time<Virtual>` is
-/// the honest way to change that: `Time<Fixed>` is driven by virtual time, so
+/// A worker's cycle is 50 *simulated* seconds, and a playtest that watches a
+/// delivery therefore takes 50 real ones. Scaling `Time<Virtual>` is the honest
+/// way to change that: `Time<Fixed>` is driven by virtual time, so
 /// `advance_cycles` still sees a constant 50 ms `dt` and the *fixed-step
 /// simulation* is bit-identical per tick. Shortening the cycle constants
 /// instead would test a different game.
@@ -909,43 +985,23 @@ fn apply_layout(
 ///   virtual. `SAVE_INTERVAL_SECONDS` and the touch-suppression window shrink
 ///   by the scale factor in wall-clock terms.
 ///
-/// Behind a default-off cargo feature rather than a plain `#[cfg(debug)]`,
-/// because the shipped artefact is a wasm build like the test one: without the
-/// feature gate, `?speed=100` would be a cheat code in the released game.
+/// The speed itself only ever reaches [`Launch`] under the `test-hooks`
+/// feature, so the released build has no such switch. See `launch.rs`.
 ///
 /// `max_delta` is deliberately left alone. It clamps the **raw** delta before
 /// the scale is applied (`bevy_time::virt`), not after, so a 60 Hz frame's
 /// 16.7 ms is already 15x under the 250 ms default and the clamp never fires at
-/// any scale this hook allows. Raising it "to match" would only widen the
+/// any scale the launcher allows. Raising it "to match" would only widen the
 /// spiral-of-death guard: at 60x, a 30-second stall - a breakpoint, a
 /// backgrounded tab, a lost wgpu device - would become 1800 virtual seconds and
 /// 36,000 fixed ticks in a single frame.
-#[cfg(all(feature = "test-hooks", target_arch = "wasm32"))]
-fn apply_test_time_scale(mut virtual_time: ResMut<Time<Virtual>>) {
-    /// Beyond this the fixed-step catch-up loop does more work per frame than a
-    /// frame has time for, and the run stops being faster in wall-clock terms.
-    const MAX_SCALE: f64 = 60.0;
-
-    let Some(scale) = web_sys::window()
-        .and_then(|window| window.location().search().ok())
-        .and_then(|search| {
-            search
-                .trim_start_matches('?')
-                .split('&')
-                .find_map(|pair| pair.strip_prefix("speed=").map(str::to_owned))
-        })
-        .and_then(|value| value.parse::<f64>().ok())
-        .filter(|scale| scale.is_finite() && (0.1..=MAX_SCALE).contains(scale))
-    else {
+fn apply_launch_speed(launch: Res<Launch>, mut virtual_time: ResMut<Time<Virtual>>) {
+    let Some(scale) = launch.speed else {
         return;
     };
-
     virtual_time.set_relative_speed_f64(scale);
-    bevy::log::info!("test-hooks: simulation running at {scale}x");
+    bevy::log::info!("launch: simulation running at {scale}x");
 }
-
-#[cfg(not(all(feature = "test-hooks", target_arch = "wasm32")))]
-fn apply_test_time_scale() {}
 
 // ────────────────────────────────────────────────── simulation, at 20 Hz
 
@@ -1028,7 +1084,7 @@ fn apply_restart(
     workers: Query<Entity, With<Worker>>,
     support: Query<Entity, With<SupportUnit>>,
     vehicles: Query<Entity, With<Cart>>,
-    floaters: Query<Entity, With<Floater>>,
+    mut restarted: MessageWriter<Restarted>,
 ) {
     if !std::mem::take(&mut request.0) {
         return;
@@ -1050,11 +1106,7 @@ fn apply_restart(
     for entity in workers.iter().chain(&support).chain(&vehicles) {
         commands.entity(entity).despawn();
     }
-    // Otherwise up to 0.9 s of "+5" keeps rising over a stall that just went
-    // back to zero.
-    for entity in &floaters {
-        commands.entity(entity).despawn();
-    }
+    restarted.write(Restarted);
     dirty.mark_immediate();
 }
 
@@ -1085,7 +1137,12 @@ type PoolQuery<'w, 's> = Query<
 type CartQuery<'w, 's> = Query<
     'w,
     's,
-    (&'static mut HarvestCycle, &'static CycleSpec),
+    (
+        Entity,
+        &'static mut HarvestCycle,
+        &'static CycleSpec,
+        Option<&'static RestoredCycle>,
+    ),
     (With<Cart>, Without<Worker>, Without<worker::Boarding>),
 >;
 
@@ -1164,14 +1221,22 @@ fn advance_cycles(
     // way: their meal is reserved out of the two hundred bananas they have just
     // delivered. Only fully crewed carts are in this query - an empty box has a
     // picking rate of zero.
-    for (mut cycle, spec) in &mut carts {
-        let output = cycle.advance(
-            dt,
-            *spec,
-            *multipliers,
-            CycleTerms::new(*spec, *multipliers),
-            &mut larder,
-        );
+    for (entity, mut cycle, spec, restored) in &mut carts {
+        // The same placement guard a restored worker gets: a cart dropped on
+        // its return leg is drawn full of bananas it never picked, and that
+        // load must not be credited. See `spawn_missing_carts`.
+        let terms = if restored.is_some() {
+            CycleTerms {
+                payload: 0.0,
+                meal: 0.0,
+            }
+        } else {
+            CycleTerms::new(*spec, *multipliers)
+        };
+        let output = cycle.advance(dt, *spec, *multipliers, terms, &mut larder);
+        if restored.is_some() && cycle.segment() == crate::domain::Segment::ToGrove {
+            commands.entity(entity).remove::<RestoredCycle>();
+        }
         if output.delivered > 0.0 {
             queue.entries.push(Delivery {
                 amount: output.delivered,
@@ -1224,9 +1289,7 @@ fn settle(
     mut treasury: ResMut<Treasury>,
     mut queue: ResMut<DeliveryQueue>,
     mut dirty: ResMut<PersistenceDirty>,
-    mut feedback: ResMut<Feedback>,
-    mut commands: Commands,
-    layout: Res<SceneLayout>,
+    mut settled: MessageWriter<Settled>,
 ) {
     for delivery in queue.entries.drain(..) {
         match delivery.kind {
@@ -1248,6 +1311,32 @@ fn settle(
             }
         }
 
+        settled.write(Settled {
+            delivery,
+            balance: treasury.bananas(),
+        });
+    }
+}
+
+/// Every settlement becomes a pulse on the stall and a rising "+n". Reads the
+/// message rather than sitting inside [`settle`], so the simulation can run
+/// with no scene at all.
+fn present_settlements(
+    mut settled: MessageReader<Settled>,
+    mut restarted: MessageReader<Restarted>,
+    mut feedback: ResMut<Feedback>,
+    mut commands: Commands,
+    layout: Res<SceneLayout>,
+    floaters: Query<Entity, With<Floater>>,
+) {
+    // Otherwise up to 0.9 s of "+5" keeps rising over a stall that just went
+    // back to zero.
+    if restarted.read().next().is_some() {
+        for entity in &floaters {
+            commands.entity(entity).despawn();
+        }
+    }
+    for Settled { delivery, .. } in settled.read() {
         if delivery.kind.is_income() {
             feedback.success = Some(Timer::new(
                 Duration::from_secs_f32(match delivery.kind {
@@ -1257,7 +1346,7 @@ fn settle(
                 TimerMode::Once,
             ));
         }
-        spawn_floater(&mut commands, &layout, delivery);
+        spawn_floater(&mut commands, &layout, *delivery);
     }
 }
 
@@ -1927,8 +2016,10 @@ fn cancel_harvest(controller: &mut HarvestController, pending: &mut PendingSettl
 
 // ────────────────────────────────────────────────────────── presentation
 
+#[allow(clippy::too_many_arguments)]
 fn persist_changes(
     time: Res<Time>,
+    mode: Res<persistence::SaveMode>,
     mut dirty: ResMut<PersistenceDirty>,
     treasury: Res<Treasury>,
     workforce: Res<Workforce>,
@@ -1937,7 +2028,7 @@ fn persist_changes(
     carts: Res<Carts>,
 ) {
     dirty.since_last_save += time.delta_secs();
-    if !dirty.pending {
+    if !dirty.pending || *mode == persistence::SaveMode::Off {
         return;
     }
 
@@ -2278,7 +2369,9 @@ fn sync_web_test_state(
     support: Query<(&SupportRole, &SupportCycle), With<SupportUnit>>,
     avatars: Query<Entity, With<support::SupportAvatar>>,
     buttons: Query<(&ButtonAction, &ComputedNode, &UiGlobalTransform)>,
-    store_scroll: Single<&ScrollPosition, With<hud::StoreScroll>>,
+    // Absent in the stage view, which has no store; the export must still
+    // appear, or a spec pointed at `?view=stage` waits for it forever.
+    store_scroll: Option<Single<&ScrollPosition, With<hud::StoreScroll>>>,
     mut warmup_frames: Local<u8>,
 ) {
     use crate::domain::Segment;
@@ -2431,7 +2524,7 @@ fn sync_web_test_state(
         cart_can_hire: plan_for(UnitKind::Cart).affordable,
         pool: workforce.count().saturating_sub(carts.crewed()),
         selected_tab: active_tab.0.label(),
-        store_scroll: store_scroll.y,
+        store_scroll: store_scroll.map_or(0.0, |scroll| scroll.y),
         buttons: TestButtons {
             menu: point(button_centers[0]),
             hire_worker: point(button_centers[1]),
@@ -2531,6 +2624,34 @@ mod tests {
         let phone_pointer = Vec2::new(92.39, 443.51);
 
         assert_eq!(pointer_in_camera_space(phone_pointer, 2.625), phone_pointer);
+    }
+
+    #[test]
+    fn the_stage_view_gives_the_board_the_whole_window() {
+        // The regression this pins: the layout is a function of the viewport
+        // *and* the view, and a stage launch at the default resolution has the
+        // same viewport as a full one. A guard that compared only the viewport
+        // left the stage board at HUD size, which is the one thing the view is
+        // for. `refresh_layout` therefore compares whole layouts, so these two
+        // must differ.
+        let viewport = Vec2::new(1280.0, 720.0);
+        let full = SceneLayout::for_view(viewport, View::Full);
+        let stage = SceneLayout::for_view(viewport, View::Stage);
+
+        assert_ne!(full, stage);
+        assert_eq!(stage.scene_side(), 720.0, "the largest square that fits");
+        assert!(stage.scene_side() > full.scene_side() * 1.5);
+        assert_eq!(stage.scene_center(), Vec2::ZERO, "centred, with no header");
+        assert_eq!(stage.header_height(), 0.0);
+        assert!(
+            !stage.short_landscape(),
+            "no store to place beside the board"
+        );
+        // And the board still fits: a square window is the tight case.
+        for viewport in [Vec2::new(720.0, 720.0), Vec2::new(390.0, 844.0)] {
+            let stage = SceneLayout::for_view(viewport, View::Stage);
+            assert_eq!(stage.scene_side(), viewport.x.min(viewport.y).max(320.0));
+        }
     }
 
     #[test]

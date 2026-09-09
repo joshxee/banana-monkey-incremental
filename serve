@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# `trunk serve` with the launch switches built in, inside the Nix shell that
+# holds trunk and Bevy's system libraries.
+#
+# Then open, for example:
+#   http://127.0.0.1:5173/?scenario=late-game&speed=5
+#   http://127.0.0.1:5173/?scenario=one-worker&speed=5&view=stage
+#
+# Any argument is passed on to trunk, so `./serve --port 8080` works.
+set -euo pipefail
+cd "$(dirname "$0")"
+exec nix-shell --run "trunk serve --features test-hooks $(printf '%q ' "$@")"

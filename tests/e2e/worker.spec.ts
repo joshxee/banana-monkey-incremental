@@ -4,10 +4,12 @@ import { installDevicePixelContentBoxFix } from "./device-pixel-content-box";
 
 const SAVE_KEY = "banana-monkey-incremental.save-v1";
 
-/// Fresh hires start at the stall at phase zero, so a new hire delivers 47.5 s
-/// later and eats 2.5 s after that. Restored workers are phased independently.
+/// A fresh hire delivers 47.5 s after it sets out and eats 2.5 s after that.
+/// The cycle itself is pinned tick by tick in `src/sim_tests.rs`; this suite
+/// only covers what needs a browser - the shop card under a pointer, and the
+/// save in localStorage - and scales the clock so the reload test does not
+/// wait out a real trip.
 const CYCLE_SECONDS = 50;
-const DELIVERY_AT_SECONDS = 47.5;
 const PAYLOAD = 5;
 const MEAL = 1.5;
 
@@ -146,135 +148,6 @@ async function harvestUntilAffordable(page: Page): Promise<void> {
 
 test.describe("worker monkey", () => {
   test.beforeEach(async ({ page }) => openFreshGame(page));
-
-
-  test("hiring spawns a monkey that walks the route and delivers @slow", async ({
-    page,
-  }) => {
-    // One full cycle at real speed, plus harvesting time and browser slack.
-    // Deliberately the only test that does: everything else scales the clock,
-    // so this one is what proves the cycle really is 47.5 seconds to a delivery
-    // and that the scaling is a test convenience rather than a balance change.
-    test.setTimeout(160_000);
-    await openFreshGame(page, 1);
-
-    const start = await state(page);
-    expect(start.workers).toBe(0);
-    expect(start.monkeys).toHaveLength(0);
-    // The price on the button is the whole requirement. It used to quote 4.0
-    // and enforce 6.85, which is the confusion this cycle was redesigned around.
-    expect(start.nextCost).toBeCloseTo(4, 6);
-    expect(start.meal).toBeCloseTo(MEAL, 6);
-    expect(start.canHire).toBe(false);
-
-    await harvestUntilAffordable(page);
-    const beforeHire = await state(page);
-    expect(beforeHire.bananas).toBeGreaterThanOrEqual(beforeHire.nextCost);
-
-    await page.keyboard.press("b");
-
-    // The monkey exists, and the treasury paid exactly the quoted price -
-    // exactly, because nothing drains between the hire and the first delivery.
-    await expect.poll(async () => (await state(page)).workers).toBe(1);
-    await expect.poll(async () => (await state(page)).monkeys.length).toBe(1);
-    const afterHire = await state(page);
-    expect(afterHire.bananas).toBeCloseTo(
-      beforeHire.bananas - beforeHire.nextCost,
-      6,
-    );
-
-    // Invariant I1: the hire raises net, and the readout can show all three.
-    expect(afterHire.grossPerSec).toBeCloseTo(PAYLOAD / CYCLE_SECONDS, 6);
-    expect(afterHire.wagesPerSec).toBeCloseTo(0.03, 6);
-    expect(afterHire.netPerSec).toBeGreaterThan(0);
-
-    // It starts at the stall and heads out empty-handed, which is what makes
-    // the purchase legible: the click produces a monkey walking out of the shop.
-    const monkey = afterHire.monkeys[0];
-    expect(monkey.segment).toBe("to-grove");
-    expect(monkey.carrying).toBe(false);
-    expect(monkey.x).toBeGreaterThan(afterHire.harvest.x);
-    expect(monkey.x).toBeLessThan(afterHire.deposit.x);
-    expect(afterHire.deposit.x - monkey.x).toBeLessThan(
-      (afterHire.deposit.x - afterHire.harvest.x) / 2,
-    );
-
-    // It walks towards the grove without any further input.
-    const startX = monkey.x;
-    await expect
-      .poll(async () => (await state(page)).monkeys[0].x, { timeout: 20_000 })
-      .toBeLessThan(startX - 4);
-
-    // A full payload lands at the stall, and the treasury never dipped on the
-    // way there: the trip itself costs nothing.
-    const beforeDelivery = (await state(page)).bananas;
-    await expect
-      .poll(async () => (await state(page)).bananas, {
-        timeout: (DELIVERY_AT_SECONDS + 15) * 1000,
-        intervals: [250],
-      })
-      .toBeCloseTo(beforeDelivery + PAYLOAD, 6);
-
-    // Then, a couple of seconds later, it eats its wage out of what it just
-    // delivered - the visible dip that replaced a continuous invisible drain.
-    await expect
-      .poll(async () => (await state(page)).bananas, {
-        timeout: 15_000,
-        intervals: [250],
-      })
-      .toBeCloseTo(beforeDelivery + PAYLOAD - MEAL, 6);
-
-    // Net of one full trip is strictly positive and the balance never went
-    // below where the hire left it.
-    expect((await state(page)).bananas).toBeGreaterThan(beforeDelivery);
-  });
-
-  test("a monkey only carries a banana on the way back", async ({ page }, testInfo) => {
-    test.setTimeout(240_000);
-    // Much slower than the rest: this samples every segment, and Unload and
-    // Snack are 2.5 simulated seconds each. At 25x that is a tenth of a real
-    // second; even at 5x it is half a second, which a loaded machine steps
-    // over. At 2x they are 1.25 s apiece and the sampler cannot miss them on
-    // desktop. Mobile WebGL is software-rendered in CI, so it uses real time:
-    // each endpoint stays visible for 2.5 seconds and the simulation remains
-    // responsive enough to complete inside the calculated cycle window.
-    const speed = testInfo.project.name.startsWith("mobile") ? 1 : 2;
-    await openFreshGame(page, speed);
-
-    await harvestUntilAffordable(page);
-    await page.keyboard.press("b");
-    await expect.poll(async () => (await state(page)).workers).toBe(1);
-
-    // Sample the whole cycle and check the carried banana never contradicts the
-    // segment: empty on the way out and while picking, loaded on the way home.
-    const seen = new Set<string>();
-    // WebGL software rendering can make virtual time advance at roughly half
-    // wall speed on the mobile project. The loop exits as soon as every phase
-    // has appeared; this longer bound is only the failure deadline.
-    const renderAllowance = testInfo.project.name.startsWith("mobile") ? 2.2 : 1;
-    const deadline =
-      Date.now() + (CYCLE_SECONDS / speed) * renderAllowance * 1000 + 15_000;
-    while (Date.now() < deadline && seen.size < 5) {
-      const monkey = (await state(page)).monkeys[0];
-      seen.add(monkey.segment);
-      // Held through the snack too: that banana is the meal, and seeing it in
-      // hand is what connects the counter's dip to the monkey that caused it.
-      const shouldCarry = ["to-depot", "unload", "snack"].includes(
-        monkey.segment,
-      );
-      expect(monkey.carrying).toBe(shouldCarry);
-      await page.waitForTimeout(100);
-    }
-
-    // A full round trip visits all five segments.
-    expect([...seen].sort()).toEqual([
-      "pick",
-      "snack",
-      "to-depot",
-      "to-grove",
-      "unload",
-    ]);
-  });
 
   test("tapping the shop card hires exactly one worker", async ({
     page,

@@ -61,12 +61,27 @@ impl RestoreCarts {
         }
     }
 
+    /// Reproducible phases, for a scenario that has to place its carts in the
+    /// same spots every time it is launched.
+    pub fn with_seed(remaining: u32, seed: u64) -> Self {
+        Self {
+            remaining,
+            rng: fastrand::Rng::with_seed(seed),
+        }
+    }
+
     pub fn clear(&mut self) {
         self.remaining = 0;
     }
 }
 
 impl Default for RestoreCarts {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl Default for RestoreWorkers {
     fn default() -> Self {
         Self::new(0)
     }
@@ -152,6 +167,14 @@ impl RestoreWorkers {
         Self {
             remaining: count as usize,
             rng: fastrand::Rng::new(),
+        }
+    }
+
+    /// Reproducible phases, so a seeded scenario is the same run every time.
+    pub fn with_seed(count: u32, seed: u64) -> Self {
+        Self {
+            remaining: count as usize,
+            rng: fastrand::Rng::with_seed(seed),
         }
     }
 

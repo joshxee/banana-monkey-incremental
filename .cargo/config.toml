@@ -1,0 +1,5 @@
+# Developer entry points. `cargo play` opens the game with the launch switches
+# (`--scenario`, `--speed`, `--view`) that only exist under `test-hooks`, so a
+# shipped binary never has them. See docs/testing.md.
+[alias]
+play = "run --features test-hooks --"

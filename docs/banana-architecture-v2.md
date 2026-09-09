@@ -614,6 +614,19 @@ Stages 4, 7 and 8 are pure functions of world state. Stages 3 and 5 are the only
 writers of `CycleProgress`; stage 6 is the only writer of `Treasury`. Stage 5
 samples current staffing only when beginning the next cycle.
 
+*Implementation note (test harness, 2026-09-05).* Stages 1-7 are
+`game::SimulationPlugin`, on `FixedUpdate` at 20 Hz, and stage 9 is
+`game::PresentationPlugin`, on `Update`. The boundary is enforced by what
+crosses it: purchases and restarts arrive as request resources, the player's
+own harvest joins the same `DeliveryQueue` a worker's does, and every
+settlement leaves as a `Settled` message that presentation turns into a pulse
+and a floater. Nothing in stage 6 spawns or draws. That is what lets the
+economy run under `MinimalPlugins` with the clock on
+`TimeUpdateStrategy::FixedTimesteps(1)` - one `App::update`, one tick - and
+be pinned tick by tick in `src/sim_tests.rs`: a fresh hire delivers on tick
+950 and eats on tick 1000, exactly as D18 says. `src/scenario.rs` names the
+starting states those tests and `./play` share; see `docs/testing.md`.
+
 ### Tick Math
 
 ```

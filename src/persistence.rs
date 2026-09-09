@@ -1,6 +1,18 @@
+use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{Carts, Research, Staff, Treasury, Workforce};
+
+/// Whether progress reaches the player's save at all.
+///
+/// A run launched from a named scenario is `Off`: it started from a state the
+/// player never earned, and writing it back would overwrite the run they did.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum SaveMode {
+    #[default]
+    Live,
+    Off,
+}
 
 const SAVE_VERSION: u32 = 3;
 // The storage key is a namespace, not a schema version: it deliberately stays

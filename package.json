@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "test:e2e": "nix-shell --run 'env -u NO_COLOR npx playwright test'",
-    "test:e2e:fast": "nix-shell --run 'env -u NO_COLOR npx playwright test --project=desktop --grep-invert @slow'"
+    "test:e2e:fast": "nix-shell --run 'env -u NO_COLOR npx playwright test --project=desktop'"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0"

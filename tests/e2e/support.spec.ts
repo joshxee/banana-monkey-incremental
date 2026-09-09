@@ -84,12 +84,11 @@ async function touchDrag(page: Page, from: Point, to: Point): Promise<void> {
 
 async function openFreshGame(page: Page): Promise<void> {
   await page.addInitScript((key) => localStorage.removeItem(key), SAVE_KEY);
-  // No `?speed=` here, unlike the worker suite: that scales the harvest
-  // *cycle* clock so a test does not wait out a real 47.5 s delivery. This
-  // test never waits on a cycle - hand-harvesting is instant per press either
-  // way - so there is nothing for it to buy, and it is one less variable
-  // between this repro and a real player's session.
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  // The `rich` scenario banks enough to buy anything and hires nobody, which
+  // is the state this test wants to start from. Hand-harvesting twenty-five
+  // times to get there was most of this test's three-minute budget, and none
+  // of what it checks. No `?speed=`: nothing here waits on a cycle.
+  await page.goto("/?scenario=rich", { waitUntil: "domcontentloaded" });
   await page.waitForFunction(
     () =>
       typeof (window as typeof window & {
@@ -108,31 +107,13 @@ test.describe("support staff", () => {
   test("a chef hired before any worker still gets an avatar", async ({
     page,
   }, testInfo) => {
-    // The mobile project's touch-drag scroll is ten CDP round trips against a
-    // re-rendering wgpu canvas on top of the hand-harvest loop below - the
-    // same combination `harvest.spec.ts` gives `mobile-fractional-dpr` a
-    // 240 s budget for. The 90 s default has no headroom left for it.
-    test.setTimeout(180_000);
-
     // Regression guard for support rendering. A player who buys a Chef before
     // a Worker must still get a visible lo-fi avatar, even though the support
     // simulation and its bounded presentation pool are separate populations.
     const start = await state(page);
     expect(start.workers).toBe(0);
     expect(start.avatarsDrawn).toBe(0);
-
-    // Hand-harvest to the Chef's base price without ever pressing "b". Paced,
-    // not spammed: a keyboard harvest drives the same drag-and-drop
-    // interaction a touch would, and firing "h" faster than that settles
-    // mostly gets swallowed rather than banking extra bananas.
-    while ((await state(page)).bananas < 25) {
-      await page.keyboard.press("h");
-      await page.waitForTimeout(20);
-    }
-    expect((await state(page)).workers).toBe(0);
-    // Clear of the last harvest's own input-suppression window before the
-    // shop gets a click of its own.
-    await page.waitForTimeout(300);
+    expect(start.bananas).toBeGreaterThan(25);
 
     // The store's resting height shows the Worker row in full and only the
     // top sliver of the Chef row beneath it - the panel's own

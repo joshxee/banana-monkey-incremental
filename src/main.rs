@@ -1,8 +1,14 @@
 mod domain;
 mod game;
+#[cfg(test)]
+mod headless;
 mod hud;
 mod isometric;
+mod launch;
 mod persistence;
+mod scenario;
+#[cfg(test)]
+mod sim_tests;
 mod support;
 mod worker;
 
@@ -13,9 +19,13 @@ use bevy::{
 };
 use bevy_flair::prelude::*;
 
-use game::HarvestGamePlugin;
+use game::{PresentationPlugin, SimulationPlugin};
 
 fn main() {
+    // Before any plugin: `--help` and `--scenarios` print and exit, and a bad
+    // argument must not be buried under the audio and GPU start-up log.
+    let launch = launch::Launch::from_environment();
+
     let mut app = App::new();
     app.insert_resource(ClearColor(isometric::BOARD_SKY))
         .add_plugins(
@@ -41,19 +51,17 @@ fn main() {
         )
         .add_plugins(FlairPlugin);
 
-    let run = persistence::load_run();
-    // The *pool*, not the workforce: crewed monkeys get no avatar, so counting
-    // them here leaves the restore budget unspent and the next workers the
-    // player actually buys spawn as restored ghosts - placed at a random point
-    // on the route, no hire flash, and producing nothing for a full cycle.
-    let restored_workers = run.workforce.count().saturating_sub(run.carts.crewed());
-    app.insert_resource(run.treasury)
-        .insert_resource(run.workforce)
-        .insert_resource(run.staff)
-        .insert_resource(run.research)
-        .insert_resource(run.carts)
-        .insert_resource(worker::RestoreWorkers::new(restored_workers))
-        .insert_resource(worker::RestoreCarts::new(run.carts.running()))
-        .add_plugins(HarvestGamePlugin)
+    // A scenario replaces the save; otherwise the save is the run.
+    match &launch.scenario {
+        Some(scenario) => scenario.install(&mut app),
+        None => scenario::install(
+            &mut app,
+            persistence::load_run(),
+            scenario::Placement::Restored { seed: None },
+        ),
+    }
+
+    app.insert_resource(launch)
+        .add_plugins((SimulationPlugin, PresentationPlugin))
         .run();
 }

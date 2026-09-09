@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# `cargo play`, inside the Nix shell that holds Bevy's system libraries.
+# Outside it, wayland-client, libudev and alsa are missing and the build fails
+# in their build scripts before the game is reached.
+#
+#   ./play --scenarios
+#   ./play --scenario late-game --speed 5
+#   ./play --scenario one-worker --view stage
+set -euo pipefail
+cd "$(dirname "$0")"
+exec nix-shell --run "cargo play $(printf '%q ' "$@")"

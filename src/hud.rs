@@ -406,8 +406,18 @@ pub(crate) fn setup_hud(commands: &mut Commands, asset_server: &AssetServer) {
                                 // Aligned on the sign so the three lines read
                                 // as arithmetic rather than as three unrelated
                                 // numbers.
-                                spawn_rate_line(panel, RateLine::Farming, "FARMING", "rate-farming");
-                                spawn_rate_line(panel, RateLine::Feeding, "FEEDING", "rate-feeding");
+                                spawn_rate_line(
+                                    panel,
+                                    RateLine::Farming,
+                                    "FARMING",
+                                    "rate-farming",
+                                );
+                                spawn_rate_line(
+                                    panel,
+                                    RateLine::Feeding,
+                                    "FEEDING",
+                                    "rate-feeding",
+                                );
                                 spawn_rate_line(panel, RateLine::Net, "GROW AVG", "rate-net");
                                 spawn_rate_line(panel, RateLine::Hungry, "HUNGRY", "rate-hungry");
                             });
@@ -1153,7 +1163,11 @@ pub fn apply_store_layout(
     for mut node in &mut details {
         set_if_changed(
             &mut node.display,
-            if compact { Display::None } else { Display::Flex },
+            if compact {
+                Display::None
+            } else {
+                Display::Flex
+            },
         );
     }
 
@@ -1360,9 +1374,7 @@ pub fn sync_readout(
     // Three steps, not two. The rates were sized when a lone worker read
     // "+6.0/min"; a staffed economy reads "+85.7/min", which is wide enough to
     // wrap inside a 390 px banner and break as "+85.7/" over "min".
-    let rate_font = if layout.short_landscape() {
-        9.0
-    } else if layout.viewport.x < TINY_WIDTH {
+    let rate_font = if layout.short_landscape() || layout.viewport.x < TINY_WIDTH {
         9.0
     } else if layout.viewport.x < NARROW_WIDTH {
         10.0
@@ -1415,7 +1427,13 @@ pub fn sync_shop_new(
     mut fields: Query<(&UnitField, &mut Text, &mut ClassList), Without<PriceText>>,
     mut prices: Query<(&UnitField, &mut Text, &mut TextColor), With<PriceText>>,
     mut buttons: Query<
-        (&HireButton, &Interaction, &mut BackgroundColor, &mut BorderColor, &mut Node),
+        (
+            &HireButton,
+            &Interaction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+            &mut Node,
+        ),
         Without<UnitField>,
     >,
     mut plaques: Query<(&LockedPlaque, &mut Node), Without<HireButton>>,
@@ -1446,10 +1464,8 @@ pub fn sync_shop_new(
         let gold = !is_locked
             && matches!(field.stat, UnitStat::Gain)
             && matches!(field.unit, Unit::Support(SupportRole::Technologist));
-        let negative = !is_locked
-            && !gold
-            && matches!(field.stat, UnitStat::Gain)
-            && plan.gain_per_min < 0.0;
+        let negative =
+            !is_locked && !gold && matches!(field.stat, UnitStat::Gain) && plan.gain_per_min < 0.0;
         set_class(&mut classes, "gold", gold);
         set_class(&mut classes, "negative", negative);
 
