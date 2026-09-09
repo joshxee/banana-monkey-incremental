@@ -1,257 +1,585 @@
-//! Lo-fi isometric village presentation.
+//! The isometric projection, and the one rule that decides what covers what.
 //!
-//! This module owns only drawing. The economy continues to use distances,
-//! work and segment boundaries from `domain`; the projected board is a view of
-//! that state, never an input to it.
+//! This module owns only drawing. The economy continues to use distances and
+//! segment boundaries from `domain`, and the ground it is all laid out on is
+//! `map`; the projected board is a view of both, never an input to either.
+//!
+//! Two things here are worth keeping straight, because everything drawn on the
+//! board depends on them:
+//!
+//! - [`project`] takes a position **in metres on the ground plane** and returns
+//!   a point on the isometric plane. Every actor, building and tree is placed
+//!   by that one function, so there is no second opinion about where a metre is.
+//! - [`stand_z`] decides the painter's order, from the tile a thing's *feet*
+//!   are on. See its own comment: that choice is the whole layering foundation.
 
-use bevy::prelude::*;
+use bevy::{
+    asset::RenderAssetUsages,
+    mesh::{Indices, PrimitiveTopology},
+    prelude::*,
+};
 
-use crate::game::{BROWN, CREAM};
+use crate::map::{Map, TILE_METRES, Terrain, Tile};
+
+/// Metres per tile, in the `f32` the presentation works in.
+const METRE: f32 = TILE_METRES as f32;
+
+/// Half a tile on screen, in pixels, at unit zoom.
+///
+/// Two to one, the classic pixel-art isometric ratio: it is what makes the
+/// ground read as a plane receding rather than a grid seen edge-on, and it
+/// keeps every diagonal on a whole-pixel slope.
+pub(crate) const TILE_HALF: Vec2 = Vec2::new(16.0, 8.0);
+
+/// Screen pixels per metre of *height*.
+///
+/// Height is the one axis the projection does not fold, so it needs its own
+/// scale. Matching [`TILE_HALF`]`.x` per tile makes a one-tile cube look like a
+/// cube rather than a slab.
+const HEIGHT_PER_METRE: f32 = TILE_HALF.x / METRE;
+
+/// The baked ground plane, under everything that stands on it.
+pub(crate) const GROUND_Z: f32 = -1.0;
+
+/// The floor for anything drawn *over* the board rather than standing on it.
+///
+/// The scene now occupies z 0 to about 137 — a tile's depth, not a hand-picked
+/// layer — which makes the old habit of "a small z means on top" exactly
+/// backwards. A baked mesh is opaque and *writes* depth, while a sprite tests
+/// against it without writing, so a dragged banana left at z = 4 is not merely
+/// mis-sorted: it is behind the hut, the palm and every wall tile, and vanishes
+/// at the one moment the player is holding it.
+///
+/// A dragged banana, a delivery floater and a role badge all belong to the
+/// player's hand rather than to the ground, so they go above the whole world.
+/// `the_world_never_reaches_the_overlay` is what keeps that true as the map
+/// grows.
+pub(crate) const OVERLAY_Z: f32 = 500.0;
+
+/// The most [`stand_z`] will shift anything.
+///
+/// Bounded below by the *depth buffer*, not by `f32`. The camera spans z
+/// -1000..1000 into a 32-bit depth target, so one buffer step near the village
+/// is about 1.2e-4 in world z; a nudge finer than that is invisible to any
+/// comparison against an opaque mesh, however well `f32` resolves it. Bounded
+/// above by the smallest separation that must survive: a tenth of a metre
+/// between two monkeys is 0.05 in depth units, twelve times this.
+const MAX_NUDGE: f32 = 0.004;
+
+/// The step between adjacent nudges. Above one depth-buffer step, so that two
+/// things nudged apart really are apart.
+pub(crate) const NUDGE_STEP: f32 = 0.0005;
 
 pub(crate) const BOARD_SKY: Color = Color::srgb(0.83, 0.93, 0.84);
-const GROUND: Color = Color::srgb(0.61, 0.76, 0.43);
-const PATH: Color = Color::srgb(0.84, 0.73, 0.51);
-const JUNGLE_TOP: Color = Color::srgb(0.24, 0.55, 0.24);
-const JUNGLE_LEFT: Color = Color::srgb(0.14, 0.38, 0.17);
-const JUNGLE_RIGHT: Color = Color::srgb(0.19, 0.46, 0.19);
-const BLUE_TOP: Color = Color::srgb(0.29, 0.64, 0.78);
-const BLUE_LEFT: Color = Color::srgb(0.18, 0.42, 0.58);
-const BLUE_RIGHT: Color = Color::srgb(0.23, 0.52, 0.68);
-const CORAL_TOP: Color = Color::srgb(0.92, 0.55, 0.43);
-const CORAL_LEFT: Color = Color::srgb(0.69, 0.32, 0.27);
-const CORAL_RIGHT: Color = Color::srgb(0.81, 0.42, 0.34);
-const GOLD_TOP: Color = Color::srgb(0.96, 0.77, 0.27);
-const GOLD_LEFT: Color = Color::srgb(0.72, 0.49, 0.13);
-const GOLD_RIGHT: Color = Color::srgb(0.85, 0.61, 0.18);
-const PURPLE_TOP: Color = Color::srgb(0.63, 0.49, 0.72);
-const PURPLE_LEFT: Color = Color::srgb(0.42, 0.31, 0.53);
-const PURPLE_RIGHT: Color = Color::srgb(0.52, 0.39, 0.63);
 
-const JUNGLE_CUBES: [(f32, f32, f32, f32); 9] = [
-    (-0.42, 0.21, 0.115, 0.19),
-    (-0.27, 0.20, 0.095, 0.16),
-    (-0.15, 0.25, 0.105, 0.20),
-    (0.03, 0.29, 0.100, 0.18),
-    (0.17, 0.24, 0.115, 0.22),
-    (0.31, 0.16, 0.105, 0.19),
-    (0.40, 0.07, 0.095, 0.17),
-    (-0.43, -0.02, 0.085, 0.15),
-    (0.43, -0.08, 0.085, 0.15),
-];
+// The wall top is deliberately close to the canopy it rises out of. Opening a
+// gap between them draws a bright green kerb around the entire jungle boundary,
+// which reads as painted trim on a hedge maze rather than as sunlit canopy. And
+// the village is the brightest ground on the board: the clearing used to be,
+// which pulled the eye into an empty corner and away from the only place
+// anything happens.
+const JUNGLE_CANOPY: Color = Color::srgb(0.16, 0.34, 0.19);
+const JUNGLE_WALL_TOP: Color = Color::srgb(0.20, 0.43, 0.22);
+const JUNGLE_WALL_LEFT: Color = Color::srgb(0.10, 0.28, 0.13);
+const JUNGLE_WALL_RIGHT: Color = Color::srgb(0.15, 0.38, 0.17);
+const PATH: Color = Color::srgb(0.84, 0.73, 0.51);
+const TOWN: Color = Color::srgb(0.64, 0.79, 0.46);
+const CLEARING: Color = Color::srgb(0.60, 0.71, 0.43);
+
+/// How tall the jungle stands, in metres. Enough to read as a wall a monkey
+/// could not step over, which is what the map says it is.
+const WALL_HEIGHT: f32 = 3.0;
+
+const HUT_WALL: Color = Color::srgb(0.86, 0.78, 0.62);
+const HUT_LEFT: Color = Color::srgb(0.52, 0.36, 0.24);
+const HUT_RIGHT: Color = Color::srgb(0.66, 0.47, 0.31);
+const HUT_ROOF: Color = Color::srgb(0.78, 0.36, 0.28);
+const TRUNK: Color = Color::srgb(0.45, 0.31, 0.20);
+const FROND: Color = Color::srgb(0.36, 0.66, 0.29);
+const FROND_SHADE: Color = Color::srgb(0.26, 0.52, 0.23);
 
 #[derive(Component)]
 pub(crate) struct WorldRoot;
 
-#[derive(Clone)]
-struct FaceMaterials {
-    top: Handle<ColorMaterial>,
-    left: Handle<ColorMaterial>,
-    right: Handle<ColorMaterial>,
+/// Project a ground position, in metres, onto the isometric plane.
+///
+/// Bevy's y points up the screen, so the `x + y` term is negated: walking
+/// "south-east" on the ground moves *down* the screen, towards the viewer.
+pub(crate) fn project(world: Vec2) -> Vec2 {
+    let tile = world / METRE;
+    Vec2::new(
+        (tile.x - tile.y) * TILE_HALF.x,
+        -(tile.x + tile.y) * TILE_HALF.y,
+    )
 }
 
-impl FaceMaterials {
-    fn new(materials: &mut Assets<ColorMaterial>, top: Color, left: Color, right: Color) -> Self {
-        Self {
-            top: materials.add(top),
-            left: materials.add(left),
-            right: materials.add(right),
+/// Lift a projected point by a height in metres.
+pub(crate) fn raise(point: Vec2, metres: f32) -> Vec2 {
+    Vec2::new(point.x, point.y + metres * HEIGHT_PER_METRE)
+}
+
+/// How near the viewer a ground position is. Larger is nearer.
+pub(crate) fn depth(world: Vec2) -> f32 {
+    (world.x + world.y) / METRE
+}
+
+/// Painter's order for something standing on the ground at `world`.
+///
+/// The whole layering foundation is this one function, and the reason it takes
+/// a *ground* position rather than a sprite's centre is the entire point: a
+/// thing is sorted by the tile its feet are on, never by where its artwork
+/// happens to reach. That is what makes a building cover the monkey behind it
+/// while the monkey in front of it walks past unobscured — and because depth is
+/// continuous rather than per-tile, a monkey crossing a building's front edge
+/// changes order smoothly instead of popping.
+///
+/// `nudge` separates things that would otherwise sort identically, such as two
+/// monkeys idling on the same spot. It is bounded by [`MAX_NUDGE`] so it can
+/// never invert a real depth difference — an unbounded per-entity epsilon is
+/// exactly how a crowd starts flickering once it is large enough for the
+/// epsilons to add up to more than the gaps between its members.
+///
+/// The clamp is a backstop, not the mechanism: two callers that both exceed the
+/// bound do not get an order, they get the *same* z. So an out-of-range nudge is
+/// a caller's bug and says so in a debug build, rather than being saturated away
+/// quietly for the next one to rediscover.
+pub(crate) fn stand_z(world: Vec2, nudge: f32) -> f32 {
+    debug_assert!(
+        nudge.abs() <= MAX_NUDGE,
+        "a nudge of {nudge} is past MAX_NUDGE and would sort arbitrarily"
+    );
+    depth(world) + nudge.clamp(-MAX_NUDGE, MAX_NUDGE)
+}
+
+/// The centre of a tile, in metres. The presentation's `f32` counterpart to
+/// [`Tile::centre`].
+pub(crate) fn tile_centre(tile: Tile) -> Vec2 {
+    Vec2::new((tile.x as f32 + 0.5) * METRE, (tile.y as f32 + 0.5) * METRE)
+}
+
+/// The four corners of a tile's diamond, projected: top, right, bottom, left.
+fn diamond(tile: Tile) -> [Vec2; 4] {
+    let (x, y) = (tile.x as f32 * METRE, tile.y as f32 * METRE);
+    [
+        project(Vec2::new(x, y)),
+        project(Vec2::new(x + METRE, y)),
+        project(Vec2::new(x + METRE, y + METRE)),
+        project(Vec2::new(x, y + METRE)),
+    ]
+}
+
+fn terrain_colour(terrain: Terrain) -> Color {
+    match terrain {
+        Terrain::Jungle => JUNGLE_CANOPY,
+        Terrain::Path => PATH,
+        Terrain::Town => TOWN,
+        Terrain::Grove => CLEARING,
+    }
+}
+
+/// A mesh under construction, in projected space with per-vertex colour.
+///
+/// Vertex colours are what let the entire ground plane be one draw call:
+/// `ColorMaterial` multiplies by them, so four and a half thousand tiles of
+/// four different terrains need one mesh and one material rather than one
+/// entity each.
+#[derive(Default)]
+struct MeshBuilder {
+    positions: Vec<[f32; 3]>,
+    colours: Vec<[f32; 4]>,
+    indices: Vec<u32>,
+}
+
+impl MeshBuilder {
+    fn quad(&mut self, corners: [Vec2; 4], colour: Color) {
+        let base = self.positions.len() as u32;
+        let rgba = colour.to_linear().to_f32_array();
+        for corner in corners {
+            self.positions.push([corner.x, corner.y, 0.0]);
+            self.colours.push(rgba);
+        }
+        self.indices
+            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    fn build(self) -> Mesh {
+        // Both worlds, not `RENDER_WORLD` alone: that path *moves* the vertex
+        // data out of the main-world asset, so the mesh can never be extracted
+        // again. A backgrounded mobile tab that loses its WebGL context would
+        // lose the terrain permanently, and `./serve` is the touch playtest.
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colours);
+        mesh.insert_indices(Indices::U32(self.indices));
+        mesh
+    }
+}
+
+/// The whole ground plane, as one mesh.
+///
+/// Flat, so nothing on it can occlude anything else and it needs no sorting of
+/// its own; it simply sits under everything at [`GROUND_Z`]. An entity per tile
+/// would be four and a half thousand sprites to cull and sort every frame for a
+/// surface that never changes and cannot cover a monkey.
+fn ground_mesh(map: &Map) -> Mesh {
+    let mut builder = MeshBuilder::default();
+    for y in 0..map.height() {
+        for x in 0..map.width() {
+            let tile = Tile::new(x, y);
+            builder.quad(diamond(tile), terrain_colour(map.terrain(tile)));
         }
     }
+    builder.build()
+}
+
+/// The jungle tiles that show the player a wall.
+///
+/// Only the ones touching ground a monkey could stand on. Seen from above, the
+/// jungle *is* its canopy — flat dark green is the honest look for the depths
+/// of it — and what needs height is the edge, where the barrier has to read as
+/// something that cannot be walked through.
+fn wall_tiles(map: &Map) -> Vec<Tile> {
+    let mut tiles = Vec::new();
+    for y in 0..map.height() {
+        for x in 0..map.width() {
+            let tile = Tile::new(x, y);
+            if map.terrain(tile).passable() {
+                continue;
+            }
+            let touches_open = (-1..=1).any(|dy| {
+                (-1..=1).any(|dx| {
+                    (dx != 0 || dy != 0) && map.terrain(Tile::new(x + dx, y + dy)).passable()
+                })
+            });
+            if touches_open {
+                tiles.push(tile);
+            }
+        }
+    }
+    tiles
+}
+
+/// The three shades of one raised box: its top, and the two sides that face the
+/// viewer.
+#[derive(Clone, Copy)]
+struct Palette {
+    top: Color,
+    left: Color,
+    right: Color,
+}
+
+const JUNGLE_PALETTE: Palette = Palette {
+    top: JUNGLE_WALL_TOP,
+    left: JUNGLE_WALL_LEFT,
+    right: JUNGLE_WALL_RIGHT,
+};
+
+const HUT_PALETTE: Palette = Palette {
+    top: HUT_ROOF,
+    left: HUT_LEFT,
+    right: HUT_RIGHT,
+};
+
+const FROND_PALETTE: Palette = Palette {
+    top: FROND,
+    left: FROND_SHADE,
+    right: FROND_SHADE,
+};
+
+/// The diamond of a rectangle of ground, projected: top, right, bottom, left.
+fn footprint(origin: Vec2, size: Vec2) -> [Vec2; 4] {
+    [
+        project(origin),
+        project(origin + Vec2::new(size.x, 0.0)),
+        project(origin + size),
+        project(origin + Vec2::new(0.0, size.y)),
+    ]
+}
+
+/// A box over `size` metres of ground, spanning `base` to `base + height`
+/// metres of air.
+///
+/// `base` is what lets a palm's crown sit on top of its trunk rather than in
+/// the grass around it.
+fn prism(
+    builder: &mut MeshBuilder,
+    origin: Vec2,
+    size: Vec2,
+    base: f32,
+    height: f32,
+    palette: Palette,
+) {
+    let [top, right, bottom, left] = footprint(origin, size);
+    let floor = Vec2::new(0.0, base * HEIGHT_PER_METRE);
+    let ceiling = Vec2::new(0.0, (base + height) * HEIGHT_PER_METRE);
+    builder.quad(
+        [
+            top + ceiling,
+            right + ceiling,
+            bottom + ceiling,
+            left + ceiling,
+        ],
+        palette.top,
+    );
+    builder.quad(
+        [
+            left + ceiling,
+            bottom + ceiling,
+            bottom + floor,
+            left + floor,
+        ],
+        palette.left,
+    );
+    builder.quad(
+        [
+            bottom + ceiling,
+            right + ceiling,
+            right + floor,
+            bottom + floor,
+        ],
+        palette.right,
+    );
+}
+
+/// One jungle tile, raised into a wall.
+///
+/// Built around its own origin and placed by a `Transform`, like the hut and
+/// the palms. Baking the tile's position into the vertices instead would give
+/// every one of the two hundred wall tiles a distinct mesh asset, and Bevy can
+/// only batch consecutive items that share one — two hundred draw calls for a
+/// shape that is the same shape two hundred times.
+fn wall_mesh() -> Mesh {
+    let mut builder = MeshBuilder::default();
+    prism(
+        &mut builder,
+        Vec2::splat(-METRE * 0.5),
+        Vec2::splat(METRE),
+        0.0,
+        WALL_HEIGHT,
+        JUNGLE_PALETTE,
+    );
+    builder.build()
+}
+
+/// The hut at the town centre: where every delivery lands, and the first thing
+/// on the board tall enough to hide a monkey behind it.
+fn hut_mesh() -> Mesh {
+    let mut builder = MeshBuilder::default();
+    let size = Vec2::splat(METRE * 2.0);
+    let origin = Vec2::splat(-METRE);
+    prism(&mut builder, origin, size, 0.0, 3.0, HUT_PALETTE);
+    // A pale band under the roof, so the hut is not one flat mass.
+    let [_, right, bottom, left] = footprint(origin, size);
+    let band = Vec2::new(0.0, 1.4 * HEIGHT_PER_METRE);
+    builder.quad([left + band, bottom + band, bottom, left], HUT_WALL);
+    builder.quad([bottom + band, right + band, right, bottom], HUT_WALL);
+    builder.build()
+}
+
+/// A banana palm: a trunk, and a crown wider than the tile it stands on.
+fn palm_mesh() -> Mesh {
+    let mut builder = MeshBuilder::default();
+    prism(
+        &mut builder,
+        Vec2::splat(-0.35),
+        Vec2::splat(0.7),
+        0.0,
+        3.4,
+        Palette {
+            top: TRUNK,
+            left: TRUNK,
+            right: TRUNK,
+        },
+    );
+    // The crown sits on top of the trunk, wider than the tile, so a palm reads
+    // as something you stand under rather than a bush.
+    prism(
+        &mut builder,
+        Vec2::splat(-METRE * 0.85),
+        Vec2::splat(METRE * 1.7),
+        3.1,
+        0.7,
+        FROND_PALETTE,
+    );
+    builder.build()
+}
+
+/// Where the stall stands, in metres: beside the delivery point, never on it.
+///
+/// The town centre tile *is* where a worker unloads, and the queue spreads a few
+/// metres around it. A four-metre hut centred there swallows half the arriving
+/// crowd at the one moment in the cycle the player is watching — the counter
+/// ticks, the floater fires, and the monkey that earned it is inside a building.
+/// So the stall steps aside: square to the walk, so nobody has to route through
+/// it, and to whichever side is *further* from the viewer, so the queue forms in
+/// front of it rather than behind.
+fn stall_stand(map: &Map) -> Vec2 {
+    const ASIDE: f32 = 8.0;
+    let centre = tile_centre(map.town_centre());
+    let outbound = (tile_centre(map.worked_grove().tile) - centre).normalize_or_zero();
+    let across = Vec2::new(outbound.y, -outbound.x);
+    let aside = if depth(across) <= 0.0 {
+        across
+    } else {
+        -across
+    };
+    centre + aside * ASIDE
 }
 
 pub(crate) fn spawn_world(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ColorMaterial>,
+    map: &Map,
 ) {
-    let ground = materials.add(GROUND);
-    let path = materials.add(PATH);
-    let jungle = FaceMaterials::new(materials, JUNGLE_TOP, JUNGLE_LEFT, JUNGLE_RIGHT);
-    let blue = FaceMaterials::new(materials, BLUE_TOP, BLUE_LEFT, BLUE_RIGHT);
-    let coral = FaceMaterials::new(materials, CORAL_TOP, CORAL_LEFT, CORAL_RIGHT);
-    let gold = FaceMaterials::new(materials, GOLD_TOP, GOLD_LEFT, GOLD_RIGHT);
-    let purple = FaceMaterials::new(materials, PURPLE_TOP, PURPLE_LEFT, PURPLE_RIGHT);
+    // One material for every baked surface: the colour lives in the vertices.
+    let painted = materials.add(ColorMaterial::from(Color::WHITE));
+    let hut = meshes.add(hut_mesh());
+    let palm = meshes.add(palm_mesh());
+    let wall = meshes.add(wall_mesh());
 
     commands
         .spawn((WorldRoot, Transform::default(), Visibility::default()))
         .with_children(|root| {
             root.spawn((
-                Sprite::from_color(BOARD_SKY, Vec2::ONE),
-                Transform::from_xyz(0.0, 0.0, -20.0),
+                Mesh2d(meshes.add(ground_mesh(map))),
+                MeshMaterial2d(painted.clone()),
+                Transform::from_xyz(0.0, 0.0, GROUND_Z),
             ));
-            for (size, position) in [
-                (Vec2::new(1.0, 0.007), Vec2::new(0.0, 0.4965)),
-                (Vec2::new(1.0, 0.007), Vec2::new(0.0, -0.4965)),
-                (Vec2::new(0.007, 1.0), Vec2::new(-0.4965, 0.0)),
-                (Vec2::new(0.007, 1.0), Vec2::new(0.4965, 0.0)),
-            ] {
+
+            for tile in wall_tiles(map) {
+                let at = tile_centre(tile);
+                let anchor = project(at);
                 root.spawn((
-                    Sprite::from_color(BROWN, size),
-                    Transform::from_xyz(position.x, position.y, 2.8),
+                    Mesh2d(wall.clone()),
+                    MeshMaterial2d(painted.clone()),
+                    Transform::from_xyz(anchor.x, anchor.y, stand_z(at, 0.0)),
                 ));
             }
 
-            // A wide ground diamond fills the square while leaving a quiet sky
-            // margin above it for the tall jungle silhouettes.
-            spawn_diamond(
-                root,
-                meshes,
-                &ground,
-                Vec2::new(0.0, -0.03),
-                Vec2::new(0.92, 0.48),
-                -10.0,
+            // Anything with height is its own entity, anchored at the ground it
+            // stands on. That is the whole discipline: the hut covers a monkey
+            // behind it and not one in front, without any per-frame sorting.
+            //
+            // A multi-tile footprint can only carry one depth, so each takes its
+            // centre's: half a footprint of error either way, rather than a
+            // whole one at a corner. Keeping footprints small is what keeps that
+            // invisible.
+            let standing = std::iter::once((stall_stand(map), hut)).chain(
+                map.groves()
+                    .iter()
+                    .map(|grove| grove.tile)
+                    .chain(map.home_trees().iter().copied())
+                    .map(|tile| (tile_centre(tile), palm.clone())),
             );
-
-            // Two intersecting paths establish the projection and reserve a
-            // clear corridor for the worker cycle.
-            spawn_diamond(
-                root,
-                meshes,
-                &path,
-                Vec2::new(0.0, -0.055),
-                Vec2::new(0.70, 0.105),
-                -8.0,
-            );
-            spawn_diamond(
-                root,
-                meshes,
-                &path,
-                Vec2::new(0.04, -0.03),
-                Vec2::new(0.13, 0.44),
-                -8.0,
-            );
-
-            // Jungle stays around the back and edges. Its tall silhouette is
-            // intentionally absent from the central route corridor.
-            for (x, y, width, height) in JUNGLE_CUBES {
-                spawn_cube(root, meshes, &jungle, Vec2::new(x, y), width, height);
-            }
-
-            // A tiny village of deliberately different masses. Shape and
-            // scale distinguish the roles even without final isometric art.
-            for (position, width, height, palette) in [
-                (Vec2::new(-0.18, -0.08), 0.16, 0.11, &blue),
-                (Vec2::new(0.02, 0.02), 0.12, 0.18, &gold),
-                (Vec2::new(0.19, -0.09), 0.19, 0.10, &coral),
-                (Vec2::new(-0.01, -0.22), 0.14, 0.09, &purple),
-                (Vec2::new(0.27, -0.25), 0.11, 0.15, &blue),
-                (Vec2::new(-0.29, -0.23), 0.10, 0.08, &gold),
-            ] {
-                spawn_cube(root, meshes, palette, position, width, height);
-            }
-
-            // Brown posts make the two economy endpoints legible without
-            // pretending the lo-fi blocks are finished art.
-            for (x, y) in [(-0.315, 0.060), (0.315, -0.130)] {
+            for (at, mesh) in standing {
+                let anchor = project(at);
                 root.spawn((
-                    Sprite::from_color(BROWN, Vec2::new(0.008, 0.09)),
-                    Transform::from_xyz(x, y - 0.035, 3.0),
-                ));
-                root.spawn((
-                    Sprite::from_color(CREAM, Vec2::new(0.105, 0.035)),
-                    Transform::from_xyz(x, y + 0.020, 3.1),
+                    Mesh2d(mesh),
+                    MeshMaterial2d(painted.clone()),
+                    Transform::from_xyz(anchor.x, anchor.y, stand_z(at, 0.0)),
                 ));
             }
         });
 }
 
-fn spawn_diamond(
-    parent: &mut ChildSpawnerCommands,
-    meshes: &mut Assets<Mesh>,
-    material: &Handle<ColorMaterial>,
-    center: Vec2,
-    size: Vec2,
-    z: f32,
-) {
-    let left = center + Vec2::new(-size.x * 0.5, 0.0);
-    let top = center + Vec2::new(0.0, size.y * 0.5);
-    let right = center + Vec2::new(size.x * 0.5, 0.0);
-    let bottom = center + Vec2::new(0.0, -size.y * 0.5);
-    spawn_triangle(parent, meshes, material, [left, top, right], z);
-    spawn_triangle(parent, meshes, material, [left, right, bottom], z);
-}
-
-fn spawn_cube(
-    parent: &mut ChildSpawnerCommands,
-    meshes: &mut Assets<Mesh>,
-    palette: &FaceMaterials,
-    center: Vec2,
-    width: f32,
-    height: f32,
-) {
-    let depth = width * 0.48;
-    let top = center + Vec2::new(0.0, depth * 0.5);
-    let right = center + Vec2::new(width * 0.5, 0.0);
-    let bottom = center + Vec2::new(0.0, -depth * 0.5);
-    let left = center + Vec2::new(-width * 0.5, 0.0);
-    let down = Vec2::new(0.0, -height);
-    // Higher projected objects are further away. The stable centre-derived
-    // band makes front blocks cover back blocks without per-frame sorting.
-    let z = 1.0 - (center.y - height);
-
-    spawn_triangle(parent, meshes, &palette.top, [left, top, right], z + 0.03);
-    spawn_triangle(
-        parent,
-        meshes,
-        &palette.top,
-        [left, right, bottom],
-        z + 0.03,
-    );
-    spawn_triangle(
-        parent,
-        meshes,
-        &palette.left,
-        [left, bottom, bottom + down],
-        z + 0.02,
-    );
-    spawn_triangle(
-        parent,
-        meshes,
-        &palette.left,
-        [left, bottom + down, left + down],
-        z + 0.02,
-    );
-    spawn_triangle(
-        parent,
-        meshes,
-        &palette.right,
-        [bottom, right, right + down],
-        z + 0.01,
-    );
-    spawn_triangle(
-        parent,
-        meshes,
-        &palette.right,
-        [bottom, right + down, bottom + down],
-        z + 0.01,
-    );
-}
-
-fn spawn_triangle(
-    parent: &mut ChildSpawnerCommands,
-    meshes: &mut Assets<Mesh>,
-    material: &Handle<ColorMaterial>,
-    points: [Vec2; 3],
-    z: f32,
-) {
-    parent.spawn((
-        Mesh2d(meshes.add(Triangle2d::new(points[0], points[1], points[2]))),
-        MeshMaterial2d(material.clone()),
-        Transform::from_xyz(0.0, 0.0, z),
-    ));
-}
-
 #[cfg(test)]
 mod tests {
-    use super::JUNGLE_CUBES;
+    use super::*;
 
     #[test]
-    fn jungle_keeps_the_route_corridor_clear() {
-        let route_half_width = 0.075;
-        for (x, y, _, _) in JUNGLE_CUBES {
-            // The main route slopes from upper-left to lower-right.
-            let route_y = -0.42 * x - 0.055;
-            assert!((y - route_y).abs() > route_half_width);
-        }
+    fn the_projection_folds_the_ground_plane_the_way_an_isometric_view_does() {
+        // Walking east and walking south move opposite ways along the screen's
+        // x axis and the same way down it, which is what makes the plane read
+        // as receding rather than as a grid seen edge-on.
+        let origin = project(Vec2::ZERO);
+        let east = project(Vec2::new(METRE, 0.0));
+        let south = project(Vec2::new(0.0, METRE));
+        assert_eq!(east - origin, Vec2::new(TILE_HALF.x, -TILE_HALF.y));
+        assert_eq!(south - origin, Vec2::new(-TILE_HALF.x, -TILE_HALF.y));
+        // A tile diagonal is one tile wide and flat on screen.
+        assert_eq!(
+            project(Vec2::splat(METRE)) - origin,
+            Vec2::new(0.0, -TILE_HALF.y * 2.0)
+        );
+    }
+
+    #[test]
+    fn feet_decide_the_order_and_a_nudge_can_never_overturn_them() {
+        // A monkey a tenth of a metre nearer the viewer draws in front, and no
+        // amount of tie-breaking is allowed to say otherwise: this is the rule
+        // that stops a crowd swapping who is on top.
+        let behind = Vec2::new(10.0, 10.0);
+        let front = Vec2::new(10.0, 10.1);
+        assert!(stand_z(front, -MAX_NUDGE) > stand_z(behind, MAX_NUDGE));
+        // Two things on the same spot are separated, and by more than one step
+        // of the depth buffer, which is what makes the separation real rather
+        // than merely present in the float.
+        assert!(stand_z(behind, NUDGE_STEP) - stand_z(behind, 0.0) >= 1.2e-4);
+    }
+
+    #[test]
+    fn the_world_never_reaches_the_overlay() {
+        // A dragged banana, a floater and a badge are drawn over the board at
+        // `OVERLAY_Z`. The board's own z is a tile's *depth*, so it grows with
+        // the map - and the day it grows past the overlay, the banana the
+        // player is holding disappears behind a tree.
+        let map = crate::map::start();
+        let deepest = (0..map.height())
+            .flat_map(|y| (0..map.width()).map(move |x| Tile::new(x, y)))
+            .map(|tile| stand_z(tile_centre(tile), MAX_NUDGE))
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            deepest < OVERLAY_Z,
+            "the board reaches z {deepest}, at or past the overlay at {OVERLAY_Z}"
+        );
+        const { assert!(GROUND_Z < 0.0) };
+    }
+
+    #[test]
+    fn the_stall_stands_beside_the_delivery_point_and_behind_the_queue() {
+        // A hut centred on the town centre swallows half the unloading queue at
+        // the one moment in the cycle the player is watching it.
+        let map = crate::map::start();
+        let centre = tile_centre(map.town_centre());
+        let stall = stall_stand(map);
+        // Clear of the queue, which spreads a few metres around the centre.
+        assert!(stall.distance(centre) > 6.0, "the stall is on the queue");
+        // And further from the viewer, so the queue forms in front of it.
+        assert!(stand_z(stall, 0.0) < stand_z(centre, 0.0));
+        // Square to the walk, so nobody has to route through the building.
+        let outbound = (tile_centre(map.worked_grove().tile) - centre).normalize();
+        assert!((stall - centre).normalize().dot(outbound).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_ground_plane_is_one_quad_per_tile() {
+        let map = Map::parse("@.*\n...").expect("parses");
+        let mesh = ground_mesh(&map);
+        assert_eq!(mesh.count_vertices(), 6 * 4);
+    }
+
+    #[test]
+    fn only_the_jungle_a_monkey_can_see_over_is_given_height() {
+        // The depths of the jungle are canopy seen from above and stay flat;
+        // the edge is what has to look like a barrier.
+        let map = Map::parse(concat!(
+            "#######\n",
+            "#######\n",
+            "##@...#\n",
+            "##...*#\n",
+            "#######\n",
+            "#######",
+        ))
+        .expect("parses");
+        let walls = wall_tiles(&map);
+        assert!(walls.contains(&Tile::new(1, 1)), "the edge is a wall");
+        assert!(
+            !walls.contains(&Tile::new(0, 0)),
+            "jungle with only jungle around it is canopy, not wall"
+        );
     }
 }

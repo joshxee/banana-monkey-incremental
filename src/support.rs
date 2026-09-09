@@ -21,10 +21,16 @@ use bevy::prelude::*;
 use crate::{
     domain::{SUPPORT_MEAL_PERIOD, SUPPORT_PHASE_STRIDE, Staff, SupportCycle, SupportRole},
     game::{CREAM, GOLD, SceneLayout},
+    isometric,
     worker::spawn_monkey_outline,
 };
 
 const FRAME_SIZE: u32 = 22;
+
+/// Source texels to a metre of ground, at unit zoom. A monkey is 22 texels tall
+/// and stands a shade under two metres, so the fan spacings that were authored
+/// in texels keep the spread they were tuned to.
+const METRES_TO_TEXELS: f32 = 12.0;
 
 /// Sprites drawn per role before the count moves to a badge.
 ///
@@ -68,23 +74,30 @@ pub(crate) fn slot_offset_texels(slot: usize, drawn: usize) -> f32 {
 
 /// How many monkeys of one role the scene has room to draw.
 ///
-/// Three stations around a single deposit is a fixed amount of space, and the
-/// deposit shrinks with the viewport: at 320 px the zone is half its desktop
-/// size, so three roles of three simply do not fit and something has to give.
-/// What gives is the *crowd*, not the layout - the count is still exact in the
-/// badge and in the shop's OWNED column, and a phone shows one monkey per role
-/// rather than a smear of overlapping ones.
+/// Three stations around one delivery point is a fixed amount of ground, and a
+/// fan wide enough to overlap its neighbour turns three roles into one smear.
+/// What gives is the *crowd*, not the layout - the count stays exact in the
+/// badge and in the shop's OWNED column.
+///
+/// Both sides of the comparison scale with zoom, so unlike the screen-space
+/// version this replaced, the answer does not move with the viewport: it is a
+/// property of how far apart `SceneLayout::support_stand` puts the stations.
+/// Move a station and this is what silently changes how full the deposit looks,
+/// which is why `a_full_role_still_fits_three_monkeys` pins it.
 pub(crate) fn avatars_per_role(layout: &SceneLayout) -> usize {
     let scale = layout.world_scale();
-    let mut stations: Vec<f32> = SupportRole::ALL
+    let stations: Vec<Vec2> = SupportRole::ALL
         .iter()
-        .map(|role| layout.support_stand(*role).0)
+        .map(|role| layout.board(layout.support_stand(*role)))
         .collect();
-    stations.sort_by(f32::total_cmp);
-    let gap = stations
-        .windows(2)
-        .map(|pair| pair[1] - pair[0])
-        .fold(f32::INFINITY, f32::min);
+    // The closest two stations get on screen, which is what a fan of avatars
+    // has to stay inside of if the roles are to stay tellable apart.
+    let mut gap = f32::INFINITY;
+    for (index, station) in stations.iter().enumerate() {
+        for other in &stations[index + 1..] {
+            gap = gap.min(station.distance(*other));
+        }
+    }
 
     (1..=AVATARS_PER_ROLE)
         .rev()
@@ -268,14 +281,20 @@ pub(crate) fn sync_support_avatars(
     for (entity, avatar, flash, mut transform, mut sprite) in &mut avatars {
         let scale = layout.world_scale();
 
-        let spread = slot_offset_texels(avatar.slot, per_role) * scale;
+        // In metres across the ground now, not texels across the screen: a fan
+        // of chefs spreads on the plane they are standing on, so the depth rule
+        // sorts them against each other for free.
+        let spread = slot_offset_texels(avatar.slot, per_role) / METRES_TO_TEXELS;
         let point = layout.support_point(avatar.role, spread);
         let half_height = FRAME_SIZE as f32 * 0.5 * scale;
+        let screen = layout.board(point);
 
         transform.translation = Vec3::new(
-            layout.snap(point.x),
-            layout.snap(point.y + half_height),
-            layout.actor_z(point, avatar.slot as f32 * 0.001),
+            layout.snap(screen.x),
+            layout.snap(screen.y + half_height),
+            // Bounded, so a wide fan can never sort in front of a role standing
+            // genuinely nearer the viewer.
+            isometric::stand_z(point, (avatar.slot % 8) as f32 * isometric::NUDGE_STEP),
         );
 
         let starving = avatar.slot < hungry[role_index(avatar.role)];
@@ -382,16 +401,21 @@ pub(crate) fn sync_support_badges(
             continue;
         }
 
-        let point = layout.support_point(badge.0, 0.0);
+        // `support_point` answers in metres on the ground, so this has to be
+        // projected like every other station. Reading it as screen pixels
+        // pinned every badge to the same corner of the window whatever the
+        // role was doing.
+        let screen = layout.board(layout.support_point(badge.0, 0.0));
         transform.translation = Vec3::new(
             // Centred over the role's fan and lifted clear of it. Placed
             // *beside* the group it covered the outermost monkeys - and at a
             // crowded deposit those were the chefs' hats, which are the only
             // thing telling that role apart.
-            layout.snap(point.x),
-            layout.snap(point.y + (FRAME_SIZE as f32 * 0.5 + 13.0) * scale),
-            // In front of every monkey, including the front depth row.
-            2.5,
+            layout.snap(screen.x),
+            layout.snap(screen.y + (FRAME_SIZE as f32 * 0.5 + 13.0) * scale),
+            // A badge counts monkeys rather than standing among them, so it
+            // belongs over the board, not in it.
+            isometric::OVERLAY_Z,
         );
         // Tracks the world scale so a phone does not get a badge twice its
         // intended size against a 32 px monkey - but only partly, because a
@@ -414,10 +438,21 @@ pub(crate) fn sync_support_badges(
 mod tests {
     use super::*;
 
+    /// Every avatar of every role, as ground positions in metres.
+    fn stations(layout: &SceneLayout) -> Vec<(SupportRole, Vec2)> {
+        let drawn = avatars_per_role(layout);
+        let mut placed = Vec::new();
+        for role in SupportRole::ALL {
+            for slot in 0..drawn {
+                let spread = slot_offset_texels(slot, drawn) / METRES_TO_TEXELS;
+                placed.push((role, layout.support_point(role, spread)));
+            }
+        }
+        placed
+    }
+
     #[test]
     fn every_role_stands_somewhere_distinct_at_every_viewport() {
-        // Three stations around one deposit is the crowding risk the design
-        // brief flagged. Whatever the viewport, no two roles may share an x.
         for viewport in [
             Vec2::new(320.0, 640.0),
             Vec2::new(390.0, 844.0),
@@ -426,15 +461,15 @@ mod tests {
             Vec2::new(1920.0, 1080.0),
         ] {
             let layout = SceneLayout::for_viewport(viewport);
-            let stands: Vec<f32> = SupportRole::ALL
+            let stands: Vec<Vec2> = SupportRole::ALL
                 .iter()
-                .map(|role| layout.support_stand(*role).0)
+                .map(|role| layout.support_stand(*role))
                 .collect();
 
             for (a, b) in [(0, 1), (1, 2), (0, 2)] {
                 assert!(
-                    (stands[a] - stands[b]).abs() > 1.0,
-                    "{viewport:?}: roles {a} and {b} overlap at {stands:?}"
+                    stands[a].distance(stands[b]) > 2.0,
+                    "{viewport:?}: roles {a} and {b} share a spot at {stands:?}"
                 );
             }
         }
@@ -442,50 +477,42 @@ mod tests {
 
     #[test]
     fn a_full_fan_of_one_role_never_reaches_the_next_role() {
-        // The bug this pins: fanning slots rightwards from the station made a
-        // role's footprint grow with its count, so the third Chef stood exactly
-        // on the Technologist's desk and buying it appeared to delete the
-        // researcher. Every role is drawn at its maximum spread here, because
-        // the crowded case is the only one that can collide.
+        // The bug this pins: fanning slots in one direction made a role's width
+        // grow into its neighbour's, and the chefs' third monkey landed on the
+        // technologist's desk - so buying a third chef appeared to delete the
+        // researcher. Now that stations are ground positions the test can say
+        // what it always meant: no two monkeys of different roles overlap.
+        let body = BODY_HALF_TEXELS * 2.0 / METRES_TO_TEXELS;
         for viewport in [
             Vec2::new(320.0, 640.0),
             Vec2::new(390.0, 844.0),
             Vec2::new(844.0, 390.0),
             Vec2::new(1280.0, 720.0),
-            Vec2::new(1920.0, 1080.0),
         ] {
             let layout = SceneLayout::for_viewport(viewport);
-            let scale = layout.world_scale();
-            let drawn = avatars_per_role(&layout);
-            let half_body = BODY_HALF_TEXELS * scale;
-
-            let mut spans: Vec<(SupportRole, f32, f32)> = SupportRole::ALL
-                .iter()
-                .map(|role| {
-                    let (x, _) = layout.support_stand(*role);
-                    let left = x + slot_offset_texels(0, drawn) * scale - half_body;
-                    let right = x + slot_offset_texels(drawn - 1, drawn) * scale + half_body;
-                    (*role, left, right)
-                })
-                .collect();
-            spans.sort_by(|a, b| a.1.total_cmp(&b.1));
-
-            for pair in spans.windows(2) {
-                let (left_role, _, left_end) = pair[0];
-                let (right_role, right_start, _) = pair[1];
-                assert!(
-                    left_end <= right_start,
-                    "{viewport:?}: {left_role:?} ends at {left_end} but {right_role:?} \
-                     starts at {right_start}"
-                );
+            let placed = stations(&layout);
+            for (index, (role, at)) in placed.iter().enumerate() {
+                for (other_role, other) in &placed[index + 1..] {
+                    if role == other_role {
+                        continue;
+                    }
+                    assert!(
+                        at.distance(*other) > body,
+                        "{viewport:?}: {role:?} at {at:?} overlaps {other_role:?} at {other:?}"
+                    );
+                }
             }
         }
     }
 
     #[test]
     fn support_never_stands_on_the_worker_route() {
-        // Workers walk between `grove_stand` and `stall_stand`. A support
-        // monkey standing inside that span would be walked through all game.
+        // A support monkey inside the walk would be walked through all game.
+        // The route is a real polyline now, so this asks the honest question -
+        // how far is the station from the line the workers actually cover -
+        // rather than comparing screen x against a route that had no width.
+        let route = crate::map::WorkedRoute::start();
+        let clearance = 2.0;
         for viewport in [
             Vec2::new(320.0, 640.0),
             Vec2::new(390.0, 844.0),
@@ -493,31 +520,65 @@ mod tests {
             Vec2::new(1280.0, 720.0),
         ] {
             let layout = SceneLayout::for_viewport(viewport);
-            for role in SupportRole::ALL {
-                let (x, _) = layout.support_stand(role);
-                // The *leftmost* monkey of the role, not the station: a fan
-                // that reaches back over the stall puts a support monkey in the
-                // middle of the unloading queue.
-                let drawn = avatars_per_role(&layout);
-                let leftmost = x + slot_offset_texels(0, drawn) * layout.world_scale();
+            for (role, at) in stations(&layout) {
+                let gap = distance_to_walk(&route.0, at);
                 assert!(
-                    leftmost > layout.stall_stand,
-                    "{viewport:?}: {role:?} reaches {leftmost}, onto the route \
-                     (stall {})",
-                    layout.stall_stand
+                    gap > clearance,
+                    "{viewport:?}: {role:?} stands {gap} m from the route"
                 );
             }
         }
     }
 
+    /// Shortest distance, in metres, from a ground position to a walk.
+    fn distance_to_walk(route: &crate::map::Route, at: Vec2) -> f32 {
+        let ground = |p: bevy::math::DVec2| Vec2::new(p.x as f32, p.y as f32);
+        route
+            .points()
+            .windows(2)
+            .map(|leg| {
+                let (from, to) = (ground(leg[0]), ground(leg[1]));
+                let span = to - from;
+                let along = if span.length_squared() > 0.0 {
+                    ((at - from).dot(span) / span.length_squared()).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                at.distance(from + span * along)
+            })
+            .fold(f32::INFINITY, f32::min)
+    }
+
     #[test]
     fn every_support_avatar_stays_inside_the_board() {
+        // Stations are ground positions in metres, so they have to be projected
+        // before being compared against a board measured in pixels. Comparing
+        // the two directly, as this did when `support_stand` changed units,
+        // passes by coincidence and asserts nothing.
         let layout = SceneLayout::default();
         let half = layout.scene_side() * 0.5;
-        for role in SupportRole::ALL {
-            let point = layout.support_point(role, 0.0);
-            assert!((point.x - layout.scene_center().x).abs() < half);
-            assert!((point.y - layout.scene_center().y).abs() < half);
+        for (role, at) in stations(&layout) {
+            let screen = layout.board(at) - layout.scene_center();
+            assert!(
+                screen.x.abs() < half && screen.y.abs() < half,
+                "{role:?} projects to {screen:?}, outside a board of {half}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_role_still_fits_three_monkeys() {
+        // The deposit looking populated is the whole point of drawing a fan at
+        // all. Moving a station quietly costs a monkey per role, which is a
+        // direct hit on "the field fills up" that nothing else would catch.
+        for viewport in [
+            Vec2::new(320.0, 640.0),
+            Vec2::new(390.0, 844.0),
+            Vec2::new(1280.0, 720.0),
+            Vec2::new(1920.0, 1080.0),
+        ] {
+            let layout = SceneLayout::for_viewport(viewport);
+            assert_eq!(avatars_per_role(&layout), AVATARS_PER_ROLE, "{viewport:?}");
         }
     }
 }

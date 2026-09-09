@@ -67,8 +67,8 @@ The two harvest methods have different cycle shapes, and everything follows.
 
 | | travel | pick / load | unload | throughput |
 |---|---|---|---|---|
-| **Worker**, payload 5, 5 m/s | 40.0 s (**84%**) | 5.0 s (11%) | 2.5 s (5%) | 0.105 /s |
-| **Cart**, payload 100, crew 3, 15 m/s | 13.3 s (13%) | 33.3 s (33%) | 50.0 s (**49%**) | 0.983 /s |
+| **Worker**, payload 5, 3 m/s | 40.0 s (**84%**) | 5.0 s (11%) | 2.5 s (5%) | 0.105 /s |
+| **Cart**, payload 100, crew 3, 9 m/s | 13.3 s (13%) | 33.3 s (33%) | 50.0 s (**49%**) | 0.983 /s |
 
 A monkey on foot spends its life walking. A cart barely travels and instead
 sits at the depot being emptied — it is fast and capacious and *slow to handle*,
@@ -369,13 +369,14 @@ delivery.
 
 | Unit | payload | speed | wage | cost base | cost growth | augment |
 |---|---|---|---|---|---|---|
-| Worker Monkey | 5 | 5 m/s | 0.03 (post-paid, §6.1) | 4 | 1.15 | — |
-| Cart | 100 (crew 3) | 15 m/s | 0.20 | 70 | 1.70 | — |
+| Worker Monkey | 5 | 3 m/s | 0.03 (post-paid, §6.1) | 4 | 1.15 | — |
+| Cart | 100 (crew 3) | 9 m/s | 0.20 | 70 | 1.70 | — |
 | Chef | — | — | 0.10 | 25 | 1.30 | travel +0.15 |
 | Unpacker | — | — | 0.10 | 30 | 1.30 | unload +0.20 |
 | Technologist | — | — | 0.20 | 40 | 1.35 | pick +0.10/level |
 
-Grove distance 100 m. $t_{\text{pick}} = 1.00$ s/banana,
+Grove distance 60 m, which is the walk the map actually holds (D24).
+$t_{\text{pick}} = 1.00$ s/banana,
 $t_{\text{unload}} = 0.50$ s/banana. A worker spends a further
 $f_{\text{snack}} = 5\%$ of each trip eating at the stall (§6.1), which makes
 the round trip 50.0 s: 40 travel, 5 picking, 2.5 unloading, 2.5 eating. Gross
@@ -414,6 +415,14 @@ cost ladder still staggers hires on its own. Every numeric lever here is expensi
 halving the grove distance invalidates D17's measured 230–280% cart advantage,
 doubling worker speed cuts the Chef effect from +102% to +52% and undermines
 §5.1, and $t_{\text{pick}}$ sets the ceiling in §3 outright.
+
+D24's rescale is the one move on these levers that costs nothing, and it is
+worth saying why. Every duration above is a ratio $d/v$, and $M_{\text{speed}}$
+is dimensionless, so dividing the distance *and both speeds* by the same 5/3
+leaves all of it fixed: 40 s of worker travel, 13.3 s of cart travel, the Chef
+effect, the cart advantage. Changing either alone would not have been a
+rescale, and the cart is the trap - it shares $d$, so a worker-only change
+would have moved D17 without anybody touching a cart.
 
 **Manual clicking dominates the automated economy for roughly the first dozen
 purchases.** At one drag per second the player earns 1.0/s against a worker's

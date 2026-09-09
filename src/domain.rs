@@ -13,9 +13,22 @@ use bevy::prelude::{Component, Resource};
 /// Bananas a worker carries per round trip.
 pub const WORKER_PAYLOAD: f64 = 5.0;
 /// Metres per second on foot.
-pub const WORKER_SPEED: f64 = 5.0;
+///
+/// Distance and both speeds were divided by 5/3 when the village gained a map
+/// (D24). That is a change of *units*, not of balance: every duration here is a
+/// ratio of the two, so `2d/v` is the 40 s it always was, `M_speed` is
+/// dimensionless, and the whitepaper's cycle times, Chef effect and cart
+/// advantage are all untouched. What changed is that a metre is now a real
+/// distance on `assets/maps/start.txt` rather than an abstraction.
+pub const WORKER_SPEED: f64 = 3.0;
 /// Metres to the grove, one way.
-pub const GROVE_DISTANCE: f64 = 100.0;
+///
+/// D24: a *measurement* of the shipped map - the straightened walk from the
+/// town centre to the nearer banana node, 30 tiles of 2 m. `map::tests::
+/// the_reference_route_is_the_economys_travel_leg` is what keeps the two in
+/// step, and is what will fail if the map is redrawn without re-deriving the
+/// balance.
+pub const GROVE_DISTANCE: f64 = 60.0;
 /// Seconds per banana, at the grove.
 pub const T_PICK: f64 = 1.00;
 /// Seconds per banana, at the depot.
@@ -47,7 +60,12 @@ pub const WORKER_COST_GROWTH: f64 = 1.15;
 pub const CART_PAYLOAD: f64 = 100.0;
 /// Metres per second. Three times a monkey on foot, which is why a cart barely
 /// travels and instead spends its life being emptied (whitepaper §5).
-pub const CART_SPEED: f64 = 15.0;
+///
+/// Rescaled with [`WORKER_SPEED`] and [`GROVE_DISTANCE`] under D24, and it had
+/// to be: the cart shares the grove distance, so scaling one speed and not the
+/// other would have moved a cart's travel leg off 13.3 s and taken D17's
+/// measured cart advantage with it.
+pub const CART_SPEED: f64 = 9.0;
 /// Bananas per second for the whole vehicle, crew included. Its three monkeys
 /// stop drawing their individual worker wage while they are aboard.
 pub const CART_WAGE: f64 = 0.20;
@@ -2180,7 +2198,7 @@ mod tests {
         let m = base();
         let cart = CycleSpec::CART;
 
-        // Cart balance: 100 bananas, crew of 3, 15 m/s.
+        // Cart balance: 100 bananas, crew of 3, 9 m/s.
         assert!((Segment::ToGrove.duration(cart, m) * 2.0 - 13.333_333_333_333_334).abs() < 1e-9);
         assert!((Segment::Pick.duration(cart, m) - 33.333_333_333_333_336).abs() < 1e-9);
         assert!((Segment::Unload.duration(cart, m) - 50.0).abs() < 1e-9);

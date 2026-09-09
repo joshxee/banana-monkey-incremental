@@ -432,6 +432,156 @@ The Technologist keeps `+1.0 RESEARCH/s` and a different colour. Being visibly
 the one row the ranking does not price is correct (D14); it should look
 intentional.
 
+**D24 — The grove distance is measured on a map, and the units were rescaled to
+pay for it.** *(Map increment.)*
+
+`GROVE_DISTANCE` was 100 m because somebody chose 100. The village now has a
+map — `assets/maps/start.txt`, a grid of jungle, ring path and town parsed by
+`map.rs` — and travel is the walk across it: A* on the passable tiles, pulled
+taut so that what the economy is charged for is the line a monkey actually
+covers rather than the staircase a grid search returns. The shipped walk from
+the town centre to the nearer banana node is 30 tiles of 2 m, and
+`GROVE_DISTANCE` is now that measurement. A test asserts the equality, so
+redrawing the map fails the build rather than silently moving the balance.
+
+Sixty metres is not a hundred, so the distance and **both** speeds were divided
+by 5/3: worker 5→3 m/s, cart 15→9 m/s. That is a change of units and nothing
+else. Every duration in the whitepaper is a ratio `d/v`, `M_speed` is
+dimensionless, and so the 40 s worker leg, the 13.3 s cart leg, the Chef effect
+and D17's cart advantage all come through untouched — `docs/test_banana.py`
+passes against the rescaled oracle without a single expectation being edited,
+which is the evidence for the claim.
+
+The cart is the trap here and is why the rescale had to be total. It shares
+`GROVE_DISTANCE` with the worker while owning a separate speed, so changing the
+distance and only the worker's speed would have quietly moved a cart's travel
+leg off 13.3 s and taken D17's measured 230–280% advantage with it. §8's warning
+about these levers stands; this is the one move on them that costs nothing.
+
+The invariance is exact in real arithmetic but not bit-exact in `f64`: `5·1.15`
+and `3·1.15` round differently, so any state with `M_speed ≠ 1` differs in the
+last few bits. Measured across 32 256 oracle states the worst relative deviation
+is 4.8e-13, and a simulated hour produces an identical 97-purchase sequence at
+both unit systems. Nobody should read "a change of units" as a bit-identity
+guarantee, and nothing in the game is anywhere near that tolerance.
+
+For the MVP the map holds two banana nodes and the workforce works the nearer,
+so every worker walks one length and `CycleSpec::distance` stays a constant.
+The constant becomes a lie the moment a second node goes live and workers can be
+assigned, and that is the point at which `distance` moves from `CycleSpec`'s
+consts onto the entity. Two things become live debts at that same moment, and
+they are the same debt twice: `Route::length` is the length of a *greedily*
+straightened polyline, not the quantity A* minimised, so on an obstructed map a
+one-tile edit can move it by a double-digit percentage through tie-breaking
+alone. Today that cannot reach the economy — the constant is compile-time, the
+only caller of `route` is `--map`, and the worked walk is a single clear segment
+whose length equals its own straight line and is therefore minimal outright. It
+reaches the economy the day routes become an input, and the answer then is an
+any-angle search (Theta*), which optimises the length it reports.
+
+*Where the map is going, and the one rule the swarm must not break.* Monkeys
+will walk the polyline rather than a straight lerp, and each will carry a small
+stable offset so a crowd reads as a swarm instead of a single file. Offsets are
+presentation: every monkey advances by the shared dimensionless
+`segment_fraction`, so a wider lane shows up as a slightly higher *apparent
+speed* and never as a different cycle time. The forbidden construction is the
+other one — giving each monkey its own length and letting arrival be driven by
+the drawn position — because that is precisely the failure `map.rs` exists to
+prevent: a drawn path and a cycle time that are two different journeys. Lateral
+spread is quadratically cheap, so this costs nothing to honour: a ±2 m lane on a
+60 m leg is 0.03 m, 0.06%.
+
+*Sizing, which is a design decision and not an arbitrary one.* The town is 39
+tiles square, not the 55 it was first drawn at. A 55-tile town holds ~84
+building plots against a roster of five unit types and a measured session of ~53
+purchases, and the surplus is the worst kind of empty: on a phone the player
+*pans*, and screens of blank town floor read as an unfinished level, where
+screens of jungle read as somewhere still to go. The reclaimed tiles went to the
+jungle band, which is now 13 thick with at least 8 tiles standing between every
+node and the edge of the world. Grove clearings are 7×5 rather than 3×3 because
+`late-game` puts 18 walkers and 4 carts on one route, and a 3×3 clearing stacks
+them on a single tile — the map is what gives the renderer permission to fan a
+crowd out.
+
+*The home tree.* Manual harvest is a drag from a banana node to the town centre,
+and the worked node is 30 tiles away while a phone at a legible zoom holds well
+under twenty. The two ends are never on screen together, so the gesture the
+whitepaper says players will spam for the first dozen purchases would be a
+multi-second drag against an auto-panning camera. A third node — `T` in the map,
+five tiles from the town centre, hand-picked only and never assigned a worker —
+makes it a one-thumb flick, and fills the opening forty seconds, which are
+otherwise one monkey walking off-screen and nothing else. It is deliberately
+*not* in `Map::groves`: being nearer than the worked node, it would otherwise
+take over as `worked_grove` and move the travel leg without anybody noticing.
+
+**D25 — One projection, and depth is decided by feet.**
+*(Map increment.)*
+
+The board used to be a unit square holding an invented route, scaled to fit the
+window. It is now a view of the map: `isometric::project` takes a position in
+metres on the ground plane and returns a point on a 2:1 isometric plane, and
+every actor, tree, hut and tile goes through it. `SceneLayout` stopped being the
+world and became a camera — two numbers, an origin and a zoom — so the drawn
+village and the walked economy are the same place by construction rather than by
+two sets of coordinates agreeing.
+
+The layering rule is one function. `stand_z(ground, nudge)` sorts a thing by the
+tile its **feet** are on, never by where its artwork reaches. That is what makes
+the hut cover the monkey behind it while the monkey in front walks past
+unobscured, and because depth is continuous rather than per-tile, crossing a
+building's front edge changes the order smoothly instead of popping. The `nudge`
+that separates two monkeys idling on one spot is *clamped*: an unbounded
+per-entity epsilon is precisely how a crowd starts flickering once there are
+enough of them for the epsilons to add up to more than the gaps between them.
+
+What is drawn follows from that rule rather than from convenience. The ground
+plane is flat, cannot occlude anything and never changes, so it is one baked
+mesh with per-vertex colour — one draw call for 4761 tiles, where an entity per
+tile would be 4761 sprites to cull and sort every frame. Anything with *height*
+is its own entity anchored to its ground position, because that is the only way
+it can interleave with a moving monkey. Seen from above the jungle is its
+canopy, so its depths stay flat and only the tiles touching walkable ground are
+raised into a wall — the edge is the part that has to look like a barrier.
+
+The rule has a second half, and it is the half that bites. Because z is now a
+tile's *depth* rather than a hand-picked layer, the board occupies z 0..137 and
+grows with the map — so the old habit of "a small z means on top" is exactly
+backwards. A baked mesh is opaque and *writes* depth while a sprite tests
+against it without writing, so a dragged banana left at z = 4 is not merely
+mis-sorted: it is behind the hut, the palm and every wall tile, and disappears
+at the one moment the player is holding it. Anything belonging to the player's
+hand rather than to the ground — a dragged banana, a delivery floater, a role
+badge, a label — goes above the whole world at `OVERLAY_Z`, and a test asserts
+the board can never reach it.
+
+The nudge that separates two things on one spot is bounded below by the *depth
+buffer* rather than by `f32`. The camera spans z -1000..1000 into a 32-bit
+target, so one buffer step near the village is about 1.2e-4 in world z; a finer
+nudge is invisible to any comparison against an opaque mesh however well `f32`
+resolves it. And the clamp is a backstop, not the mechanism: two callers that
+both exceed it do not get an order, they get the same z, so an out-of-range
+nudge is a caller's bug and says so in a debug build.
+
+The stall stands *beside* the delivery point, never on it. The town centre tile
+is where a worker unloads and the queue spreads a few metres around it, so a
+four-metre hut centred there swallows half the arriving crowd at exactly the
+moment the player is watching — the counter ticks, the floater fires, and the
+monkey that earned it is inside a building. It steps aside square to the walk,
+so nobody routes through it, and to whichever side is further from the viewer,
+so the queue forms in front.
+
+One known limit, stated so it is not rediscovered: a multi-tile footprint can
+carry only one depth. The hut takes its centre's, which is half a footprint of
+error either way rather than a whole one at a corner. Keeping footprints small
+is what keeps that invisible, and it is the reason to be wary of large buildings
+later.
+
+The board is aimed at the midpoint of the walk rather than at the town centre.
+That is an interim: pointed at the town centre, the grove sat off the top of the
+screen and took the whole outbound leg with it, and a fixed board has to hold
+both ends of the economy for a playtest to mean anything. A camera the player
+can pan and zoom replaces it, and is what the mobile brief actually asks for.
+
 ---
 
 ## 4. Data Model
