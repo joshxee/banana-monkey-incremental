@@ -53,28 +53,37 @@ economy needs it, and `cargo test` has no asset server. `src/map.rs` parses it
 and answers routes: A* over the passable tiles, pulled taut so the length is the
 walk a monkey covers rather than the staircase a grid search returns.
 
-That length *is* the economy's travel leg. `GROVE_DISTANCE` is a measurement of
-this file (D24), and a test asserts the equality, so redrawing the map fails
-`cargo test` rather than quietly moving the balance.
+`GROVE_DISTANCE` is a measurement of this file (D24). The economy still *holds*
+it as a constant and a test asserts the two agree, so the map is what the
+constant is checked against rather than what supplies it at runtime — redrawing
+the map fails `cargo test` instead of quietly moving the balance. That flips
+when a second node goes live and travel stops being one number.
 
 `./play --map` is the readout to run first when you have edited it:
 
 ```text
 map: 69x69 tiles of 2 m
 
-terrain:  1259 jungle  456 path  3025 town  21 grove
-centre:   (46, 28)
+terrain:  2842 jungle  328 path  1521 town  70 grove
+centre:   (44, 30)
 
 banana nodes, nearest first:
-  (28,  4)    60.00 m over 1 leg(s)   <- worked
-  (65, 60)    74.52 m over 2 leg(s)
+  (20, 12)    60.00 m over 1 leg(s)   <- worked
+  (20, 58)    73.76 m over 1 leg(s)
+  (39, 30)    10.00 m               <- home tree, hand-picked only
 
-travel leg: the worked node is 60.0000 m; GROVE_DISTANCE is 60.0000 m
+travel leg: the worked node is 60.0 m; GROVE_DISTANCE is 60.0 m
 ```
 
-A disagreement is called out on that last line. Re-derive the balance before
-you go any further: distance and both speeds move together or D17's cart
-advantage moves with them.
+A disagreement is called out on that last line, and the travel leg is printed
+at full precision rather than rounded, because the number is there to be pasted
+into `GROVE_DISTANCE`. Re-derive the balance before you go any further:
+distance and both speeds move together or D17's cart advantage moves with them.
+
+The home tree is listed but never worked. It is the node the *player* drags
+from, kept a few tiles out so both ends of the drag are on screen at a zoom
+where a monkey is legible; being nearer than the worked node, counting it among
+them would silently take over as the travel leg.
 
 ## Scenarios: `src/scenario.rs`
 

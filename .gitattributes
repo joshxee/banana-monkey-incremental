@@ -1,0 +1,3 @@
+# The map is parsed character by character and its width is load-bearing, so a
+# CRLF checkout would widen every row by one and fail to parse.
+assets/maps/*.txt text eol=lf

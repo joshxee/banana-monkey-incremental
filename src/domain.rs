@@ -2198,7 +2198,7 @@ mod tests {
         let m = base();
         let cart = CycleSpec::CART;
 
-        // Cart balance: 100 bananas, crew of 3, 15 m/s.
+        // Cart balance: 100 bananas, crew of 3, 9 m/s.
         assert!((Segment::ToGrove.duration(cart, m) * 2.0 - 13.333_333_333_333_334).abs() < 1e-9);
         assert!((Segment::Pick.duration(cart, m) - 33.333_333_333_333_336).abs() < 1e-9);
         assert!((Segment::Unload.duration(cart, m) - 50.0).abs() < 1e-9);

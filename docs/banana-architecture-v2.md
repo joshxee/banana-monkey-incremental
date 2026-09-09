@@ -458,11 +458,61 @@ distance and only the worker's speed would have quietly moved a cart's travel
 leg off 13.3 s and taken D17's measured 230–280% advantage with it. §8's warning
 about these levers stands; this is the one move on them that costs nothing.
 
+The invariance is exact in real arithmetic but not bit-exact in `f64`: `5·1.15`
+and `3·1.15` round differently, so any state with `M_speed ≠ 1` differs in the
+last few bits. Measured across 32 256 oracle states the worst relative deviation
+is 4.8e-13, and a simulated hour produces an identical 97-purchase sequence at
+both unit systems. Nobody should read "a change of units" as a bit-identity
+guarantee, and nothing in the game is anywhere near that tolerance.
+
 For the MVP the map holds two banana nodes and the workforce works the nearer,
 so every worker walks one length and `CycleSpec::distance` stays a constant.
 The constant becomes a lie the moment a second node goes live and workers can be
 assigned, and that is the point at which `distance` moves from `CycleSpec`'s
-consts onto the entity.
+consts onto the entity. Two things become live debts at that same moment, and
+they are the same debt twice: `Route::length` is the length of a *greedily*
+straightened polyline, not the quantity A* minimised, so on an obstructed map a
+one-tile edit can move it by a double-digit percentage through tie-breaking
+alone. Today that cannot reach the economy — the constant is compile-time, the
+only caller of `route` is `--map`, and the worked walk is a single clear segment
+whose length equals its own straight line and is therefore minimal outright. It
+reaches the economy the day routes become an input, and the answer then is an
+any-angle search (Theta*), which optimises the length it reports.
+
+*Where the map is going, and the one rule the swarm must not break.* Monkeys
+will walk the polyline rather than a straight lerp, and each will carry a small
+stable offset so a crowd reads as a swarm instead of a single file. Offsets are
+presentation: every monkey advances by the shared dimensionless
+`segment_fraction`, so a wider lane shows up as a slightly higher *apparent
+speed* and never as a different cycle time. The forbidden construction is the
+other one — giving each monkey its own length and letting arrival be driven by
+the drawn position — because that is precisely the failure `map.rs` exists to
+prevent: a drawn path and a cycle time that are two different journeys. Lateral
+spread is quadratically cheap, so this costs nothing to honour: a ±2 m lane on a
+60 m leg is 0.03 m, 0.06%.
+
+*Sizing, which is a design decision and not an arbitrary one.* The town is 39
+tiles square, not the 55 it was first drawn at. A 55-tile town holds ~84
+building plots against a roster of five unit types and a measured session of ~53
+purchases, and the surplus is the worst kind of empty: on a phone the player
+*pans*, and screens of blank town floor read as an unfinished level, where
+screens of jungle read as somewhere still to go. The reclaimed tiles went to the
+jungle band, which is now 13 thick with at least 8 tiles standing between every
+node and the edge of the world. Grove clearings are 7×5 rather than 3×3 because
+`late-game` puts 18 walkers and 4 carts on one route, and a 3×3 clearing stacks
+them on a single tile — the map is what gives the renderer permission to fan a
+crowd out.
+
+*The home tree.* Manual harvest is a drag from a banana node to the town centre,
+and the worked node is 30 tiles away while a phone at a legible zoom holds well
+under twenty. The two ends are never on screen together, so the gesture the
+whitepaper says players will spam for the first dozen purchases would be a
+multi-second drag against an auto-panning camera. A third node — `T` in the map,
+five tiles from the town centre, hand-picked only and never assigned a worker —
+makes it a one-thumb flick, and fills the opening forty seconds, which are
+otherwise one monkey walking off-screen and nothing else. It is deliberately
+*not* in `Map::groves`: being nearer than the worked node, it would otherwise
+take over as `worked_grove` and move the travel leg without anybody noticing.
 
 ---
 

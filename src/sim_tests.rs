@@ -589,7 +589,7 @@ fn a_meal_is_priced_against_the_delivery_that_funds_it() {
 fn a_chef_hired_mid_walk_shortens_the_rest_of_the_trip() {
     // D13: progress is remaining work, so a multiplier bought mid-segment
     // speeds up the rest of it without teleporting anyone. Ten seconds out at
-    // 5 m/s leaves 50 m; at 5.75 m/s that is 173.9 ticks, so the walk ends on
+    // 3 m/s leaves 30 m; at 3.45 m/s that is 173.9 ticks, so the walk ends on
     // tick 374 rather than 400 - the chef spawns and is counted on the very
     // tick the purchase lands.
     let mut sim = Headless::from_run(run(100.0, 1), Placement::AtStall);

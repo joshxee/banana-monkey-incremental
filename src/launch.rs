@@ -192,8 +192,14 @@ impl Launch {
     ///
     /// A designer redrawing `assets/maps/start.txt` moves the travel leg, and
     /// therefore the whole balance (D24). This is the readout that says so
-    /// before `cargo test` does: the shape of the map, every banana node with
-    /// its measured walk, and the constant that walk has to agree with.
+    /// before `cargo test` does: the shape of the map, every node with its
+    /// measured walk, and the constant that walk has to agree with.
+    ///
+    /// The travel leg is printed at full precision rather than rounded,
+    /// because the number is there to be *pasted* into `GROVE_DISTANCE`. A
+    /// rounded readout would show two identical figures beside a disagreement
+    /// and offer no way to resolve it - which is exactly when this tool is
+    /// being read.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn map_report() -> String {
         let map = map::start();
@@ -227,28 +233,37 @@ impl Launch {
             centre.x,
             centre.y,
         );
-        for (rank, &grove) in map.groves().iter().enumerate() {
+        for (rank, grove) in map.groves().iter().enumerate() {
             let route = map
-                .route(centre, grove)
+                .route(centre, grove.tile)
                 .expect("every node was proved reachable at parse time");
             text.push_str(&format!(
                 "  ({:>2}, {:>2})  {:7.2} m over {} leg(s){}\n",
-                grove.x,
-                grove.y,
-                route.length(),
+                grove.tile.x,
+                grove.tile.y,
+                grove.walk,
                 route.points().len().saturating_sub(1),
                 if rank == 0 { "   <- worked" } else { "" },
+            ));
+        }
+        for tree in map.home_trees() {
+            text.push_str(&format!(
+                "  ({:>2}, {:>2})  {:7.2} m               <- home tree, hand-picked only\n",
+                tree.x,
+                tree.y,
+                centre.centre().distance(tree.centre()),
             ));
         }
 
         let walked = map.reference_route().length();
         text.push_str(&format!(
-            "\ntravel leg: the worked node is {walked:.4} m; GROVE_DISTANCE is \
-             {GROVE_DISTANCE:.4} m{}\n",
-            if walked == GROVE_DISTANCE {
+            "\ntravel leg: the worked node is {walked:?} m; GROVE_DISTANCE is \
+             {GROVE_DISTANCE:?} m{}\n",
+            if map::agrees_with_travel_leg(walked, GROVE_DISTANCE) {
                 ""
             } else {
-                "  ** DISAGREE: re-derive the balance, see D24 **"
+                "\n  ** DISAGREE: paste the walked figure above into \
+                 GROVE_DISTANCE and re-derive the balance, see D24 **"
             },
         ));
         text

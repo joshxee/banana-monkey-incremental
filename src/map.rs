@@ -3,16 +3,19 @@
 //! Pure and Bevy-light, like `domain`: a grid of terrain and an A* that answers
 //! "how do I get from here to there, and how far is it".
 //!
-//! Two callers want that answer for different reasons. The economy takes the
-//! *length* as its travel leg, and the presentation walks the *polyline*.
-//! Serving both from one place is what stops a monkey's drawn path and its
-//! cycle time being two different journeys - the failure this module exists to
-//! make impossible.
+//! Both halves of the game need that answer, for different reasons. The travel
+//! leg in `domain` is a *length* measured here, and a monkey's drawn walk is
+//! the *polyline*. Today the economy holds that length as the `GROVE_DISTANCE`
+//! constant and [`agrees_with_travel_leg`] asserts the two still say the same
+//! thing - so the map is what the constant is *checked against*, not what
+//! supplies it at runtime. That changes when a second node goes live and travel
+//! stops being one number (D24). Serving both from one module is what makes
+//! sure that when it does, a monkey's drawn path and its cycle time cannot
+//! become two different journeys.
 //!
 //! The map is compiled in with `include_str!` rather than loaded as an asset,
 //! because the headless economy needs it: `cargo test` has no asset server and
-//! no window, and [`crate::domain::GROVE_DISTANCE`] is now a *measurement of
-//! this file* rather than a number somebody chose.
+//! no window.
 
 use std::{cmp::Ordering, collections::BinaryHeap, fmt, sync::OnceLock};
 
@@ -24,12 +27,39 @@ use bevy::math::DVec2;
 /// at: monkeys move continuously along the smoothed polyline [`Map::route`]
 /// returns. Two metres keeps a 69-tile map hand-authorable in a text editor
 /// while leaving a monkey comfortably smaller than the square it stands on.
+///
+/// It is also, since D24, a *balance parameter*. It scales every route this
+/// module measures and so scales `GROVE_DISTANCE` itself: halving it for
+/// smoother routing would halve the travel leg and move D17's cart advantage,
+/// with no speed change to compensate. It moves with the speeds or not at all.
 pub const TILE_METRES: f64 = 2.0;
 
-/// A diagonal step, in tiles.
-const DIAGONAL: f64 = std::f64::consts::SQRT_2;
+/// A* step costs, scaled so the octile metric is exact integer arithmetic.
+///
+/// Accumulating `1.0` and `SQRT_2` in `f64` leaves two paths of mathematically
+/// equal cost differing by a few ULP, and which one wins then depends on the
+/// order the additions happened in rather than on any rule this module states.
+/// Integers make equal costs *equal*, which is what lets the cell-index
+/// tie-break in [`Candidate`] actually govern - and the headless suite asserts
+/// exact ticks on the strength of that.
+const STEP: u64 = 1_000_000;
+/// `STEP * sqrt(2)`, rounded up.
+///
+/// The rounding belongs to the search's cost model alone. A route's reported
+/// length is measured on the finished polyline in [`Route::new`], never
+/// accumulated here, so this constant cannot move a travel leg.
+const DIAGONAL_STEP: u64 = 1_414_214;
 
-const NEIGHBOURS: [(i64, i64); 8] = [
+/// How close two boundary crossings have to be to count as the same corner.
+///
+/// [`Map::clear_line`] compares its two crossing distances. On a map of side
+/// `n` their smallest true non-zero separation is `1/(2·run·rise)` - about
+/// 1.1e-4 at 69 tiles - while float drift at a *genuine* corner stays under
+/// 3e-15. This sits five orders clear of both, and stays correct while
+/// `2·run·rise` is below `1/GRAZE`: roughly 22 000 tiles a side.
+const GRAZE: f64 = 1e-9;
+
+const NEIGHBOURS: [(i32, i32); 8] = [
     (1, 0),
     (1, 1),
     (0, 1),
@@ -40,10 +70,22 @@ const NEIGHBOURS: [(i64, i64); 8] = [
     (1, -1),
 ];
 
+/// Whether a measured walk still stands behind the constant the economy uses.
+///
+/// A relative picometre: any real redraw of the map fails this by a dozen
+/// orders of magnitude, while a designer is never asked to transcribe a
+/// seventeen-digit literal to the last bit. The exactness the shipped map does
+/// have is claimed separately, by asserting the worked route equals its own
+/// straight line.
+pub fn agrees_with_travel_leg(walked: f64, leg: f64) -> bool {
+    (walked - leg).abs() <= leg.abs() * 1e-12
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Terrain {
-    /// The hard barrier. Nothing routes through it, which is the whole reason
-    /// the ring path is worth walking.
+    /// The hard barrier. Nothing routes through it, and it is what will make
+    /// the ring path worth walking - though not yet: the shipped town is open
+    /// enough that both worked routes cross it in a straight line.
     Jungle,
     /// The ring around the town.
     Path,
@@ -60,14 +102,21 @@ impl Terrain {
     }
 }
 
+/// Signed, so a tile off the west or north edge can be *expressed*.
+///
+/// Converting a pointer position to a tile is how drag-and-drop harvesting will
+/// work, and a drag past those edges produces a negative. In `u32` that
+/// saturates silently to `(0, 0)` - a real tile, in the far corner of the map -
+/// instead of reading as the miss it is. [`Map::terrain`] answers `Jungle`
+/// for anything off the map, in either direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Tile {
-    pub x: u32,
-    pub y: u32,
+    pub x: i32,
+    pub y: i32,
 }
 
 impl Tile {
-    pub const fn new(x: u32, y: u32) -> Self {
+    pub const fn new(x: i32, y: i32) -> Self {
         Self { x, y }
     }
 
@@ -75,10 +124,18 @@ impl Tile {
     /// between two tiles in the same row is exactly their separation.
     pub fn centre(self) -> DVec2 {
         DVec2::new(
-            (self.x as f64 + 0.5) * TILE_METRES,
-            (self.y as f64 + 0.5) * TILE_METRES,
+            (f64::from(self.x) + 0.5) * TILE_METRES,
+            (f64::from(self.y) + 0.5) * TILE_METRES,
         )
     }
+}
+
+/// A banana node worked by monkeys, with its walk already measured.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Grove {
+    pub tile: Tile,
+    /// Metres from the town centre, along the route [`Map::route`] returns.
+    pub walk: f64,
 }
 
 /// A walk, as a polyline in metres.
@@ -103,7 +160,7 @@ impl Route {
         &self.points
     }
 
-    /// Metres, walked. This is the economy's travel leg.
+    /// Metres, walked.
     pub fn length(&self) -> f64 {
         self.length
     }
@@ -113,17 +170,17 @@ impl Route {
 pub enum MapError {
     Empty,
     Ragged {
-        row: u32,
+        row: i32,
     },
     Unknown {
-        row: u32,
-        column: u32,
+        row: i32,
+        column: i32,
         found: char,
     },
     NoTownCentre,
     TwoTownCentres,
     NoGrove,
-    /// A grove the town centre cannot reach. Caught at parse time because the
+    /// A node the town centre cannot reach. Caught at parse time because the
     /// alternative is a worker that walks out and never delivers.
     Unreachable(Tile),
 }
@@ -149,12 +206,13 @@ impl fmt::Display for MapError {
 }
 
 pub struct Map {
-    width: u32,
-    height: u32,
+    width: i32,
+    height: i32,
     terrain: Vec<Terrain>,
     town_centre: Tile,
     /// Nearest first. See [`Map::parse`].
-    groves: Vec<Tile>,
+    groves: Vec<Grove>,
+    home_trees: Vec<Tile>,
 }
 
 /// The map every run begins on.
@@ -170,34 +228,45 @@ impl Map {
     /// One character per tile:
     ///
     /// ```text
-    /// #  jungle, impassable      o  a clearing in the jungle
-    /// +  the ring path           *  a clearing holding a banana node
+    /// #  jungle, impassable      *  a clearing holding a banana node
+    /// +  the ring path           T  town ground holding a home tree
     /// .  town ground             @  town ground holding the town centre
+    /// o  a clearing in the jungle
     /// ```
+    ///
+    /// More than a lexer: this also *searches*. Every node is routed from the
+    /// town centre, which proves it reachable and orders the nodes by walk, so
+    /// both of those are type invariants rather than things a caller has to
+    /// remember to check.
     pub fn parse(source: &str) -> Result<Self, MapError> {
         let rows: Vec<&str> = source.lines().collect();
-        let width = rows.first().map_or(0, |row| row.chars().count()) as u32;
+        let width = rows.first().map_or(0, |row| row.chars().count());
         if rows.is_empty() || width == 0 {
             return Err(MapError::Empty);
         }
 
-        let mut terrain = Vec::with_capacity(rows.len() * width as usize);
+        let mut terrain = Vec::with_capacity(rows.len() * width);
         let mut town_centre = None;
-        let mut groves = Vec::new();
+        let mut nodes = Vec::new();
+        let mut home_trees = Vec::new();
         for (y, row) in rows.iter().enumerate() {
-            if row.chars().count() as u32 != width {
-                return Err(MapError::Ragged { row: y as u32 });
+            if row.chars().count() != width {
+                return Err(MapError::Ragged { row: y as i32 });
             }
             for (x, glyph) in row.chars().enumerate() {
-                let tile = Tile::new(x as u32, y as u32);
+                let tile = Tile::new(x as i32, y as i32);
                 terrain.push(match glyph {
                     '#' => Terrain::Jungle,
                     '+' => Terrain::Path,
                     '.' => Terrain::Town,
                     'o' => Terrain::Grove,
                     '*' => {
-                        groves.push(tile);
+                        nodes.push(tile);
                         Terrain::Grove
+                    }
+                    'T' => {
+                        home_trees.push(tile);
+                        Terrain::Town
                     }
                     '@' => {
                         if town_centre.replace(tile).is_some() {
@@ -207,8 +276,8 @@ impl Map {
                     }
                     found => {
                         return Err(MapError::Unknown {
-                            row: y as u32,
-                            column: x as u32,
+                            row: y as i32,
+                            column: x as i32,
                             found,
                         });
                     }
@@ -216,96 +285,108 @@ impl Map {
             }
         }
 
-        if groves.is_empty() {
+        if nodes.is_empty() {
             return Err(MapError::NoGrove);
         }
         let mut map = Self {
-            width,
-            height: rows.len() as u32,
+            width: width as i32,
+            height: rows.len() as i32,
             terrain,
             town_centre: town_centre.ok_or(MapError::NoTownCentre)?,
-            groves,
+            groves: Vec::new(),
+            home_trees,
         };
 
-        // Nearest first, so "the grove the workforce harvests" is a lookup
-        // rather than a search, and so it does not depend on where in the file
-        // a node happens to be written. Ties break on position, for a stable
-        // order whatever the author's layout.
-        let mut measured = Vec::with_capacity(map.groves.len());
-        for &grove in &map.groves {
-            let route = map
-                .route(map.town_centre, grove)
-                .ok_or(MapError::Unreachable(grove))?;
-            measured.push((route.length(), grove));
+        // Nearest first, so "the node the workforce works" is a lookup rather
+        // than a search, and so it does not depend on where in the file a node
+        // happens to be written. Ties break on position, for a stable order
+        // whatever the author's layout. The walk is kept rather than
+        // recomputed, so what gets reported is what the sort actually used.
+        for tile in nodes {
+            let walk = map
+                .route(map.town_centre, tile)
+                .ok_or(MapError::Unreachable(tile))?
+                .length();
+            map.groves.push(Grove { tile, walk });
         }
-        measured.sort_by(|(a_len, a), (b_len, b)| {
-            a_len
-                .partial_cmp(b_len)
+        map.groves.sort_by(|a, b| {
+            a.walk
+                .partial_cmp(&b.walk)
                 .expect("no NaN in a route length")
-                .then_with(|| (a.y, a.x).cmp(&(b.y, b.x)))
+                .then_with(|| (a.tile.y, a.tile.x).cmp(&(b.tile.y, b.tile.x)))
         });
-        map.groves = measured.into_iter().map(|(_, tile)| tile).collect();
         Ok(map)
     }
 
-    pub fn width(&self) -> u32 {
+    pub fn width(&self) -> i32 {
         self.width
     }
 
-    pub fn height(&self) -> u32 {
+    pub fn height(&self) -> i32 {
         self.height
     }
 
     /// Off-map reads as jungle, which is what it is: the barrier does not stop
     /// at the edge of the file.
     pub fn terrain(&self, tile: Tile) -> Terrain {
-        if tile.x >= self.width || tile.y >= self.height {
+        if tile.x < 0 || tile.y < 0 || tile.x >= self.width || tile.y >= self.height {
             return Terrain::Jungle;
         }
-        self.terrain[(tile.y * self.width + tile.x) as usize]
+        self.terrain[tile.y as usize * self.width as usize + tile.x as usize]
     }
 
     pub fn town_centre(&self) -> Tile {
         self.town_centre
     }
 
-    /// Every banana node, nearest first.
-    pub fn groves(&self) -> &[Tile] {
+    /// Every worked banana node, nearest first.
+    pub fn groves(&self) -> &[Grove] {
         &self.groves
     }
 
     /// The node the workforce harvests: the nearest, and for the MVP the only
     /// one worked. A second node becomes live when workers can be assigned,
     /// which is the point at which travel stops being one number.
-    pub fn worked_grove(&self) -> Tile {
+    pub fn worked_grove(&self) -> Grove {
         self.groves[0]
+    }
+
+    /// Banana trees the player picks by hand and no monkey is ever sent to.
+    ///
+    /// A home tree stands a few tiles from the town centre so that the harvest
+    /// drag is a short flick with both ends on screen at once. The worked nodes
+    /// cannot serve that purpose: at a zoom where a monkey is legible a phone
+    /// holds well under twenty tiles, and the nearest worked node is thirty
+    /// away. Kept out of [`Map::groves`] for a second reason - being nearer
+    /// than the worked node, a home tree counted among them would take over as
+    /// [`Map::worked_grove`] and silently move the travel leg.
+    pub fn home_trees(&self) -> &[Tile] {
+        &self.home_trees
     }
 
     /// The walk the economy is balanced against.
     pub fn reference_route(&self) -> Route {
-        self.route(self.town_centre, self.worked_grove())
-            .expect("every grove was proved reachable at parse time")
+        self.route(self.town_centre, self.worked_grove().tile)
+            .expect("every node was proved reachable at parse time")
     }
 
-    /// The shortest walk between two tiles, straightened.
+    /// The shortest grid walk between two tiles, straightened.
     ///
     /// `None` when either end is jungle or the goal is walled off.
     pub fn route(&self, from: Tile, to: Tile) -> Option<Route> {
-        if !self.passable_at(from.x as i64, from.y as i64)
-            || !self.passable_at(to.x as i64, to.y as i64)
-        {
+        if !self.passable_at(from.x, from.y) || !self.passable_at(to.x, to.y) {
             return None;
         }
         if from == to {
             return Some(Route::new(vec![from.centre()]));
         }
 
-        let cells = (self.width * self.height) as usize;
-        let mut cost = vec![f64::INFINITY; cells];
+        let cells = self.width as usize * self.height as usize;
+        let mut cost = vec![u64::MAX; cells];
         let mut came = vec![usize::MAX; cells];
         let mut closed = vec![false; cells];
         let (start, goal) = (self.index(from), self.index(to));
-        cost[start] = 0.0;
+        cost[start] = 0;
 
         let mut open = BinaryHeap::new();
         open.push(Candidate {
@@ -332,13 +413,13 @@ impl Map {
                 if diagonal && (!self.passable_at(x + dx, y) || !self.passable_at(x, y + dy)) {
                     continue;
                 }
-                let neighbour = (ny as usize) * self.width as usize + nx as usize;
-                let step = cost[cell] + if diagonal { DIAGONAL } else { 1.0 };
+                let neighbour = self.index(Tile::new(nx, ny));
+                let step = cost[cell] + if diagonal { DIAGONAL_STEP } else { STEP };
                 if step < cost[neighbour] {
                     cost[neighbour] = step;
                     came[neighbour] = cell;
                     open.push(Candidate {
-                        estimate: step + heuristic(Tile::new(nx as u32, ny as u32), to),
+                        estimate: step + heuristic(Tile::new(nx, ny), to),
                         cell: neighbour,
                     });
                 }
@@ -357,7 +438,7 @@ impl Map {
         cells.reverse();
         let tiles: Vec<Tile> = cells
             .into_iter()
-            .map(|cell| Tile::new(self.x_of(cell) as u32, self.y_of(cell) as u32))
+            .map(|cell| Tile::new(self.x_of(cell), self.y_of(cell)))
             .collect();
         Route::new(self.string_pull(&tiles))
     }
@@ -367,8 +448,13 @@ impl Map {
     /// A* on a grid can only turn in 45° steps, so it answers an open-ground
     /// diagonal with a staircase that is both ugly and measurably longer than
     /// the walk it stands for. Pulling the string taut against the jungle
-    /// removes the corners and, with them, the error: what the economy is
-    /// charged for becomes the distance a monkey actually covers.
+    /// removes it.
+    ///
+    /// Greedy, and so *not* an optimal any-angle path: the result is the
+    /// polyline a monkey walks, not necessarily the shortest line that exists
+    /// between the two tiles. What holds regardless is the floor - no walk
+    /// beats the straight line - and on the shipped map the worked route meets
+    /// that floor exactly, so no tie-break can move the travel leg.
     fn string_pull(&self, tiles: &[Tile]) -> Vec<DVec2> {
         let mut points = vec![tiles[0].centre()];
         let mut anchor = 0;
@@ -392,47 +478,41 @@ impl Map {
     /// ground, under the same no-corner-cutting rule the search itself obeys.
     ///
     /// Every tile the segment *touches*, not the one tile per column a
-    /// Bresenham line would pick. The difference matters: string-pulling only
-    /// keeps a shortcut this call approves, so a line test that skipped a tile
-    /// would approve a shortcut clipping the corner of a jungle block, and the
-    /// straightened walk would leave the walkable map.
+    /// Bresenham line would pick. The difference matters: [`Map::string_pull`]
+    /// only keeps a shortcut this call approves, so a line test that skipped a
+    /// tile would approve a shortcut clipping the corner of a jungle block, and
+    /// the straightened walk would leave the walkable map.
     fn clear_line(&self, from: Tile, to: Tile) -> bool {
-        if !self.passable_at(from.x as i64, from.y as i64) {
+        if !self.passable_at(from.x, from.y) {
             return false;
         }
-        let (mut x, mut y) = (from.x as i64, from.y as i64);
-        let (goal_x, goal_y) = (to.x as i64, to.y as i64);
-        let (run, rise) = (
-            f64::from(to.x) - f64::from(from.x),
-            f64::from(to.y) - f64::from(from.y),
-        );
-        let step_x = (run.signum() as i64) * i64::from(run != 0.0);
-        let step_y = (rise.signum() as i64) * i64::from(rise != 0.0);
+        let (mut x, mut y) = (from.x, from.y);
+        let (run, rise) = (to.x - from.x, to.y - from.y);
+        let (step_x, step_y) = (run.signum(), rise.signum());
 
         // Distances along the segment, in units of its own length, to the next
         // tile boundary and between boundaries. The walk starts at a tile
         // centre, so the first boundary is half a tile away.
-        let span_x = if run == 0.0 {
+        let span_x = if run == 0 {
             f64::INFINITY
         } else {
-            1.0 / run.abs()
+            1.0 / f64::from(run.abs())
         };
-        let span_y = if rise == 0.0 {
+        let span_y = if rise == 0 {
             f64::INFINITY
         } else {
-            1.0 / rise.abs()
+            1.0 / f64::from(rise.abs())
         };
         let mut next_x = span_x * 0.5;
         let mut next_y = span_y * 0.5;
 
         // The segment crosses at most one boundary per tile in each axis, so
         // this bounds the walk without trusting the floating point to land.
-        let limit = (goal_x - x).abs() + (goal_y - y).abs() + 2;
+        let limit = run.abs() + rise.abs() + 2;
         for _ in 0..limit {
-            if x == goal_x && y == goal_y {
+            if x == to.x && y == to.y {
                 return true;
             }
-            const GRAZE: f64 = 1e-9;
             if (next_x - next_y).abs() <= GRAZE {
                 // Exactly through a corner. The segment touches both orthogonal
                 // tiles, so both have to be walkable - the same rule the search
@@ -455,37 +535,41 @@ impl Map {
                 return false;
             }
         }
-        x == goal_x && y == goal_y
+        // Unreachable: the bound above is one more than the crossings a segment
+        // can make. Saying so out loud because the failure is otherwise silent
+        // and points the wrong way - a rejected shortcut leaves a corner in the
+        // walk, and the travel leg quietly grows.
+        debug_assert!(false, "clear_line exceeded its own crossing bound");
+        false
     }
 
-    fn passable_at(&self, x: i64, y: i64) -> bool {
-        x >= 0
-            && y >= 0
-            && x < self.width as i64
-            && y < self.height as i64
-            && self.terrain[(y as usize) * self.width as usize + x as usize].passable()
+    fn passable_at(&self, x: i32, y: i32) -> bool {
+        self.terrain(Tile::new(x, y)).passable()
     }
 
     fn index(&self, tile: Tile) -> usize {
-        (tile.y * self.width + tile.x) as usize
+        tile.y as usize * self.width as usize + tile.x as usize
     }
 
-    fn x_of(&self, cell: usize) -> i64 {
-        (cell % self.width as usize) as i64
+    fn x_of(&self, cell: usize) -> i32 {
+        (cell % self.width as usize) as i32
     }
 
-    fn y_of(&self, cell: usize) -> i64 {
-        (cell / self.width as usize) as i64
+    fn y_of(&self, cell: usize) -> i32 {
+        (cell / self.width as usize) as i32
     }
 }
 
 /// Octile distance: the exact cost of the cheapest unobstructed grid walk, so
-/// A* never expands a cell it does not have to and never returns a route that
-/// is not shortest.
-fn heuristic(from: Tile, to: Tile) -> f64 {
-    let dx = from.x.abs_diff(to.x) as f64;
-    let dy = from.y.abs_diff(to.y) as f64;
-    dx.max(dy) + (DIAGONAL - 1.0) * dx.min(dy)
+/// A* never expands a cell it does not have to, and the path it returns is of
+/// minimum *grid cost*.
+///
+/// That is not the same quantity as the straightened [`Route::length`] the
+/// caller receives; see [`Map::string_pull`].
+fn heuristic(from: Tile, to: Tile) -> u64 {
+    let dx = u64::from(from.x.abs_diff(to.x));
+    let dy = u64::from(from.y.abs_diff(to.y));
+    dx.max(dy) * STEP + dx.min(dy) * (DIAGONAL_STEP - STEP)
 }
 
 /// A min-heap entry.
@@ -493,9 +577,11 @@ fn heuristic(from: Tile, to: Tile) -> f64 {
 /// `BinaryHeap` is a max-heap, so the ordering is reversed. Ties break on the
 /// cell index, which is what makes a route the same route on every run - the
 /// headless economy contracts assert exact ticks, and they cannot do that if
-/// the travel leg depends on hash or heap order.
+/// the travel leg depends on heap order. Costs are integers ([`STEP`]) so that
+/// equal costs really are equal and this rule is the one that decides.
+#[derive(PartialEq, Eq)]
 struct Candidate {
-    estimate: f64,
+    estimate: u64,
     cell: usize,
 }
 
@@ -503,8 +589,7 @@ impl Ord for Candidate {
     fn cmp(&self, other: &Self) -> Ordering {
         other
             .estimate
-            .partial_cmp(&self.estimate)
-            .expect("no NaN in a route estimate")
+            .cmp(&self.estimate)
             .then_with(|| other.cell.cmp(&self.cell))
     }
 }
@@ -514,14 +599,6 @@ impl PartialOrd for Candidate {
         Some(self.cmp(other))
     }
 }
-
-impl PartialEq for Candidate {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl Eq for Candidate {}
 
 #[cfg(test)]
 mod tests {
@@ -541,7 +618,10 @@ mod tests {
                 .max(1.0) as u32;
             (0..=steps).all(|step| {
                 let at = leg[0].lerp(leg[1], f64::from(step) / f64::from(steps));
-                let tile = Tile::new((at.x / TILE_METRES) as u32, (at.y / TILE_METRES) as u32);
+                let tile = Tile::new(
+                    (at.x / TILE_METRES).floor() as i32,
+                    (at.y / TILE_METRES).floor() as i32,
+                );
                 map.terrain(tile).passable()
             })
         })
@@ -550,9 +630,41 @@ mod tests {
     #[test]
     fn the_reference_route_is_the_economys_travel_leg() {
         // `GROVE_DISTANCE` is a *measurement* of `assets/maps/start.txt` rather
-        // than a number somebody chose. Move the town centre or the banana node
+        // than a number somebody chose. Move the town centre or a banana node
         // and this is the test that says the balance moved with them.
-        assert_eq!(start().reference_route().length(), GROVE_DISTANCE);
+        let walked = start().reference_route().length();
+        assert!(
+            agrees_with_travel_leg(walked, GROVE_DISTANCE),
+            "the map walks {walked:?} m; GROVE_DISTANCE is {GROVE_DISTANCE:?} m"
+        );
+    }
+
+    #[test]
+    fn a_walk_is_never_shorter_than_the_line_it_stands_for() {
+        // `string_pull` is greedy, so a route's length is not the optimum of
+        // anything and can drift with tie-breaking. This is the floor that
+        // holds regardless: nothing walkable beats the straight line.
+        let start = start();
+        for grove in start.groves() {
+            let route = start
+                .route(start.town_centre(), grove.tile)
+                .expect("reachable");
+            let straight = start.town_centre().centre().distance(grove.tile.centre());
+            assert!(
+                route.length() >= straight - 1e-9,
+                "{:?} walks {} m, under its own straight line of {straight} m",
+                grove.tile,
+                route.length()
+            );
+        }
+        // And the worked route *meets* the floor, so the travel leg is minimal
+        // outright and no tie-break inside the search can move it. This is the
+        // precondition the exactness of `GROVE_DISTANCE` rests on.
+        let worked = start.worked_grove();
+        assert_eq!(
+            start.reference_route().length(),
+            start.town_centre().centre().distance(worked.tile.centre())
+        );
     }
 
     #[test]
@@ -561,37 +673,82 @@ mod tests {
         assert_eq!((start.width(), start.height()), (69, 69));
         assert_eq!(start.terrain(start.town_centre()), Terrain::Town);
         assert_eq!(start.terrain(Tile::new(34, 34)), Terrain::Town);
-        assert_eq!(start.terrain(Tile::new(34, 6)), Terrain::Path);
+        assert_eq!(start.terrain(Tile::new(34, 13)), Terrain::Path);
         assert_eq!(start.terrain(Tile::new(34, 0)), Terrain::Jungle);
-        assert_eq!(start.terrain(start.worked_grove()), Terrain::Grove);
-        // Off the map is jungle too: the barrier does not stop at the file.
+        assert_eq!(start.terrain(start.worked_grove().tile), Terrain::Grove);
+        // Off the map is jungle in every direction, including the ones a `u32`
+        // tile could not have expressed.
         assert_eq!(start.terrain(Tile::new(69, 0)), Terrain::Jungle);
+        assert_eq!(start.terrain(Tile::new(-1, 30)), Terrain::Jungle);
+        assert_eq!(start.terrain(Tile::new(30, -1)), Terrain::Jungle);
     }
 
     #[test]
-    fn the_starting_map_offers_two_nodes_and_works_the_nearer() {
+    fn the_jungle_stands_deep_behind_every_node() {
+        // A node with a sliver of jungle behind it shows the player the edge of
+        // the world from the one place they spend their time looking at.
+        let start = start();
+        let centre = start.town_centre();
+        for grove in start.groves() {
+            // Straight on out from the town, through the node, to the void.
+            let (step_x, step_y) = (
+                (grove.tile.x - centre.x).signum(),
+                (grove.tile.y - centre.y).signum(),
+            );
+            let depth = (1..)
+                .map(|step| Tile::new(grove.tile.x + step_x * step, grove.tile.y + step_y * step))
+                .take_while(|tile| {
+                    tile.x >= 0 && tile.y >= 0 && tile.x < start.width() && tile.y < start.height()
+                })
+                .filter(|tile| !start.terrain(*tile).passable())
+                .count();
+            assert!(
+                depth >= 8,
+                "{:?} has only {depth} tiles of jungle between it and the edge",
+                grove.tile
+            );
+        }
+    }
+
+    #[test]
+    fn a_home_tree_is_a_thumbs_reach_from_the_town_centre_and_never_worked() {
+        let start = start();
+        let centre = start.town_centre().centre();
+        assert!(!start.home_trees().is_empty());
+        for &tree in start.home_trees() {
+            let reach = centre.distance(tree.centre());
+            // Both ends of the harvest drag have to be on screen at once, and a
+            // phone at a playable zoom holds well under twenty tiles.
+            assert!(reach <= 8.0 * TILE_METRES, "{tree:?} is {reach} m out");
+            assert!(
+                start.groves().iter().all(|grove| grove.tile != tree),
+                "a home tree among the worked nodes would take over as the \
+                 travel leg: {tree:?}"
+            );
+        }
+        assert!(start.worked_grove().walk > centre.distance(start.home_trees()[0].centre()));
+    }
+
+    #[test]
+    fn the_starting_map_offers_two_worked_nodes_and_works_the_nearer() {
         let start = start();
         assert_eq!(start.groves().len(), 2);
         assert_eq!(start.worked_grove(), start.groves()[0]);
-        let far = start
-            .route(start.town_centre(), start.groves()[1])
-            .expect("the second node is reachable");
         assert!(
-            far.length() > start.reference_route().length(),
+            start.groves()[1].walk > start.groves()[0].walk,
             "the worked grove must be the nearer of the two"
         );
-        // The far node's walk turns, so the shipped map exercises the search
-        // and the straightening rather than only ever answering a straight
-        // line. Losing that would make the whole module untested in situ.
-        assert!(far.points().len() > 2, "{far:?} does not turn");
-        assert_eq!(start.reference_route().points().len(), 2);
+        // The stored walk is the one the sort used, not a recomputation.
+        assert_eq!(start.worked_grove().walk, start.reference_route().length());
     }
 
     #[test]
-    fn the_shipped_walk_stays_out_of_the_jungle() {
+    fn the_shipped_walks_stay_out_of_the_jungle() {
         let start = start();
-        for &grove in start.groves() {
-            let route = start.route(start.town_centre(), grove).expect("reachable");
+        for grove in start.groves() {
+            let route = start
+                .route(start.town_centre(), grove.tile)
+                .expect("reachable");
             assert!(
                 walk_stays_on_the_map(start, &route),
                 "{route:?} leaves the map"
@@ -631,6 +788,10 @@ mod tests {
             "a walk through the wall would be {straight} m, got {}",
             route.length()
         );
+        assert!(
+            route.points().len() > 2,
+            "the walk has to turn to get round"
+        );
         assert!(walk_stays_on_the_map(&walled, &route));
     }
 
@@ -652,7 +813,9 @@ mod tests {
     #[test]
     fn routes_are_deterministic() {
         // Two equal-length ways round the wall. The headless contracts assert
-        // exact ticks, so the tie must break the same way on every run.
+        // exact ticks, so the tie must break the same way on every run - and
+        // with integer step costs the tie is exact rather than an artefact of
+        // the order two floats were added in.
         let symmetric = map(&["#######", "#.....#", "#.@#*.#", "#.....#", "#######"]);
         let first = symmetric.reference_route();
         for _ in 0..8 {
@@ -668,6 +831,11 @@ mod tests {
         assert!(
             start
                 .route(start.town_centre(), Tile::new(500, 500))
+                .is_none()
+        );
+        assert!(
+            start
+                .route(start.town_centre(), Tile::new(-1, -1))
                 .is_none()
         );
     }
@@ -701,5 +869,7 @@ mod tests {
             Map::parse("@#*").err(),
             Some(MapError::Unreachable(Tile::new(2, 0)))
         );
+        // A home tree is not a worked node, so it cannot stand in for one.
+        assert_eq!(Map::parse("@.T").err(), Some(MapError::NoGrove));
     }
 }
