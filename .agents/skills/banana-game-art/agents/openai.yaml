@@ -1,0 +1,4 @@
+interface:
+  display_name: "Banana Monkey Game Art"
+  short_description: "Create playful isometric pixel art for this game"
+  default_prompt: "Use $banana-game-art to create a game asset that matches the project palette, Spider Worker scale, and approved visual direction."
