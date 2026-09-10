@@ -43,3 +43,21 @@ sprite-axi show assets/TownCenter/town-center.aseprite --scale 2 --png assets/To
 ```
 
 Regeneration overwrites the generated town-center files. Edit the Lua recipe or preserve a separate working copy before manual edits.
+
+## Building idle animation
+
+`town-center-idle.aseprite` contains **16 frames at 150 ms**, a seamless **2.4-second** forward loop tagged `idle`. The breeze is set to half its original strength: about 1–2 native pixels at the outer boughs, with reduced banner flutter and no visible vertical bob. The banner stays fixed along its attachment seam. The house, trunk, roots, collection bins, and reference monkeys remain still. Frame 1 exactly matches the approved static master.
+
+- `town-center-idle-preview.gif`: looping **704 × 672** preview with native-scale workers.
+- `town-center-idle-preview.aseprite`: editable layered context animation.
+- `town-center-idle-sheet.png`: transparent 4 × 4 atlas (**2688 × 2816**).
+- `town-center-idle.json`: fixed frame rectangles, durations, and looping metadata.
+- `town-center-idle-motion.png`: still comparison of frames 1, 5, and 13.
+
+Regenerate from the static master:
+
+```powershell
+sprite-axi run tools/art/town-center-idle.lua -f assets/TownCenter/town-center.aseprite
+```
+
+The animation recipe checks static-layer equality, palette membership, binary alpha, margins, first-frame equality, and the wraparound transition against ordinary adjacent transitions. The exported GIF was independently checked: 16 frames, 2,400 ms total duration, infinite looping. This remains an asset export; runtime playback is not integrated.
