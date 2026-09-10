@@ -1285,25 +1285,19 @@ fn setup(
             ));
         });
 
-    commands.spawn((
-        Text2d::new("JUNGLE"),
-        TextFont::from_font_size(16.0),
-        TextColor(INK),
-        Transform::from_xyz(0.0, 0.0, 2.0),
-        HarvestLabel,
-        LayoutElement::HarvestLabel,
-    ));
-    commands.spawn((
-        // "DEPOT", not "VILLAGE": the label names the drop target, and the
-        // village is the terrain it stands on. A new player reads this as an
-        // instruction about where the banana goes, which is what it is.
-        Text2d::new("DEPOT"),
-        TextFont::from_font_size(16.0),
-        TextColor(INK),
-        Transform::from_xyz(0.0, 0.0, 2.0),
-        DepositLabel,
-        LayoutElement::DepositLabel,
-    ));
+    spawn_place_label(
+        &mut commands,
+        "JUNGLE",
+        (HarvestLabel, LayoutElement::HarvestLabel),
+    );
+    // "DEPOT", not "VILLAGE": the label names the drop target, and the village
+    // is the terrain it stands on. A new player reads this as an instruction
+    // about where the banana goes, which is what it is.
+    spawn_place_label(
+        &mut commands,
+        "DEPOT",
+        (DepositLabel, LayoutElement::DepositLabel),
+    );
 
     // The stage view is the board and its actors with nothing in front of
     // them: a playtest of "one monkey walks to the grove" does not need the
@@ -1313,6 +1307,42 @@ fn setup(
         hud::setup_hud(&mut commands, &asset_server);
         hud::setup_menu(&mut commands, &asset_server);
     }
+}
+
+/// The type size a place label is drawn at.
+const PLACE_LABEL_FONT: f32 = 16.0;
+
+/// Name a place on the board, on a plate that survives a crowd standing on it.
+///
+/// Cream on a dark plate rather than ink on grass. At sixty workers the depot
+/// label was being cut into pieces by the monkey outlines running through the
+/// letterforms, and a delivery floater sat on top of the remains — the two
+/// pieces of text that exist to tell a new player where bananas go, illegible
+/// at exactly the moment there is most going on.
+///
+/// The plate is the pattern the role badges already use, and those are the one
+/// piece of text that survives a crowd intact today, so this is borrowing a
+/// solution rather than inventing one.
+fn spawn_place_label(commands: &mut Commands, name: &str, markers: impl Bundle) {
+    // Sized from the string: the font is fixed-width at this size, so a plate
+    // measured per character fits every label without laying the text out.
+    const PER_CHARACTER: f32 = 9.6;
+    const PADDING: Vec2 = Vec2::new(14.0, 7.0);
+    let plate = Vec2::new(name.len() as f32 * PER_CHARACTER, PLACE_LABEL_FONT) + PADDING * 2.0;
+
+    commands
+        .spawn((
+            Text2d::new(name.to_owned()),
+            TextFont::from_font_size(PLACE_LABEL_FONT),
+            TextColor(CREAM),
+            Transform::from_xyz(0.0, 0.0, 2.0),
+            markers,
+        ))
+        .with_child((
+            Sprite::from_color(BROWN, plate),
+            // Behind its own text, and with it above the board.
+            Transform::from_xyz(0.0, 0.0, -0.01),
+        ));
 }
 
 fn refresh_layout(
@@ -1879,8 +1909,28 @@ const FLOATER_OUTLINE: [Vec2; 4] = [
     Vec2::new(0.0, 2.0),
 ];
 
+/// How far a floater is nudged off the stall, in metres, so consecutive ones
+/// do not stack.
+const FLOATER_SPREAD_METRES: f32 = 2.2;
+
 fn spawn_floater(commands: &mut Commands, layout: &SceneLayout, delivery: Delivery) {
-    let anchor = layout.town_centre();
+    // Scattered around the stall rather than all launched from one point. At
+    // the swarm scenario's rate a delivery lands about twice a second against a
+    // floater that lives most of one, so two or three are on screen at any
+    // moment - and stacked on the same pixel they overprint into mush, on the
+    // one piece of feedback that tells the player the economy is working.
+    //
+    // Hashed from the delivery's own figures rather than from a counter, so it
+    // needs no state and two identical deliveries in a row still separate:
+    // the amount differs, or the kind does, or it is genuinely the same event.
+    let spin = {
+        let bits = delivery.amount.to_bits() ^ ((delivery.kind as u64) << 57);
+        let mixed = (bits ^ (bits >> 29)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        // The top 24 bits over 2^24, exact in `f32` and inside `0.0..1.0`.
+        ((mixed >> 40) as u32) as f32 / 16_777_216.0
+    };
+    let angle = spin * std::f32::consts::TAU;
+    let anchor = layout.town_centre() + Vec2::from_angle(angle) * FLOATER_SPREAD_METRES;
     let (label, size, colour) = match delivery.kind {
         DeliveryKind::Worker => (format!("+{:.0}", delivery.amount), 34.0, GOLD),
         // Bigger, because it is forty times the size and lands once every three

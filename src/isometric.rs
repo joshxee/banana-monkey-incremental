@@ -106,8 +106,9 @@ const DEPOT_EDGE: Color = Color::srgb(0.71, 0.73, 0.48);
 
 /// How far the trodden ground reaches from the delivery point, in tiles.
 const DEPOT_RADIUS: i32 = 1;
-/// And how far the scuffing around it reaches.
-const DEPOT_EDGE_RADIUS: i32 = 2;
+/// And how far the scuffing around it reaches. The standing ring is sized
+/// against this, so the pad contains the crowd that gathers on it.
+pub(crate) const DEPOT_EDGE_REACH: i32 = 2;
 
 /// How tall the jungle stands, in metres. Enough to read as a wall a monkey
 /// could not step over, which is what the map says it is.
@@ -229,7 +230,7 @@ fn ground_colour(map: &Map, tile: Tile) -> Color {
     let reach = (tile.x - centre.x).abs().max((tile.y - centre.y).abs());
     if reach <= DEPOT_RADIUS {
         DEPOT_PAD
-    } else if reach <= DEPOT_EDGE_RADIUS {
+    } else if reach <= DEPOT_EDGE_REACH {
         DEPOT_EDGE
     } else {
         terrain_colour(terrain)
@@ -646,10 +647,10 @@ mod tests {
         assert_eq!(ground_colour(map, centre), DEPOT_PAD);
         assert_ne!(ground_colour(map, centre), terrain_colour(Terrain::Town));
         // With an edge, so it reads as worn rather than as a painted rectangle.
-        let edge = Tile::new(centre.x + DEPOT_EDGE_RADIUS, centre.y);
+        let edge = Tile::new(centre.x + DEPOT_EDGE_REACH, centre.y);
         assert_eq!(ground_colour(map, edge), DEPOT_EDGE);
         // And it stops: the town is still the town a few tiles out.
-        let away = Tile::new(centre.x + DEPOT_EDGE_RADIUS + 1, centre.y);
+        let away = Tile::new(centre.x + DEPOT_EDGE_REACH + 1, centre.y);
         assert_eq!(ground_colour(map, away), terrain_colour(map.terrain(away)));
         // It never climbs the jungle wall, which is not ground anyone treads.
         for y in 0..map.height() {

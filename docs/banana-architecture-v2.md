@@ -714,29 +714,72 @@ would need five more numbers per worker to say the same thing.
 
 *The fraction remap is a sine bulge, and the shape is the whole argument.*
 `f' = f + a·sin(πf)` with `|a| ≤ 0.06` re-times where a monkey is **drawn**
-along the walk without changing where the economy has it. `sin(0)` and `sin(π)`
-are both zero, so the remap is the identity at both ends: a monkey leaves the
-depot on exactly the tick the economy says and arrives on exactly the tick it
-says, and only the middle moves. That is what lets the swarm be free while D24
-holds unchanged, and it is pinned twice — on the arithmetic in
-`the_swarm_never_moves_an_arrival`, and on the consequence in
-`the_swarm_never_reaches_the_economy`, which asserts a crowd of sixty delivers
-on the same tick as a monkey walking alone.
+along the walk without changing where the economy has it. The remap is the
+identity at both ends, so a monkey is drawn leaving the depot and reaching the
+grove at exactly the fractions the economy has it at, and only the middle moves.
+
+That identity is a *floating-point* fact, not an algebraic one, and the first
+version of this decision claimed otherwise. `sin(π)` in `f64` is 1.22e-16, not
+zero; `f + a·sin(πf)` is exactly 1.0 at f = 1 only while `|a|·1.22e-16` stays
+under half an ulp, which holds for `|a| < 0.907`. There is fifteen thousand
+times that margin at the shipped 0.06, and the test asserts the equality rather
+than trusting the algebra.
+
+Two further bounds on `a`, neither of them the aesthetic one. **Monotonicity**
+needs `|a| < 1/π ≈ 0.318`, since `d/df = 1 + aπ·cos(πf)`; past it a monkey
+visibly walks backwards, and monotonicity plus fixed endpoints is also what
+makes the range exactly [0,1], so no separate range argument is needed.
+**Apparent speed** is what actually binds: the drawn speed is `v·(1 ± aπ)`, so
+the shipped 0.06 already means leaving 19% fast and arriving 19% slow.
+
+*What protects the economy is the plugin seam, not the shape of the remap.*
+`swarm_fraction` is reachable only from `walk_point`, which only presentation
+calls; the vanishing endpoints buy *visual* continuity at a segment boundary.
+Two contracts hold the seam from different sides:
+`the_swarm_never_reaches_the_economy` asserts a crowd of sixty delivers on the
+same tick as a monkey walking alone — which catches a spread or scatter leak,
+and cannot catch a wobble leak, because a wobble routed into the simulation
+would still deliver on tick 950. `the_hire_index_is_invisible_to_the_economy` is
+the one that sees that: it runs the same world from two different hire-index
+bases and demands bit-identical deliveries and treasury.
 
 Neither half of the offset produces overtaking on its own, which is why both
-exist. The bulge opens a gap proportional to `sin(πf)` — it grows and shrinks
-but never changes sign. The along-route scatter is a constant. Added together,
-the varying term can overtake the constant one, and about one pair in nine
-genuinely swaps order over a walk.
+exist. Relative position is `Δb·sin(πf) + Δs`; `sin` is non-negative with zeros
+at both ends, so a pair swaps **iff the two differences have opposite signs and
+the varying one is larger** — closed form, not something to sample. Independent
+uniform draws put that at 14.95% of pairs; the shipped crowd of sixty measures
+18.8%.
+
+Two limits of the bulge, recorded rather than fixed. The order at *both
+endpoints* is `Δs` — a fixed function of the hire indices, identical on every
+trip forever, so every overtake is transient and exactly undone by arrival.
+And the passing is **end-loaded**: relative velocity is `∝ cos πf`, which is
+zero at the midpoint, so three quarters of crossings happen before f = 0.25 and
+the middle of the walk is the rigid read the increment set out to kill. An
+index-hashed second harmonic `c·sin(2πf)` has its maximum rate at the midpoint
+and would fix that, but it is bought with apparent speed, which is already the
+binding budget.
 
 *The swarm is drawn across the local corridor, not across a constant.* A fixed
 lane width has to be narrow enough for the tightest point on the route, so it is
 that narrow everywhere. `Map::corridor_half_width` casts a ray either way across
 the walk and answers with the *smaller* clearance, so a crowd centred on the
 route stays inside the gap rather than leaning into whichever wall is further
-off. On the shipped map that is eight metres of crowd across the open town,
-squeezing to five and a half at the gap near the grove and opening out again —
-one pinch, because the shipped map only offers one.
+off. The clearance is measured **after** the along-route scatter, at the point
+the monkey actually stands: measuring it before and then displacing by up to
+seven metres asks the width of one place and spends it at another, which drew
+four of sixty workers up to a metre and a half inside the jungle wall.
+
+Two things worth stating plainly about what this is currently worth. The
+corridor sits at its cap for **94.8% of the shipped walk** — the machinery is
+inert almost everywhere, and the one squeeze (eight metres of crowd to five and
+a half) lasts about a second out of a twenty-second leg. And the *slope* is
+unbounded: the ray-cast made the width continuous, not gentle, so at the pinch
+the outermost monkey crosses sideways at four metres a second while walking at
+three. Both are investments in maps that do not exist yet. A map with a real
+neck — mid-route, four or five metres wide, several seconds long — is what would
+make the mechanism worth the reader's attention, and is also what would make the
+slope worth bounding.
 
 The traversal is a grid ray-cast rather than a sampled march, and the reason is
 continuity rather than precision. Probing at fixed intervals answers in whole
@@ -745,12 +788,31 @@ across that width snaps narrower and wider as it walks. It reads as the crowd
 flinching, and it is what
 `an_outer_offset_turns_a_corner_instead_of_teleporting_across_it` caught.
 
-*Standing is a different shape from walking.* At an endpoint a monkey takes a
-bearing and a radius instead of a lane, so the group is a ring around the thing
-it is queueing at. Three rows read as inventory and a filled disc reads as a
-mob; an annulus reads as a crowd gathered *around* something, and it leaves the
-middle clear, which is what keeps the depot pad and the palm visible under the
-monkeys standing on them.
+*Standing is a different shape from walking, and the two are blended rather than
+switched between.* At an endpoint a monkey takes a bearing and a radius instead
+of a corridor offset, so the group is a crowd around the thing it is queueing
+at. The two shapes share no term, and switching between them on the segment
+boundary cost a **six metre jump** — three tiles, ten at worst — four times per
+cycle per monkey, at exactly the moment a delivery lands. The walking path is
+held to a continuity bar and the handoff was allowed thirty times it. A monkey
+now steps aside over the first third of the arriving segment, and the bar covers
+the whole cycle: the worst jump is 0.10 m in a rendered frame, against 0.05 m
+for ordinary walking.
+
+The crowd is a **horseshoe, open away from the viewer**, not a full ring. A ring
+is symmetric on the ground and asymmetric on screen, because every sprite grows
+upward from its feet: the far arc's bodies pile over the middle while the near
+arc's feet leave the near half bare, and the whole thing reads as a heap beside
+the landmark rather than a crowd around it. Leaving the up-screen arc empty
+keeps the pad and the trunk visible, and a crowd at a counter stands in front of
+it anyway. The outer radius is sized to the depot's own trodden ground, so the
+pad contains the crowd standing on it.
+
+One scaling risk, recorded because it is not a constant tweak: the band's area
+is fixed while the standing share of a cycle *rises* with Chefs, and the worker
+cap is a thousand. Holding density constant needs the radius to grow with the
+square root of the crowd, which means passing the standing count into the
+placement.
 
 The cart's bay is measured from the swarm's own edge rather than set at a fixed
 distance, so it leads the crowd through the pinch instead of parking in the

@@ -474,9 +474,6 @@ impl Map {
             .expect("every node was proved reachable at parse time")
     }
 
-    /// The shortest grid walk between two tiles, straightened.
-    ///
-    /// `None` when either end is jungle or the goal is walled off.
     /// How much open ground there is either side of `at`, along `across`.
     ///
     /// The swarm is drawn across this rather than across a constant, which is
@@ -487,8 +484,8 @@ impl Map {
     ///
     /// Symmetric — the *smaller* of the two sides — so a swarm centred on the
     /// route stays inside the corridor rather than leaning into whichever wall
-    /// is further away. Measured by marching, because the alternative is a
-    /// distance field over 4761 tiles for a question asked along one line.
+    /// is further away. Cast along the line, because the alternative is a
+    /// distance field over 4761 tiles for a question asked about one ray.
     pub fn corridor_half_width(&self, at: DVec2, across: DVec2) -> f64 {
         /// Beyond this the answer stops mattering: the swarm has its own cap.
         const REACH: f64 = 10.0;
@@ -546,6 +543,9 @@ impl Map {
         }
     }
 
+    /// The shortest grid walk between two tiles, straightened.
+    ///
+    /// `None` when either end is jungle or the goal is walled off.
     pub fn route(&self, from: Tile, to: Tile) -> Option<Route> {
         if !self.passable_at(from.x, from.y) || !self.passable_at(to.x, to.y) {
             return None;

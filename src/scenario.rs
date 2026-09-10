@@ -256,11 +256,33 @@ pub fn all() -> Vec<Scenario> {
             placement: Placement::Restored { seed: Some(1) },
         },
         Scenario {
+            name: "cohort",
+            summary: "sixty monkeys that all set out together, which is what buying in \
+                      bulk actually creates: by the second lap you should not be able to \
+                      point at a block. One clot orbiting the route with empty road \
+                      either side of it is the fail",
+            run: Seed {
+                bananas: 600.0,
+                workers: 60,
+                chefs: 4,
+                unpackers: 3,
+                technologists: 1,
+                research: 200.0,
+                ..Seed::default()
+            }
+            .run(),
+            // The whole point: every one of them starts at the stall at phase
+            // zero, exactly as a burst of hires does. The `swarm` scenario is
+            // `Restored`, which hands out random phases - the one placement
+            // under which a cohort is invisible.
+            placement: Placement::AtStall,
+        },
+        Scenario {
             name: "swarm",
-            summary: "sixty monkeys and no carts, the state the swarm was built for: the \
-                      crowd should spread wide across the town, squeeze through the gap \
-                      near the grove and open out again, with monkeys passing each other \
-                      the whole way and nobody walking in step; first arrivals pay nothing",
+            summary: "sixty monkeys and no carts: watch the depot and you should see two \
+                      streams crossing - gold bananas coming home, empty monkeys heading \
+                      out - with the crowd wide across the town and no two of them in \
+                      step; first arrivals pay nothing",
             run: Seed {
                 bananas: 600.0,
                 workers: 60,
