@@ -1,0 +1,23 @@
+{
+  "image": "town-center-idle-sheet.png",
+  "frameWidth": 672, "frameHeight": 704, "columns": 4,
+  "animation": "idle", "loop": true, "durationMs": 2400,
+  "frames": [
+    {"x": 0, "y": 0, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 672, "y": 0, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 1344, "y": 0, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 2016, "y": 0, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 0, "y": 704, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 672, "y": 704, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 1344, "y": 704, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 2016, "y": 704, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 0, "y": 1408, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 672, "y": 1408, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 1344, "y": 1408, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 2016, "y": 1408, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 0, "y": 2112, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 672, "y": 2112, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 1344, "y": 2112, "w": 672, "h": 704, "durationMs": 150},
+    {"x": 2016, "y": 2112, "w": 672, "h": 704, "durationMs": 150}
+  ]
+}

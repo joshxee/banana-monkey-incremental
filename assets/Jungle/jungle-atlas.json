@@ -1,0 +1,11 @@
+{
+  "image": "jungle-atlas.png", "cellWidth": 320, "cellHeight": 352, "columns": 3,
+  "anchor": {"x": 160, "y": 316}, "projection": "2:1 ground axes",
+  "sprites": [
+    {"name":"jungle-broad","x":0,"y":0,"w":320,"h":352,"bounds":[26,26,287,339]},
+    {"name":"jungle-leaning","x":320,"y":0,"w":320,"h":352,"bounds":[58,74,283,333]},
+    {"name":"banana-fruiting","x":640,"y":0,"w":320,"h":352,"bounds":[48,96,274,331]},
+    {"name":"banana-harvested","x":0,"y":352,"w":320,"h":352,"bounds":[48,96,274,331]},
+    {"name":"jungle-fern","x":320,"y":352,"w":320,"h":352,"bounds":[90,262,222,334]}
+  ]
+}
