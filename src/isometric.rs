@@ -20,7 +20,7 @@ use bevy::{
 };
 
 use crate::{
-    art::Art,
+    art::{self, Art},
     map::{Map, TILE_METRES, Terrain, Tile},
 };
 
@@ -58,6 +58,16 @@ pub(crate) const GROUND_Z: f32 = -1.0;
 /// `the_world_never_reaches_the_overlay` is what keeps that true as the map
 /// grows.
 pub(crate) const OVERLAY_Z: f32 = 500.0;
+
+/// Where marks laid *on* the ground draw: over the terrain mesh, under anything
+/// standing on it.
+///
+/// A contact shadow belongs to its monkey but must never cover another one, and
+/// sorting it with its owner cannot promise that - a shadow a hair behind its
+/// monkey is still in front of the monkey a metre further back, and draws over
+/// its feet. So every ground mark shares one layer between the mesh at
+/// [`GROUND_Z`] and the shallowest depth anything stands at, which is zero.
+pub(crate) const MARK_Z: f32 = -0.5;
 
 /// The most [`stand_z`] will shift anything.
 ///
@@ -363,7 +373,7 @@ pub(crate) fn spawn_world(
 ) {
     // One material for every baked surface: the colour lives in the vertices.
     let painted = materials.add(ColorMaterial::from(Color::WHITE));
-    let plant = art.plant_cell();
+    let plant = art::PLANT;
 
     commands
         .spawn((WorldRoot, Transform::default(), Visibility::default()))
@@ -391,7 +401,7 @@ pub(crate) fn spawn_world(
             });
 
             let village = [
-                (stall_stand(map), &art.town_centre, art.town_centre_cell()),
+                (stall_stand(map), &art.town_centre, art::TOWN_CENTRE),
                 // The worked node still has its bunch on; the home tree has had
                 // it cut, and that one banana is the loose one lying at its foot
                 // for the player to pick up. Two states of one plant, which is

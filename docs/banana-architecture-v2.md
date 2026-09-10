@@ -877,6 +877,56 @@ placed from the art's measured silhouette rather than from the rectangle they
 were authored against, which is why they read as carried rather than as floating
 squares, but they remain the weakest thing on the board.
 
+*Corrected on review.* This increment shipped unreviewed, and review found that
+several of the sentences above were not true of the code, and that some of the
+code was not true of the art. Recorded here rather than silently edited, because
+each is the same mistake — a number read off the wrong thing:
+
+- **The scale was pinned to an asset the game never loads.** "55 pixels" is the
+  bounding box of `docs/references/spider-worker.png`, a standing study. The
+  sheets played are a quadruped 58 pixels from tail tip to toe: 23.2 texels,
+  46 logical pixels at the zoom floor. `ART_SCALE` stays 0.4 — everything was
+  tuned within a texel of that — but its test now decodes the sheets and
+  measures every frame, where it used to multiply two literals together.
+- **The walk skated at two and a half times its stride.** The sheet's planted
+  foot covers eight texels a loop; the loop was played against the clock in
+  0.72 s while the monkey moved 27 texels a second, and faster with every Chef.
+  The playhead is now advanced by distance *drawn*, one loop per eight texels,
+  keeping the manifest's 70/60/50 proportions as shares of the stride. It is
+  right at any speed, any Chef bonus and any swarm remap by construction.
+- **Placements used the placeholder's numbers.** Riders sat at `22 × 0.30`, a
+  centre offset for a rectangle, which stood all three on the cart's lid once
+  they were anchored at their feet; the chef's cap covered the face down to the
+  snout; the carried banana sat on the head and rode the tail when the sprite
+  flipped, because `flip_x` mirrors the texture and not its children. Every one
+  now goes through `Cell::offset_of` from a row measured off the sheet, and the
+  tests hold the rows to the pixels.
+- **The role tint was invisible.** 94–100% white multiplied over near-black
+  fur. Roles are now said by a disc of the shop's own swatch colour under each
+  support monkey — its contact shadow too — with the props recoloured to match
+  the shop, where the unpacker's crate had been the *worker's* orange. Hunger
+  drains the disc to grey, since dimming a black monkey showed nothing.
+- **The fan was a queue.** Same-role monkeys stepped 13 texels along a ground
+  diagonal that projects mostly *into* the screen, so two chefs drew as one
+  monkey with two caps. A fan is something the player sees, so it is now laid
+  out in screen texels and taken to the ground by `unproject`: one in front,
+  two behind to either side. A line across the screen does not fit — the walk
+  runs up the screen past the depot, and a line wide enough for three monkeys
+  crosses it on one side and leaves a landscape phone on the other.
+- **`Pose` was never read**, and `Playing` was spawned by the simulation. The
+  playhead is presentation, so `dress_actors` inserts it on the loop the
+  monkey's segment wants — a monkey restored mid-unload used to open on a walk
+  frame — and the chain is dress, position, animate in one frame. "One frame
+  later" above was also wrong: `FixedUpdate` spawns before `Update` dresses.
+- **Nothing had a contact shadow but the scenery**, which bakes its own, so the
+  cast looked more detached than the rectangles had. Walkers get a flat
+  ellipse at 33% in the art's shadow green, on a shared ground-mark layer
+  between the terrain and anything standing, so a shadow never covers the
+  monkey behind its owner.
+- **0.62 is not two thirds**, and two thirds would not fit. The treehouse's
+  opaque art is 254 × 282 pixels at the zoom floor against a 286-pixel safe
+  area, and a test now says so from the PNG.
+
 ---
 
 ## 4. Data Model

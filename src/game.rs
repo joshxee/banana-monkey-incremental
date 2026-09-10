@@ -233,10 +233,15 @@ impl Plugin for PresentationPlugin {
                 (
                     // Before anything poses the cast: the simulation spawns
                     // actors with no art on them, and this is what puts it
-                    // there. See `worker::dress_actors`.
-                    (worker::dress_actors, worker::position_workers).chain(),
+                    // there. See `worker::dress_actors`. Animation last: it
+                    // spends the distance `position_workers` just measured.
+                    (
+                        worker::dress_actors,
+                        worker::position_workers,
+                        worker::animate_workers,
+                    )
+                        .chain(),
                     worker::position_carts,
-                    worker::animate_workers,
                     support::sync_support_avatars,
                     support::sync_support_badges,
                     animate_banana,
@@ -915,9 +920,18 @@ impl SceneLayout {
         self.town_centre + offset
     }
 
-    /// Where one member of a role's fan stands, in metres.
-    pub(crate) fn support_point(self, role: SupportRole, spread: f32) -> Vec2 {
-        self.support_stand(role) + Vec2::new(spread, spread * 0.5)
+    /// Where one member of a role's fan stands, in metres, placed `offset`
+    /// board texels from the station *on the screen* (see
+    /// `support::slot_offset`).
+    ///
+    /// A fan is a thing the player sees, so it is laid out in screen terms and
+    /// taken back to the ground through `unproject`. It used to be a step along
+    /// the ground diagonal `(1, 0.5)`, which projects to about six texels
+    /// across and nine down per metre: the monkeys stood in a queue receding
+    /// from the viewer, each mostly hidden behind the one in front, and no
+    /// spacing along that line could separate them.
+    pub(crate) fn support_point(self, role: SupportRole, offset: Vec2) -> Vec2 {
+        self.support_stand(role) + isometric::unproject(offset)
     }
 
     /// Snap a distance *from the board's origin* to the world's texel grid, so
@@ -1235,18 +1249,20 @@ pub(crate) enum MenuState {
     ConfirmRestart,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     asset_server: Res<AssetServer>,
     mut atlas_layouts: ResMut<Assets<bevy::image::TextureAtlasLayout>>,
+    mut images: ResMut<Assets<Image>>,
     launch: Res<Launch>,
     village: Res<map::Village>,
 ) {
     commands.spawn((Camera2d, MainCamera));
 
-    let art = art::Art::load(&asset_server, &mut atlas_layouts);
+    let art = art::Art::load(&asset_server, &mut atlas_layouts, &mut images);
     isometric::spawn_world(&mut commands, &mut meshes, &mut materials, &art, &village);
     commands.insert_resource(art);
 
