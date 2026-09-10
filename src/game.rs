@@ -2477,10 +2477,17 @@ fn handle_camera_input(
         // Desktop: the wheel steps whole zooms about the cursor, and the
         // keyboard walks the board. Neither is reachable on a phone, and both
         // are how a playtest without a touchscreen reaches the camera at all.
-        let cursor = window
-            .cursor_position()
-            .map(|raw| window_to_camera(&window, raw));
-        let mut notches: f32 = wheel.read().map(|event| event.y.signum()).sum();
+        // Only over the board. `hud::scroll_store` reads the same wheel from
+        // its own cursor, and every reader gets every message — so without
+        // this, a notch over the shop scrolls the shop *and* zooms the village
+        // behind it.
+        let raw_cursor = window.cursor_position().filter(|raw| !in_ui(*raw));
+        let cursor = raw_cursor.map(|raw| window_to_camera(&window, raw));
+        let over_board = raw_cursor.is_some();
+        let mut notches: f32 = wheel
+            .read()
+            .map(|event| if over_board { event.y.signum() } else { 0.0 })
+            .sum();
         // `-` and `=` are the wheel's keyboard spelling, for a playtest with no
         // pointing device - and `=` rather than `+` so it needs no shift.
         for (key, step) in [
