@@ -819,6 +819,64 @@ distance, so it leads the crowd through the pinch instead of parking in the
 hedge beside it: the ground the swarm has to squeeze through is the ground the
 cart has to squeeze through.
 
+**D28 — The art sets the scale, and the simulation never touches it.**
+*(Art increment.)*
+
+The cast and the scenery were placeholders: coloured rectangles with a two-texel
+outline, a hut built from three shaded quads, a palm whose crown was a 0.7 m
+slab. Every one of them is now drawn art — the spider worker's walk and idle
+loops, the town centre treehouse, five jungle plants and the two banana states.
+
+*One scale, taken from the worker.* The assets were all authored against the
+same 64×64 worker reference, so they already agree with each other; the game
+needs exactly one conversion from art pixels to world texels. `ART_SCALE` is
+pinned by the monkey — its 55-pixel silhouette comes out 22 texels, the height
+the placeholder rectangle was drawn at — so the board, the camera's zoom floor
+and the support fan all keep the numbers they were tuned against, and every
+tree, roof and leaf inherits its proportion to the monkey from the artist rather
+than from a constant chosen here.
+
+The one deviation is stated as one. The town centre is drawn at about ten
+monkeys tall, which is a fine building and a poor *landmark*: at the shared
+scale it is wider than a phone's entire safe area, and it covered the depot pad
+it stands beside, the crowd unloading there and both ends of the opening drag.
+It is drawn at 0.62.
+
+*Sprites are anchored at their feet, and that is what let the art replace the
+meshes without touching the layering.* Every manifest gives a ground anchor in
+art pixels rather than a centre, and Bevy's `Anchor` takes a fraction out from
+the centre with the y axis the other way up. A sprite anchored that way sorts
+through `stand_z` exactly as a prism built from its footprint did (D25), so the
+treehouse covers a monkey behind it and not one in front, with nothing new in
+the sorting rule. Sizing a sprite to its opaque bounds instead is the tempting
+shortcut and is exactly wrong: the two banana states differ only in whether the
+bunch is on, and bounds-fitting would move the plant the moment it was picked.
+
+*The simulation spawns the monkey; the presentation dresses it.* The spawn
+systems used to build their own `Sprite`s, which worked only because a coloured
+rectangle needs no resource to make — the first sprite that needed an asset
+server broke every headless contract at once. `dress_actors` runs in
+presentation and gives art to any actor that has none, so a thousand ticks of a
+sixty-monkey economy still runs with no window.
+
+*The playhead is per monkey, seeded from the hire index.* A shared animation
+clock would have sixty monkeys plant the same foot on the same frame — the
+formation read D27's offsets exist to break, reintroduced in the one channel
+those offsets cannot reach. Only the two loops are played. The artist also
+supplied `rise` and `settle` transitions, but they are one-shot clips needing
+playback state and an interruption rule, and *moving* and *not moving* is the
+whole of what the board has to say.
+
+Two things are deliberately left as they were. The idle animations for the
+jungle and the town centre move by a single native pixel, which at this scale is
+four tenths of a texel and cannot render, so those use the static exports and
+the game loads five small textures instead of two atlases of 2688×2816. And the
+support roles are still told apart by a tinted primitive worn over the sprite —
+a cap, a crate, a desk — because there is no prop art. Those primitives are now
+placed from the art's measured silhouette rather than from the rectangle they
+were authored against, which is why they read as carried rather than as floating
+squares, but they remain the weakest thing on the board.
+
 ---
 
 ## 4. Data Model

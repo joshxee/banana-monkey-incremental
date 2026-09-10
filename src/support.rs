@@ -19,10 +19,10 @@
 use bevy::prelude::*;
 
 use crate::{
+    art::{self, Art, Clip},
     domain::{SUPPORT_MEAL_PERIOD, SUPPORT_PHASE_STRIDE, Staff, SupportCycle, SupportRole},
     game::{CREAM, GOLD, SceneLayout},
     isometric,
-    worker::spawn_monkey_outline,
 };
 
 const FRAME_SIZE: u32 = 22;
@@ -195,14 +195,28 @@ impl SupportRole {
     /// Box size in source texels, and its offset from the monkey's centre.
     /// Three shapes, three silhouettes: worn, carried, sat behind.
     fn box_geometry(self) -> (Vec2, Vec2) {
+        // Redrawn for the spider worker, and both numbers in each pair changed.
+        // These were authored against a 13x22 upright rectangle whose head was
+        // its top edge; the art is a *quadruped* with a low back, a head off to
+        // one side and a tail that owns the space above it. A hat placed on the
+        // old crown floats over nothing, and a desk sized to the old body is
+        // wider than the monkey behind it.
+        //
+        // Offsets are measured up from the monkey's feet, which is where its
+        // transform now sits.
+        //
+        // Read off the art rather than guessed: in a 64x64 cell anchored at
+        // (32, 56), the curled tail owns the upper *left* and the head sits at
+        // about (45, 19) with the chest below it, so a prop placed on the old
+        // rectangle's centre line lands on the tail and a hat placed above its
+        // crown lands in the air.
         match self {
-            // Narrower than the head and sitting on the crown, so it reads as
-            // worn. Wider than the head it becomes a white bar behind a monkey.
-            SupportRole::Chef => (Vec2::new(9.0, 7.0), Vec2::new(0.0, 10.0)),
-            // Held in front of the chest, breaking the body outline.
-            SupportRole::Unpacker => (Vec2::new(12.0, 11.0), Vec2::new(-7.0, -2.0)),
-            // A wide, low desk the monkey sits behind.
-            SupportRole::Technologist => (Vec2::new(24.0, 12.0), Vec2::new(-4.0, -8.0)),
+            // A small cap on the head, not a bar above the back.
+            SupportRole::Chef => (Vec2::new(6.0, 4.0), Vec2::new(5.0, 15.0)),
+            // Carried in front of the chest, breaking the body outline.
+            SupportRole::Unpacker => (Vec2::new(7.0, 6.0), Vec2::new(7.0, 8.0)),
+            // A low desk the monkey works over, no wider than it is.
+            SupportRole::Technologist => (Vec2::new(13.0, 6.0), Vec2::new(5.0, 3.0)),
         }
     }
 
@@ -248,6 +262,7 @@ pub(crate) fn spawn_missing_support(
 /// every avatar from the simulation entities behind it.
 pub(crate) fn sync_support_avatars(
     mut commands: Commands,
+    art: Res<Art>,
     time: Res<Time>,
     layout: Res<SceneLayout>,
     staff: Res<Staff>,
@@ -269,7 +284,7 @@ pub(crate) fn sync_support_avatars(
             .count();
 
         for slot in drawn..wanted {
-            spawn_avatar(&mut commands, &layout, role, slot);
+            spawn_avatar(&mut commands, &art, &layout, role, slot);
         }
         // A resize can shrink the fan, so the pool has to give sprites back as
         // well as take them - otherwise rotating a phone leaves a role drawn
@@ -342,19 +357,36 @@ fn role_index(role: SupportRole) -> usize {
     }
 }
 
-fn spawn_avatar(commands: &mut Commands, layout: &SceneLayout, role: SupportRole, slot: usize) {
+fn spawn_avatar(
+    commands: &mut Commands,
+    art: &Art,
+    layout: &SceneLayout,
+    role: SupportRole,
+    slot: usize,
+) {
     let scale = layout.world_scale();
     let (size, offset) = role.box_geometry();
 
+    // The same monkey the harvesters are, standing still. Support staff were
+    // the one part of the cast still drawn as a tinted rectangle, and leaving
+    // them that way would have put two art styles side by side at the one place
+    // the player looks most - the depot, where the harvesters gather.
+    //
+    // The role tint still multiplies, over the sprite instead of over a flat
+    // fill, so a chef reads as a chef at a glance and as a monkey up close. The
+    // idle frame is the slot's own, so a fan of three is not one pose repeated.
     commands
         .spawn((
             SupportAvatar { role, slot },
             HireFlash(HIRE_HIGHLIGHT_SECONDS),
-            Sprite::from_color(role.tint(), Vec2::new(13.0, 22.0)),
+            Sprite {
+                color: role.tint(),
+                ..art.worker(Clip::Idle, slot as u32)
+            },
+            art::WORKER.anchor(),
             Transform::from_scale(Vec3::splat(scale)),
         ))
         .with_children(|avatar| {
-            spawn_monkey_outline(avatar, Vec2::new(13.0, 22.0));
             avatar.spawn((
                 RoleBox,
                 Sprite::from_color(role.box_color(), size),

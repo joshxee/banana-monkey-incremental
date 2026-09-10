@@ -3,6 +3,7 @@ use std::time::Duration;
 use bevy::{diagnostic::FrameCount, input::touch::Touches, prelude::*, window::PrimaryWindow};
 
 use crate::{
+    art,
     domain::{
         BANANAS_PER_HARVEST, Carts, Committed, CycleSpec, CycleTerms, EconomySnapshot,
         EconomyState, FedStaff, HarvestCycle, Multipliers, Research, SIM_HZ, Staff, SupportCycle,
@@ -230,7 +231,10 @@ impl Plugin for PresentationPlugin {
             .add_systems(
                 Update,
                 (
-                    worker::position_workers,
+                    // Before anything poses the cast: the simulation spawns
+                    // actors with no art on them, and this is what puts it
+                    // there. See `worker::dress_actors`.
+                    (worker::dress_actors, worker::position_workers).chain(),
                     worker::position_carts,
                     worker::animate_workers,
                     support::sync_support_avatars,
@@ -1236,12 +1240,15 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     asset_server: Res<AssetServer>,
+    mut atlas_layouts: ResMut<Assets<bevy::image::TextureAtlasLayout>>,
     launch: Res<Launch>,
     village: Res<map::Village>,
 ) {
     commands.spawn((Camera2d, MainCamera));
 
-    isometric::spawn_world(&mut commands, &mut meshes, &mut materials, &village);
+    let art = art::Art::load(&asset_server, &mut atlas_layouts);
+    isometric::spawn_world(&mut commands, &mut meshes, &mut materials, &art, &village);
+    commands.insert_resource(art);
 
     commands.spawn((
         Sprite::from_color(Color::NONE, Vec2::ONE),
@@ -1311,6 +1318,14 @@ fn setup(
 
 /// The type size a place label is drawn at.
 const PLACE_LABEL_FONT: f32 = 16.0;
+
+/// Where a place label sits in the overlay.
+///
+/// Under the delivery floaters, which land on exactly the spot the depot label
+/// names and matter more when they do: a floater is feedback about something
+/// that just happened, and the label is a standing sign that will still be
+/// there afterwards.
+const PLACE_LABEL_Z: f32 = isometric::OVERLAY_Z - 1.0;
 
 /// Name a place on the board, on a plate that survives a crowd standing on it.
 ///
@@ -1440,7 +1455,7 @@ fn apply_layout(
             LayoutElement::HarvestLabel => {
                 transform.translation = layout
                     .board_raised(layout.grove(), 6.0)
-                    .extend(isometric::OVERLAY_Z);
+                    .extend(PLACE_LABEL_Z);
                 transform.scale = Vec3::splat(layout.world_scale().clamp(0.8, 1.35));
             }
             LayoutElement::DepositLabel => {
@@ -1451,7 +1466,7 @@ fn apply_layout(
                 // anyone noticing there was nothing under it.
                 transform.translation = layout
                     .board_raised(layout.town_centre(), 3.5)
-                    .extend(isometric::OVERLAY_Z);
+                    .extend(PLACE_LABEL_Z);
                 transform.scale = Vec3::splat(layout.world_scale().clamp(0.8, 1.35));
             }
         }

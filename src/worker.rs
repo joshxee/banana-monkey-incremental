@@ -10,6 +10,7 @@
 use bevy::prelude::*;
 
 use crate::{
+    art::{self, Art, Clip},
     domain::{
         CART_CREW, Carts, CycleSpec, HarvestCycle, Multipliers, Segment, Workforce, cycle_time,
     },
@@ -19,9 +20,10 @@ use crate::{
 };
 
 const FRAME_SIZE: u32 = 22;
-const MONKEY_SIZE: Vec2 = Vec2::new(13.0, 22.0);
-const MONKEY_FILL: Color = Color::srgb(0.94, 0.82, 0.67);
-const MONKEY_EDGE: Color = Color::srgb(0.34, 0.17, 0.10);
+/// The cast is drawn art now, so its base tint is *no* tint: the sprite's own
+/// colours are the colours, and `sprite.color` is left to carry only the things
+/// the game has to say on top of them - the depth shade and the hire flash.
+const MONKEY_TINT: Color = Color::WHITE;
 
 /// How far a monkey drifts ahead of or behind the point the economy has it at,
 /// as a fraction of the whole walk.
@@ -340,6 +342,31 @@ pub(crate) enum Pose {
     Run,
 }
 
+/// Which loop a monkey is playing, and where it has got to.
+///
+/// A playhead per monkey rather than one shared clock, and that is the point:
+/// the starting frame is seeded from the hire index, so sixty monkeys spawned
+/// on the same tick are already spread across the walk cycle. A shared clock
+/// would have every one of them plant the same foot at the same moment, which
+/// is the formation read the swarm offsets exist to break - reintroduced in the
+/// one channel those offsets cannot reach.
+#[derive(Component, Debug)]
+pub(crate) struct Playing {
+    clip: Clip,
+    frame: u32,
+    elapsed: f32,
+}
+
+impl Playing {
+    fn starting(index: u32) -> Self {
+        Self {
+            clip: Clip::Walk,
+            frame: index % Clip::Walk.frames(),
+            elapsed: 0.0,
+        }
+    }
+}
+
 /// Workers restored from a save get a random elapsed-time phase. Fresh hires
 /// still start at the stall so the purchase has an immediate, legible result.
 #[derive(Resource)]
@@ -421,7 +448,7 @@ pub fn spawn_missing_workers(
             CycleSpec::WORKER,
             Lane(index),
             Pose::Run,
-            Sprite::from_color(MONKEY_FILL, MONKEY_SIZE),
+            Playing::starting(index),
             Transform::from_xyz(0.0, 0.0, 1.0),
         ));
         if was_restored {
@@ -432,36 +459,17 @@ pub fn spawn_missing_workers(
             });
         }
         worker.with_children(|parent| {
-            spawn_monkey_outline(parent, MONKEY_SIZE);
+            // Over the monkey's shoulder. The parent's transform is its *feet*
+            // now that the art carries its own ground anchor, so this is a
+            // height above the ground rather than an offset from a centre.
             parent.spawn((
                 CarriedBanana,
-                Sprite::from_color(Color::srgb(1.0, 0.78, 0.10), Vec2::splat(7.0)),
-                Transform::from_xyz(5.5, 7.0, 0.2)
+                Sprite::from_color(Color::srgb(1.0, 0.78, 0.10), Vec2::splat(5.0)),
+                Transform::from_xyz(4.0, 14.0, 0.2)
                     .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4)),
                 Visibility::Hidden,
             ));
         });
-    }
-}
-
-pub(crate) fn spawn_monkey_outline(parent: &mut ChildSpawnerCommands, size: Vec2) {
-    const EDGE: f32 = 2.0;
-    for (custom_size, translation) in [
-        (
-            Vec2::new(size.x + EDGE * 2.0, EDGE),
-            Vec2::new(0.0, size.y * 0.5),
-        ),
-        (
-            Vec2::new(size.x + EDGE * 2.0, EDGE),
-            Vec2::new(0.0, -size.y * 0.5),
-        ),
-        (Vec2::new(EDGE, size.y), Vec2::new(-size.x * 0.5, 0.0)),
-        (Vec2::new(EDGE, size.y), Vec2::new(size.x * 0.5, 0.0)),
-    ] {
-        parent.spawn((
-            Sprite::from_color(MONKEY_EDGE, custom_size),
-            Transform::from_xyz(translation.x, translation.y, 0.1),
-        ));
     }
 }
 
@@ -690,9 +698,9 @@ pub fn position_workers(
         let centre = route.0.sample(fraction).at;
         let from_route = point - Vec2::new(centre.x as f32, centre.y as f32);
         let back = (0.5 - isometric::depth(from_route) * 0.25).clamp(0.0, 1.0);
-        let half_height = FRAME_SIZE as f32 * 0.5 * layout.world_scale();
-
-        let screen = layout.board_snapped(point, half_height);
+        // No lift: the art is anchored at the monkey's feet, so the ground
+        // position *is* the transform.
+        let screen = layout.board_snapped(point, 0.0);
         let translation = screen.extend(isometric::stand_z(point, lane.nudge()));
         let scale = Vec3::splat(layout.world_scale());
         // Written only on change: a worker stands still through Pick and
@@ -708,7 +716,7 @@ pub fn position_workers(
         }
 
         let shade = 1.0 - 0.18 * back;
-        let base = MONKEY_FILL.to_srgba();
+        let base = MONKEY_TINT.to_srgba();
         let mut tint = Vec3::new(base.red, base.green, base.blue) * shade;
         // A worker stuck waiting for a banana to eat has stopped producing, and
         // the player has to be able to see why the rate died. Idling at the
@@ -739,16 +747,86 @@ pub fn position_workers(
 }
 
 #[allow(clippy::type_complexity)]
+/// Give every actor the simulation has spawned its sprite.
+///
+/// The spawning belongs to `SimulationPlugin`, which runs headless with no
+/// asset server and no art at all - a contract test steps a thousand ticks of a
+/// sixty-monkey economy without a window. So the simulation makes the monkey
+/// and the presentation dresses it, one frame later, and the seam holds.
+///
+/// It also removes a smell that predated the art: the spawn systems used to
+/// build `Sprite`s of their own, which worked only because a coloured rectangle
+/// needs no resource to make. The first sprite that needed one broke every
+/// headless contract at once.
+pub fn dress_actors(
+    mut commands: Commands,
+    art: Res<Art>,
+    workers: Query<(Entity, &Lane), (With<Worker>, Without<Sprite>)>,
+    riders: Query<(Entity, &CartSeat), Without<Sprite>>,
+) {
+    for (entity, lane) in &workers {
+        commands
+            .entity(entity)
+            .insert((art.worker(Clip::Walk, lane.0), art::WORKER.anchor()));
+    }
+    for (entity, seat) in &riders {
+        commands
+            .entity(entity)
+            .insert((art.rider(seat.seat), art::WORKER.anchor()));
+    }
+}
+
 pub fn animate_workers(
-    mut workers: Query<(&HarvestCycle, &mut Pose, &Children), With<Worker>>,
+    time: Res<Time>,
+    art: Res<Art>,
+    mut workers: Query<
+        (
+            &HarvestCycle,
+            &mut Pose,
+            &mut Playing,
+            &mut Sprite,
+            &Children,
+        ),
+        With<Worker>,
+    >,
     mut carried: Query<&mut Visibility, With<CarriedBanana>>,
 ) {
-    for (cycle, mut pose, children) in &mut workers {
+    for (cycle, mut pose, mut playing, mut sprite, children) in &mut workers {
         let segment = cycle.segment();
         let walking = segment.is_walking();
         let next_pose = if walking { Pose::Run } else { Pose::Idle };
         if *pose != next_pose {
             *pose = next_pose;
+        }
+
+        // Walking or not walking, which is the whole of what the two loops have
+        // to say. Switching clips keeps the frame index rather than resetting
+        // it, so a crowd that all stops at once does not all restart its idle
+        // on frame zero together.
+        let wanted = if walking { Clip::Walk } else { Clip::Idle };
+        if playing.clip != wanted {
+            playing.clip = wanted;
+            playing.frame %= wanted.frames();
+            playing.elapsed = 0.0;
+            let (image, layout) = art.clip(wanted);
+            sprite.image = image;
+            if let Some(atlas) = sprite.texture_atlas.as_mut() {
+                atlas.layout = layout;
+            }
+        }
+
+        // Capped before the loop below spends it: a frame that arrives after a
+        // long stall - a backgrounded tab, a breakpoint - would otherwise be
+        // paid out one animation frame at a time.
+        playing.elapsed = (playing.elapsed + time.delta_secs()).min(1.0);
+        while playing.elapsed >= playing.clip.hold(playing.frame) {
+            playing.elapsed -= playing.clip.hold(playing.frame);
+            playing.frame = (playing.frame + 1) % playing.clip.frames();
+        }
+        if let Some(atlas) = sprite.texture_atlas.as_mut()
+            && atlas.index != playing.frame as usize
+        {
+            atlas.index = playing.frame as usize;
         }
 
         for child in children.iter() {
@@ -1359,18 +1437,14 @@ pub fn spawn_missing_carts(
             // whole crew afterwards.
             for seat in 0..CART_CREW {
                 let offset = (seat as f32 - (CART_CREW as f32 - 1.0) * 0.5) * SEAT_STEP_TEXELS;
-                let mut seat_entity = cart.spawn((
+                cart.spawn((
                     CartSeat { cart: index, seat },
-                    Sprite::from_color(MONKEY_FILL, Vec2::new(10.0, 16.0)),
                     // Sitting in the box: feet behind its front wall, heads
                     // clear of the top. Local texels, so the parent's world
                     // scale applies without this having to know it.
                     Transform::from_xyz(offset, FRAME_SIZE as f32 * 0.30, -0.001),
                     Visibility::Hidden,
                 ));
-                seat_entity.with_children(|seat| {
-                    spawn_monkey_outline(seat, Vec2::new(10.0, 16.0));
-                });
             }
         });
     }
