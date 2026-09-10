@@ -2394,42 +2394,55 @@ fn handle_camera_input(
             // Two fingers on the ground is always a pinch, however it started.
             ([a, b, ..], was) => {
                 let (a, b) = (*a, *b);
-                let (Some(first), Some(second)) = (at(a), at(b)) else {
-                    return;
-                };
-                let span = first.distance(second);
-                let middle = first.midpoint(second);
-                if let CameraMotion::Pinch {
-                    a: was_a,
-                    b: was_b,
-                    span: before,
-                } = was
-                    && (was_a, was_b) == (a, b)
-                    && before > 1.0
-                    && span > 1.0
-                {
-                    // Scale by the ratio the fingers moved, and hold the ground
-                    // between them: a pinch that only multiplies the zoom slides
-                    // the world out from between the two fingers pinching it.
-                    next.zoom_to(centre, middle, next.zoom * span / before);
-                    next.resting_zoom = next.zoom;
-                }
-                CameraMotion::Pinch { a, b, span }
-            }
-            ([id], _) => {
-                let Some(now) = at(*id) else { return };
-                let pointer = PointerId::Touch(*id);
-                match gesture.motion {
-                    CameraMotion::Pan { pointer: was, last } if was == pointer => {
-                        drag(&mut next, centre, now - last);
+                // The `else` should be unreachable, since `retain` has already
+                // dropped every id that is no longer pressed. It falls back
+                // rather than bailing out of the system, because a bail-out
+                // would also skip the settle and the clamp below: a dropped
+                // frame of easing is a worse bug than a dropped frame of pinch.
+                match (at(a), at(b)) {
+                    (Some(first), Some(second)) => {
+                        let span = first.distance(second);
+                        let middle = first.midpoint(second);
+                        if let CameraMotion::Pinch {
+                            a: was_a,
+                            b: was_b,
+                            span: before,
+                        } = was
+                            && (was_a, was_b) == (a, b)
+                            && before > 1.0
+                            && span > 1.0
+                        {
+                            // Scale by the ratio the fingers moved, and hold
+                            // the ground between them: a pinch that only
+                            // multiplies the zoom slides the world out from
+                            // between the two fingers pinching it.
+                            next.zoom_to(centre, middle, next.zoom * span / before);
+                            next.resting_zoom = next.zoom;
+                        }
+                        CameraMotion::Pinch { a, b, span }
                     }
-                    // Includes the frame a pinch drops back to one finger: the
-                    // survivor re-grabs from where it is rather than from where
-                    // the pinch's midpoint was.
-                    _ => next.settle(),
+                    _ => {
+                        next.settle();
+                        CameraMotion::Idle
+                    }
                 }
-                CameraMotion::Pan { pointer, last: now }
             }
+            ([id], _) => match at(*id) {
+                Some(now) => {
+                    let pointer = PointerId::Touch(*id);
+                    match gesture.motion {
+                        CameraMotion::Pan { pointer: was, last } if was == pointer => {
+                            drag(&mut next, centre, now - last);
+                        }
+                        // Includes the frame a pinch drops back to one finger:
+                        // the survivor re-grabs from where it is rather than
+                        // from where the pinch's midpoint was.
+                        _ => next.settle(),
+                    }
+                    CameraMotion::Pan { pointer, last: now }
+                }
+                None => CameraMotion::Idle,
+            },
             ([], _) => {
                 if matches!(gesture.motion, CameraMotion::Pinch { .. }) {
                     next.settle();
