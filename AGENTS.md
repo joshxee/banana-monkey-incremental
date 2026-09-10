@@ -25,3 +25,7 @@ Simulation state is written only in `FixedUpdate`, inside `SimulationPlugin`. An
 - Specialists advise and review; they edit only when explicitly delegated. The main agent owns implementation and final decisions.
 
 The specialist definitions and their project-source indexes live in `.claude/agents/`.
+
+## Game art
+
+For designing, creating, editing, animating, or visually reviewing game assets, use the project [banana-game-art skill](.agents/skills/banana-game-art/SKILL.md). It records the visual direction, palette and Spider Worker scale references, pixel-art workflow, and restrained idle-animation preferences.
