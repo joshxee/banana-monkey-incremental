@@ -25,8 +25,6 @@ use crate::{
     isometric,
 };
 
-const FRAME_SIZE: u32 = 22;
-
 /// Source texels to a metre of ground, at unit zoom. A monkey is 22 texels tall
 /// and stands a shade under two metres, so the fan spacings that were authored
 /// in texels keep the spread they were tuned to.
@@ -308,16 +306,16 @@ pub(crate) fn sync_support_avatars(
     }
 
     for (entity, avatar, flash, mut transform, mut sprite) in &mut avatars {
-        let scale = layout.world_scale();
-
         // In metres across the ground now, not texels across the screen: a fan
         // of chefs spreads on the plane they are standing on, so the depth rule
         // sorts them against each other for free.
         let spread = slot_offset_texels(avatar.slot, per_role) / METRES_TO_TEXELS;
         let point = layout.support_point(avatar.role, spread);
-        let half_height = FRAME_SIZE as f32 * 0.5 * scale;
 
-        transform.translation = layout.board_snapped(point, half_height).extend(
+        // No lift: the art carries its own ground anchor, so the ground
+        // position *is* the transform. Keeping the old half-a-monkey lift left
+        // the whole support crew hovering eleven texels above the depot.
+        transform.translation = layout.board_snapped(point, 0.0).extend(
             // Bounded, so a wide fan can never sort in front of a role standing
             // genuinely nearer the viewer.
             isometric::stand_z(point, (avatar.slot % 8) as f32 * isometric::NUDGE_STEP),
@@ -459,7 +457,11 @@ pub(crate) fn sync_support_badges(
                 // *beside* the group it covered the outermost monkeys - and at
                 // a crowded deposit those were the chefs' hats, which are the
                 // only thing telling that role apart.
-                (FRAME_SIZE as f32 * 0.5 + 13.0) * scale,
+                //
+                // Measured from the monkey's own drawn height rather than from
+                // a constant, so the badge stays above the head the day the art
+                // scale moves.
+                (art::WORKER.size().y + 6.0) * scale,
             )
             // A badge counts monkeys rather than standing among them, so it
             // belongs over the board, not in it.
