@@ -118,6 +118,22 @@ pub(crate) fn raise(point: Vec2, metres: f32) -> Vec2 {
     Vec2::new(point.x, point.y + metres * HEIGHT_PER_METRE)
 }
 
+/// The ground position, in metres, that [`project`] would put at `point`.
+///
+/// The projection folds two ground axes onto the screen's, and it is invertible
+/// precisely because the ground is a *plane*: there is exactly one metre
+/// position under any point on it. That is what lets a drag on the board be
+/// read as a grab on the ground rather than as a scroll of a picture — the
+/// camera moves so the metre the finger landed on stays under the finger, at
+/// any zoom.
+pub(crate) fn unproject(point: Vec2) -> Vec2 {
+    // `project` is `x - y` across and `-(x + y)` down; recovering the pair from
+    // the sum and the difference is the whole inverse.
+    let difference = point.x / TILE_HALF.x;
+    let sum = -point.y / TILE_HALF.y;
+    Vec2::new(sum + difference, sum - difference) * (METRE * 0.5)
+}
+
 /// How near the viewer a ground position is. Larger is nearer.
 pub(crate) fn depth(world: Vec2) -> f32 {
     (world.x + world.y) / METRE
@@ -505,6 +521,28 @@ mod tests {
             project(Vec2::splat(METRE)) - origin,
             Vec2::new(0.0, -TILE_HALF.y * 2.0)
         );
+    }
+
+    #[test]
+    fn a_point_on_the_board_names_exactly_one_metre_on_the_ground() {
+        // The property a drag depends on: grab the board anywhere and the metre
+        // under the finger is recoverable, so panning can hold it there.
+        for world in [
+            Vec2::ZERO,
+            Vec2::new(89.0, 61.0),
+            Vec2::new(41.0, 25.0),
+            Vec2::new(-7.5, 133.25),
+        ] {
+            let round_trip = unproject(project(world));
+            assert!(
+                round_trip.distance(world) < 1e-3,
+                "{world:?} came back as {round_trip:?}"
+            );
+        }
+        // And in the other direction, which is the one a pinch uses: a screen
+        // offset names a ground offset.
+        let screen = Vec2::new(96.0, -40.0);
+        assert!(project(unproject(screen)).distance(screen) < 1e-3);
     }
 
     #[test]

@@ -248,6 +248,26 @@ pub fn all() -> Vec<Scenario> {
             placement: Placement::Restored { seed: Some(42) },
         },
         Scenario {
+            name: "survey",
+            summary: "for the camera: monkeys spread down the whole walk, so there is \
+                      something to find at both ends. Drag the grass to pan, wheel or \
+                      +/- to zoom, C to recentre; the board should follow the cursor \
+                      exactly, refuse to leave the village behind, and come to rest on \
+                      a whole zoom step with no shimmer; first arrivals pay nothing",
+            run: Seed {
+                bananas: 400.0,
+                workers: 18,
+                chefs: 3,
+                unpackers: 2,
+                technologists: 1,
+                research: 120.0,
+                carts: 1,
+                crewed: 3,
+            }
+            .run(),
+            placement: Placement::Restored { seed: Some(37) },
+        },
+        Scenario {
             name: "rich",
             summary: "every button affordable and nothing hired: for shop and UI work, and \
                       for browser tests that must not grind",

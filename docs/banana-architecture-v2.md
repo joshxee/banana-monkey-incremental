@@ -581,6 +581,82 @@ That is an interim: pointed at the town centre, the grove sat off the top of the
 screen and took the whole outbound leg with it, and a fixed board has to hold
 both ends of the economy for a playtest to mean anything. A camera the player
 can pan and zoom replaces it, and is what the mobile brief actually asks for.
+**Superseded by D26.**
+
+**D26 — Where the player is looking belongs to the player.**
+*(Camera increment.)*
+
+`SceneLayout` recomputed its aim from the window every frame and pointed the
+board at the midpoint of the walk. Pan and zoom are now a `BoardCamera`
+resource — a focus in **metres** and a zoom — and the layout derives its origin
+and scale from it. The window still decides the HUD's reserve: the banner's
+strip, the store's panel, and the square the two of them leave. It no longer
+decides where the board is pointed.
+
+The focus is kept in metres rather than as a screen origin, and that is what
+makes it survive a zoom, a rotation and a resize without drifting: the player is
+looking at a *place*, not at a pixel.
+
+*Both gestures are one operation.* `hold(world, screen)` re-aims the camera so a
+given metre sits under a given point. A drag holds the metre the finger landed
+on; a pinch holds the metre between two fingers while the scale changes under
+it. Neither is expressed as "move the camera by an amount", which is how a pinch
+ends up sliding the ground out from between the fingers pinching it.
+
+*Harvest gets right of first refusal on a pointer; the camera takes what is
+left.* A manual harvest is a drag that starts on a banana node and a pan is a
+drag that starts anywhere else, so the only way to tell them apart is the order
+the two systems run in. Eligibility is decided once, at touch-down, and never
+revisited — a finger that starts on the store and slides onto the grass is still
+scrolling the store. A pinch needs *two* unclaimed touches, so a second finger
+cannot tear a banana out of the player's hand. Adding the drag-and-drop harvest
+of a later increment adds a place harvest claims, and the camera gives it up
+without knowing the node exists.
+
+*Zoom is continuous during a pinch and settles onto a whole step on release.*
+The ground is a vertex-coloured mesh and takes any scale; it is the sprites that
+crawl off the texel grid, and a gesture is the one moment the player is looking
+at their own fingers rather than at a monkey's texels. Rest is when the grid
+shows, so rest is where it is enforced.
+
+*Texel snapping is measured from the board, not from the window.* `snap` used to
+round an absolute screen position, and `origin` is not a multiple of `zoom` — a
+fixed sub-pixel bias nobody could see on a fixed board, and a per-frame one that
+makes the whole cast jump in zoom-sized steps against smoothly sliding terrain
+the moment the player can pan. `board_snapped` quantises the offset from the
+origin instead, and the origin itself is rounded to whole pixels.
+
+*The pan clamp is the played ground, not the map.* The focus is clamped to the
+box containing the town centre, the home tree and every grove, inflated by
+twelve metres. A map-sized leash still lets a player flick into forty metres of
+identical jungle with no way of knowing which way is back; this one lengthens as
+more of the map is worked, so it fits "fill out the map over their playtime"
+without ever losing the village.
+
+*The floor is how big a monkey is, not how much map fits.* A monkey is 22 texels,
+so zoom 2 renders it 44 logical pixels. Fitting the whole 69×69 board on a phone
+would need about zoom 0.3 and a six-pixel monkey: the entire map visible and
+nothing on it worth looking at.
+
+Two limits are stated here rather than left to be rediscovered. **The board opens
+at its floor**, so pinching outwards on a fresh board does nothing. It sits there
+because the opening hand-harvest drag (D24) and the three support stations must
+all be inside the safe area, and on an 844×390 landscape phone — the tightest
+safe area the game supports, 286 px square — that fails at any zoom above 2. And
+**the village is wider than a phone at that zoom**: the projected span from the
+home tree to the stall exceeds the safe area at *any* focus, so the opening frame
+guarantees the interaction — home tree, town centre, support stations — and lets
+the hut sit just off the right edge, one short drag away. The alternative was
+pulling the stall back towards the delivery point it was deliberately moved off
+(D25), trading a known-good property for a framing nicety.
+
+The support stations moved from a line out from the delivery point (five, eleven
+and five metres) onto an 8.2 m ring at bearings chosen for *projected*
+separation, which the isometric fold makes a different question from ground
+separation. The line separated its members on screen only because the far one
+was twice as far out as the near one, and the eleven-metre station left the
+screen entirely at the camera's opening zoom — a chef the player had paid for,
+drawing wages somewhere they could not see.
 
 ---
 

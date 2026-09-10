@@ -287,11 +287,8 @@ pub(crate) fn sync_support_avatars(
         let spread = slot_offset_texels(avatar.slot, per_role) / METRES_TO_TEXELS;
         let point = layout.support_point(avatar.role, spread);
         let half_height = FRAME_SIZE as f32 * 0.5 * scale;
-        let screen = layout.board(point);
 
-        transform.translation = Vec3::new(
-            layout.snap(screen.x),
-            layout.snap(screen.y + half_height),
+        transform.translation = layout.board_snapped(point, half_height).extend(
             // Bounded, so a wide fan can never sort in front of a role standing
             // genuinely nearer the viewer.
             isometric::stand_z(point, (avatar.slot % 8) as f32 * isometric::NUDGE_STEP),
@@ -550,19 +547,31 @@ mod tests {
     }
 
     #[test]
-    fn every_support_avatar_stays_inside_the_board() {
+    fn every_support_avatar_is_on_screen_when_the_game_opens() {
         // Stations are ground positions in metres, so they have to be projected
-        // before being compared against a board measured in pixels. Comparing
+        // before being compared against anything measured in pixels. Comparing
         // the two directly, as this did when `support_stand` changed units,
         // passes by coincidence and asserts nothing.
-        let layout = SceneLayout::default();
-        let half = layout.scene_side() * 0.5;
-        for (role, at) in stations(&layout) {
-            let screen = layout.board(at) - layout.scene_center();
-            assert!(
-                screen.x.abs() < half && screen.y.abs() < half,
-                "{role:?} projects to {screen:?}, outside a board of {half}"
-            );
+        //
+        // The bound is the *safe area* rather than a square of the window: with
+        // a camera the player drives, "on the board" is no longer a fixed
+        // rectangle, and what the player is owed is that the staff they paid
+        // for are visible from where the game puts them at the start.
+        for viewport in [
+            Vec2::new(320.0, 568.0),
+            Vec2::new(390.0, 844.0),
+            Vec2::new(844.0, 390.0),
+            Vec2::new(1280.0, 720.0),
+        ] {
+            let layout = SceneLayout::for_viewport(viewport);
+            let safe = layout.safe_area();
+            for (role, at) in stations(&layout) {
+                let screen = layout.board(at);
+                assert!(
+                    safe.contains(screen),
+                    "{viewport:?}: {role:?} opens at {screen:?}, outside the safe area {safe:?}"
+                );
+            }
         }
     }
 

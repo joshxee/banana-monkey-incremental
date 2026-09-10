@@ -146,10 +146,14 @@ impl Lane {
         (self.0 / LANES % SPREAD) as f32 * 1.2 - 2.4
     }
 
-    /// Metres to either side of the route's centre line, so the rows read as a
-    /// crowd walking together rather than a queue.
+    /// Metres towards the viewer from the route's centre line, so the rows read
+    /// as a crowd walking together rather than a queue.
+    ///
+    /// Row zero is the *front* row, so its offset is the largest: which
+    /// direction across the route that actually is depends on the route's
+    /// bearing, and [`near_side`] is what turns it into a side.
     fn lane_metres(self) -> f32 {
-        (self.row() as f32 - (LANES as f32 - 1.0) * 0.5) * LANE_SPACING
+        ((LANES as f32 - 1.0) * 0.5 - self.row() as f32) * LANE_SPACING
     }
 
     /// A stable, bounded separation for two actors that would otherwise sort
@@ -342,23 +346,40 @@ fn walk_step(route: &Route, fraction: f64, sideways: f32, forward: f32) -> (Vec2
 
 /// Where a walker of a given lane stands, and which way it faces.
 fn walk_point(route: &Route, fraction: f64, lane: Lane) -> (Vec2, Vec2) {
-    walk_step(route, fraction, lane.lane_metres(), lane.stagger_metres())
+    walk_step(
+        route,
+        fraction,
+        near_side(route) * lane.lane_metres(),
+        lane.stagger_metres(),
+    )
+}
+
+/// Which way `walk_step`'s "across" leans towards the viewer, as +1 or -1.
+///
+/// Every offset across the route — the three worker rows and the cart's bay —
+/// is written as *metres towards the viewer* and turned into a side by this.
+/// A fixed sign instead puts the front row at the front on this map and at the
+/// back on one that runs the other way, so the shade cue reads backwards and a
+/// cart parks behind the queue it is supposed to lead.
+///
+/// Taken from the route's end-to-end bearing rather than from the heading at
+/// the sampled point, and that is the important half. Sampled per point, a
+/// route that bends through the bearing where "across" is flat on screen would
+/// flip the whole crowd to the other side of the path mid-stride.
+fn near_side(route: &Route) -> f32 {
+    let ground = |at: bevy::math::DVec2| Vec2::new(at.x as f32, at.y as f32);
+    let along = ground(route.sample(1.0).at) - ground(route.sample(0.0).at);
+    let across = Vec2::new(-along.y, along.x);
+    if isometric::depth(across) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    }
 }
 
 /// Where a cart stands, and which way it faces.
-///
-/// Which side of the route leans towards the viewer depends on the route's
-/// *bearing*, so the offset cannot be a constant: a fixed sign puts the cart in
-/// front of the queue on this map and behind it on one that runs the other way.
 fn cart_point(route: &Route, fraction: f64) -> (Vec2, Vec2) {
-    let (_, along) = walk_step(route, fraction, 0.0, 0.0);
-    let across = Vec2::new(-along.y, along.x);
-    let nearer = if isometric::depth(across) >= 0.0 {
-        CART_LANE_METRES
-    } else {
-        -CART_LANE_METRES
-    };
-    walk_step(route, fraction, nearer, 0.0)
+    walk_step(route, fraction, near_side(route) * CART_LANE_METRES, 0.0)
 }
 
 /// Everything `position_workers` touches on one worker.
@@ -399,14 +420,10 @@ pub fn position_workers(
         let facing_right = isometric::project(travel).x >= 0.0;
 
         let back = lane.row() as f32;
-        let screen = layout.board(point);
         let half_height = FRAME_SIZE as f32 * 0.5 * layout.world_scale();
 
-        let translation = Vec3::new(
-            layout.snap(screen.x),
-            layout.snap(screen.y + half_height),
-            isometric::stand_z(point, lane.nudge()),
-        );
+        let screen = layout.board_snapped(point, half_height);
+        let translation = screen.extend(isometric::stand_z(point, lane.nudge()));
         let scale = Vec3::splat(layout.world_scale());
         // Written only on change: a worker stands still through Pick and
         // Unload, and transform propagation is `Changed<Transform>`-driven.
@@ -509,26 +526,45 @@ mod tests {
         // property is the one that actually matters: a crowd walking together
         // spreads perpendicular to wherever the route happens to point, and the
         // near lane draws over the far one.
-        let route = WorkedRoute::start();
-        let placed: Vec<(Vec2, Vec2)> = (0..LANES)
-            .map(|row| walk_point(&route.0, 0.5, Lane(row)))
-            .collect();
+        //
+        // On *both* bearings, which is the whole reason the second route is
+        // here: `near_side` is -1 on the shipped walk and +1 on this one, and a
+        // fixed sign satisfies one of them while drawing the front row at the
+        // back on the other. Nothing on the shipped map can see that, because
+        // the shipped map has one bearing.
+        for route in [WorkedRoute::start().0, bent_route()] {
+            assert!(!near_side(&route).is_nan());
+            let placed: Vec<(Vec2, Vec2)> = (0..LANES)
+                .map(|row| walk_point(&route, 0.5, Lane(row)))
+                .collect();
 
-        for pair in placed.windows(2) {
-            // Rows run front to back, so each one draws behind the last - which
-            // is what the shade cue in `position_workers` is also saying.
-            assert!(
-                isometric::stand_z(pair[1].0, 0.0) < isometric::stand_z(pair[0].0, 0.0),
-                "lanes are not depth ordered front to back: {placed:?}"
-            );
-            // Spread is across the walk, not along it: a lane must not make one
-            // monkey's journey longer than another's.
-            let offset = (pair[1].0 - pair[0].0).dot(pair[0].1);
-            assert!(
-                offset.abs() < 1e-3,
-                "a lane pushed a monkey along its route by {offset}"
-            );
+            for pair in placed.windows(2) {
+                // Rows run front to back, so each one draws behind the last -
+                // which is what the shade cue in `position_workers` is also
+                // saying.
+                assert!(
+                    isometric::stand_z(pair[1].0, 0.0) < isometric::stand_z(pair[0].0, 0.0),
+                    "lanes are not depth ordered front to back: {placed:?}"
+                );
+                // Spread is across the walk, not along it: a lane must not make
+                // one monkey's journey longer than another's.
+                let offset = (pair[1].0 - pair[0].0).dot(pair[0].1);
+                assert!(
+                    offset.abs() < 1e-3,
+                    "a lane pushed a monkey along its route by {offset}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn the_two_test_routes_lean_opposite_ways() {
+        // The guard on the test above: if both routes ever agreed on a side it
+        // would go on passing while asserting half of what it says it does.
+        assert_eq!(
+            near_side(&WorkedRoute::start().0) * near_side(&bent_route()),
+            -1.0
+        );
     }
 
     #[test]
@@ -892,12 +928,9 @@ pub fn position_carts(
         // worth of ground towards the viewer, which the depth rule then
         // handles on its own.
         let (point, _) = cart_point(&route.0, fraction);
-        let screen = layout.board(point);
-        transform.translation = Vec3::new(
-            layout.snap(screen.x),
-            layout.snap(screen.y + CART_BOX_TEXELS.y * 0.5 * scale),
-            isometric::stand_z(point, isometric::NUDGE_STEP),
-        );
+        transform.translation = layout
+            .board_snapped(point, CART_BOX_TEXELS.y * 0.5 * scale)
+            .extend(isometric::stand_z(point, isometric::NUDGE_STEP));
         transform.scale = Vec3::splat(scale);
         facing_left = !matches!(cycle.segment(), Segment::ToDepot) || boarding.is_some();
 
