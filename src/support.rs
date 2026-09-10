@@ -402,18 +402,18 @@ pub(crate) fn sync_support_badges(
         // projected like every other station. Reading it as screen pixels
         // pinned every badge to the same corner of the window whatever the
         // role was doing.
-        let screen = layout.board(layout.support_point(badge.0, 0.0));
-        transform.translation = Vec3::new(
-            // Centred over the role's fan and lifted clear of it. Placed
-            // *beside* the group it covered the outermost monkeys - and at a
-            // crowded deposit those were the chefs' hats, which are the only
-            // thing telling that role apart.
-            layout.snap(screen.x),
-            layout.snap(screen.y + (FRAME_SIZE as f32 * 0.5 + 13.0) * scale),
+        transform.translation = layout
+            .board_snapped(
+                layout.support_point(badge.0, 0.0),
+                // Centred over the role's fan and lifted clear of it. Placed
+                // *beside* the group it covered the outermost monkeys - and at
+                // a crowded deposit those were the chefs' hats, which are the
+                // only thing telling that role apart.
+                (FRAME_SIZE as f32 * 0.5 + 13.0) * scale,
+            )
             // A badge counts monkeys rather than standing among them, so it
             // belongs over the board, not in it.
-            isometric::OVERLAY_Z,
-        );
+            .extend(isometric::OVERLAY_Z);
         // Tracks the world scale so a phone does not get a badge twice its
         // intended size against a 32 px monkey - but only partly, because a
         // label that scaled fully would dominate the monkeys it counts.
@@ -544,6 +544,31 @@ mod tests {
                 at.distance(from + span * along)
             })
             .fold(f32::INFINITY, f32::min)
+    }
+
+    #[test]
+    fn support_never_stands_in_the_hand_harvest_target() {
+        // The home tree is the node the player picks by hand (D24), and its
+        // crown is the drag's start. A station under it puts a research desk
+        // inside the thing the player is reaching for - which is where the
+        // technologist landed the first time these were moved onto a ring,
+        // because the search that placed them only knew about the walk and the
+        // stall.
+        for viewport in [
+            Vec2::new(320.0, 568.0),
+            Vec2::new(390.0, 844.0),
+            Vec2::new(844.0, 390.0),
+            Vec2::new(1280.0, 720.0),
+        ] {
+            let layout = SceneLayout::for_viewport(viewport);
+            for (role, at) in stations(&layout) {
+                let gap = at.distance(layout.home_tree());
+                assert!(
+                    gap > 4.5,
+                    "{viewport:?}: {role:?} stands {gap} m from the home tree"
+                );
+            }
+        }
     }
 
     #[test]

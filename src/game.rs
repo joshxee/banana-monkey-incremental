@@ -806,13 +806,18 @@ impl SceneLayout {
     ///
     /// All three now sit 8.2 metres out at bearings chosen for *projected*
     /// separation, which the isometric fold makes a different question from
-    /// ground separation. The closest two are 88 px apart at unit zoom against
-    /// a fan half-width of 21 — a fifth further than the line they replace —
-    /// while every avatar of every fan is inside the safe area at the opening
-    /// camera on every viewport, at least 2.8 m clear of the walk and 9 m
-    /// clear of the stall. `every_support_avatar_is_on_screen_when_the_game_opens`
-    /// and `support_never_stands_on_the_worker_route` are what hold that, and
-    /// they check the *fan*, not just the station: it is the outermost chef
+    /// ground separation. The closest two are 85 px apart at unit zoom against
+    /// a fan half-width of 21 — nearly a fifth further than the line they
+    /// replace — while every avatar of every fan is inside the safe area at the
+    /// opening camera on every viewport, and stands at least 2.8 m clear of the
+    /// walk, 9 m clear of the stall and 5.9 m clear of the home tree. That last
+    /// one is a real constraint, not a courtesy: the home tree carries the
+    /// hand-harvest drag target, so a station under its crown puts a monkey
+    /// inside the thing the player is trying to grab.
+    /// `every_support_avatar_is_on_screen_when_the_game_opens`,
+    /// `support_never_stands_on_the_worker_route` and
+    /// `support_never_stands_in_the_hand_harvest_target` hold those, and they
+    /// check the *fan* rather than just the station: it is the outermost chef
     /// that leaves the screen first.
     pub(crate) fn support_stand(self, role: SupportRole) -> Vec2 {
         let offset = match role {
@@ -826,8 +831,11 @@ impl SceneLayout {
             // is looking for when the banner reads HUNGRY.
             SupportRole::Chef => Vec2::new(4.1, 7.1),
             // Off to one side, clear of the ground between the depot and the
-            // kitchen: research is the one job with no traffic of its own.
-            SupportRole::Technologist => Vec2::new(-8.02, 1.7),
+            // kitchen: research is the one job with no traffic of its own. Its
+            // bearing is also the one the home tree constrains - swung further
+            // round, the research desk stands underneath the tree the player
+            // hand-harvests from, inside the drag target.
+            SupportRole::Technologist => Vec2::new(-6.63, 4.82),
         };
         self.town_centre + offset
     }
@@ -843,7 +851,13 @@ impl SceneLayout {
     ///
     /// A distance, never an absolute screen coordinate: see
     /// [`Self::board_snapped`] for why the difference is the whole point.
-    pub(crate) fn snap(self, offset: f32) -> f32 {
+    ///
+    /// Private, and that is the point. Every caller outside this module wants
+    /// `board_snapped`; the one that reached for this instead spent a release
+    /// quantising an absolute screen position, and a second one was still doing
+    /// it after the first was fixed. There is no correct use of this from
+    /// another module, so there is no way to reach it from one.
+    fn snap(self, offset: f32) -> f32 {
         (offset / self.zoom).round() * self.zoom
     }
 
