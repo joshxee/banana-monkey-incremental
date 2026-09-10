@@ -6,8 +6,8 @@ local options = ... or {}
 local spr = axi.new(64, 64, { mode = "rgb" })
 spr:deleteLayer(spr.layers[1])
 local ink, plum, light, skin, tan = "#3D3333", "#593E47", "#7A5859", "#734C44", "#BCAD9F"
-axi.setPalette({ink, plum, light, skin, tan})
-local gait = options.animate and assert(loadfile("assets/Monkey/Spider Worker/gait_poses.lua"))()
+axi.setPalette(options.palette or {ink, plum, light, skin, tan})
+local gait = options.gait or (options.animate and assert(loadfile("assets/Monkey/Spider Worker/gait_poses.lua"))())
 local part, pose = "",nil
 local function point(x,y)
   if pose then return gait.project(pose,part,x,y) end
@@ -51,10 +51,11 @@ bg.isVisible = false
 local guides = axi.layer("Guides")
 path(axi.cel(guides,1), {{32,44},{48,52},{32,60},{16,52},{32,44}}, tan)
 guides.isVisible = false
+if options.setupLayers then options.setupLayers(spr) end
 
 local function draw(frame)
 part = "tail"
-local tail = axi.cel(axi.layer("Tail"),frame)
+local tail = axi.cel(axi.layer(options.tailLayer and options.tailLayer(pose) or "Tail"),frame)
 -- Thick root, narrow raised shaft and an open inward curl.
 poly(tail, {{29,38},{26,43},{21,40},{18,37},{16,34},{14,30},{12,23},{11,16},{10,12},{10,8},{12,5},{15,3},{20,3},{23,5},{25,8},{25,12},{23,15},{19,16},{16,14},{15,11},{17,9},{19,9},{18,11},{18,12},{20,13},{22,12},{22,9},{20,7},{16,6},{13,8},{13,12},{15,17},{16,24},{18,30},{19,33},{22,35},{25,37}}, ink)
 -- Continuous structural stroke at the bend: overlapping segments prevent
@@ -66,9 +67,11 @@ path(tail, {{14,17},{16,25},{17,28}}, light)
 
 part = "farLeg"
 local far = axi.cel(axi.layer("Far limbs"),frame)
+if not (options.drawLeg and options.drawLeg(far,pose,false)) then
 poly(far, {{34,35},{38,38},{40,43},{37,48},{36,50},{40,51},{41,53},{37,54},{33,53},{32,50},{34,44},{31,40}}, ink)
 poly(far, {{35,39},{37,41},{37,44},{35,48},{34,50},{33,49},{35,43}}, plum)
 poly(far, {{35,51},{38,51},{39,52},{35,52}}, skin)
+end
 part = "farArm"
 poly(far, {{41,25},{44,28},{44,35},{46,41},{46,47},{44,50},{41,49},{42,46},{43,46},{42,40},{40,34},{39,29}}, ink)
 path(far, {{42,29},{42,34},{44,41},{44,45}}, plum)
@@ -76,6 +79,9 @@ path(far, {{44,47},{43,48}}, skin)
 
 part = "body"
 local body = axi.cel(axi.layer("Body"),frame)
+if options.drawBody and pose.direction ~= "SE" then
+  options.drawBody(body, pose)
+else
 poly(body, {{33,20},{39,20},{42,25},{40,31},{36,35},{35,40},{31,43},{26,42},{24,38},{25,31},{28,25}}, ink)
 poly(body, {{32,22},{37,22},{36,26},{32,30},{29,35},{28,40},{26,38},{27,31},{29,26}}, plum)
 poly(body, {{32,23},{34,23},{31,27},{29,31},{28,32},{29,27}}, light)
@@ -96,9 +102,11 @@ line(body,43,24,44,24,ink)
 line(body,42,23,42,23,tan)
 line(body,43,26,43,26,tan)
 line(body,36,22,36,23,skin)
+end
 
 part = "nearLeg"
 local near = axi.cel(axi.layer("Near limbs"),frame)
+if not (options.drawLeg and options.drawLeg(near,pose,true)) then
 poly(near, {{28,37},{33,38},{34,42},{32,47},{31,52},{33,54},{36,55},{36,57},{32,58},{28,57},{26,55},{27,51},{28,47},{27,42}}, ink)
 poly(near, {{29,40},{31,40},{31,43},{29,48},{29,52},{28,54},{27,54},{29,46}}, plum)
 path(near, {{29,41},{29,44},{28,47}}, light)
@@ -106,13 +114,16 @@ poly(near, {{29,54},{31,54},{34,56},{32,57},{29,56}}, skin)
 line(near,29,55,30,55,light)
 line(near,31,56,31,56,ink)
 line(near,33,56,33,56,ink)
+end
 part = "nearArm"
+local arm = options.armLayer and axi.cel(axi.layer(options.armLayer(pose)),frame) or near
 -- Long near arm hangs clear of the thigh, ending in a compact hooked hand.
-poly(near, {{33,25},{37,25},{38,28},{36,34},{38,39},{39,45},{39,50},{37,53},{34,52},{34,50},{36,50},{36,46},{35,41},{32,36},{30,32},{31,28}}, ink)
-poly(near, {{33,27},{35,26},{35,30},{33,33},{35,38},{37,42},{37,47},{36,47},{35,41},{32,36},{31,32}}, plum)
-path(near, {{33,28},{32,31},{32,33}}, light)
-path(near, {{35,39},{36,42},{36,44}}, light)
-path(near, {{37,49},{37,51},{36,51}}, skin)
+poly(arm, {{33,25},{37,25},{38,28},{36,34},{38,39},{39,45},{39,50},{37,53},{34,52},{34,50},{36,50},{36,46},{35,41},{32,36},{30,32},{31,28}}, ink)
+poly(arm, {{33,27},{35,26},{35,30},{33,33},{35,38},{37,42},{37,47},{36,47},{35,41},{32,36},{31,32}}, plum)
+path(arm, {{33,28},{32,31},{32,33}}, light)
+path(arm, {{35,39},{36,42},{36,44}}, light)
+path(arm, {{37,49},{37,51},{36,51}}, skin)
+if options.drawPayload then options.drawPayload(frame, pose) end
 end
 
 if options.animate then
@@ -120,10 +131,11 @@ if options.animate then
   for f,p in ipairs(gait.frames) do
     pose = p
     draw(f)
+    if options.finishFrame then options.finishFrame(f, p, spr) end
     axi.duration(f,p.ms)
   end
   for _,clip in ipairs(gait.clips) do axi.tag(clip.name,clip.first,clip.last,{direction="forward"}) end
-  axi.save("assets/Monkey/Spider Worker/spider_monkey_animations.ase")
+  axi.save(options.output or "assets/Monkey/Spider Worker/spider_monkey_animations.ase")
 else
   draw(1)
   spr.frames[1].duration = 0.25
