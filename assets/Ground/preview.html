@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jungle & town floor — art review</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #20282c; color: #e9eee8; font: 15px/1.5 system-ui, sans-serif; }
+  header { padding: 20px 28px; border-bottom: 1px solid #485250; }
+  h1 { font-size: 21px; margin: 0 0 4px; font-weight: 600; }
+  p { margin: 0; color: #b8c7c0; }
+  nav { display: flex; gap: 8px; flex-wrap: wrap; padding: 16px 28px; }
+  button { font: inherit; border: 1px solid #687972; border-radius: 6px; padding: 7px 13px; background: transparent; color: inherit; cursor: pointer; }
+  button[aria-pressed="true"] { background: #a4c5af; color: #20282c; border-color: #a4c5af; }
+  button:focus-visible { outline: 3px solid #fdd179; outline-offset: 2px; }
+  #viewport { overflow: auto; margin: 0 28px; border: 1px solid #485250; max-height: 75vh; background: #303843; }
+  img { display: block; image-rendering: pixelated; max-width: none; }
+  footer { padding: 16px 28px 24px; color: #b8c7c0; max-width: 1000px; }
+  strong { color: #e9eee8; }
+</style>
+<header><h1>Jungle & town floor</h1><p>Quiet sage ground, clay dirt and connected moss margins. Original workers and bananas shown at native scale.</p></header>
+<nav aria-label="Art view">
+  <button data-view="ground-context.png" aria-pressed="true">With subjects</button>
+  <button data-view="ground-assembled.png" aria-pressed="false">Ground only</button>
+  <button data-view="ground-atlas.png" aria-pressed="false">Tile atlas</button>
+  <button data-zoom="1" aria-pressed="true">1× native</button>
+  <button data-zoom="2" aria-pressed="false">2× pixels</button>
+  <button data-zoom="4" aria-pressed="false">4× pixels</button>
+</nav>
+<main id="viewport"><img id="art" src="ground-context.png" alt="Jungle and town ground with native-scale monkeys and bananas"></main>
+<footer><strong>30-second visual check:</strong> look for readable tails, hands and bananas on both surfaces. Switch to ground only to check for a visible tile grid or repeating border. The atlas includes 16 corner arrangements × 4 variations. These are asset exports; runtime integration is separate.</footer>
+<script>
+  const art = document.getElementById('art');
+  let zoom = 1;
+  const resize = () => { art.style.width = `${art.naturalWidth * zoom}px`; };
+  art.addEventListener('load', resize);
+  if (art.complete) resize();
+  document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => {
+    document.querySelectorAll('[data-view]').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
+    art.src = button.dataset.view;
+    art.alt = button.textContent + ' — jungle and town floor art';
+  }));
+  document.querySelectorAll('[data-zoom]').forEach(button => button.addEventListener('click', () => {
+    document.querySelectorAll('[data-zoom]').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
+    zoom = Number(button.dataset.zoom); resize();
+  }));
+</script>
+</html>
