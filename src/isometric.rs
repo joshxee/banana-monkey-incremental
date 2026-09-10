@@ -86,6 +86,29 @@ const PATH: Color = Color::srgb(0.84, 0.73, 0.51);
 const TOWN: Color = Color::srgb(0.64, 0.79, 0.46);
 const CLEARING: Color = Color::srgb(0.60, 0.71, 0.43);
 
+/// The delivery point, trodden into bare earth.
+///
+/// The town centre used to draw *nothing*. Every delivery in the game lands on
+/// it, the hand-harvest drag ends on it, and a new player opening the game was
+/// shown a flat green lawn with the word VILLAGE floating over it and asked to
+/// drag a banana onto the label. The stall stands eight metres aside so it does
+/// not swallow the arriving queue (D25), and eight metres is off the side of a
+/// phone at the camera's opening zoom - so the one thing that could have named
+/// the spot was the one thing not on screen.
+///
+/// Painted into the ground mesh rather than built as a prop, which is what
+/// makes it free: it is the tile colour of nine tiles, so it costs no draw
+/// call, no sorting, and above all no *span* - it sits exactly at the point the
+/// board is aimed at, so it cannot push anything else off the screen.
+const DEPOT_PAD: Color = Color::srgb(0.77, 0.66, 0.50);
+/// Grass scuffed by traffic, so the pad has an edge rather than a border.
+const DEPOT_EDGE: Color = Color::srgb(0.71, 0.73, 0.48);
+
+/// How far the trodden ground reaches from the delivery point, in tiles.
+const DEPOT_RADIUS: i32 = 1;
+/// And how far the scuffing around it reaches.
+const DEPOT_EDGE_RADIUS: i32 = 2;
+
 /// How tall the jungle stands, in metres. Enough to read as a wall a monkey
 /// could not step over, which is what the map says it is.
 const WALL_HEIGHT: f32 = 3.0;
@@ -193,6 +216,26 @@ fn terrain_colour(terrain: Terrain) -> Color {
     }
 }
 
+/// The colour of one tile of ground, with the depot trodden into it.
+///
+/// Only walkable ground is trodden: a depot painted over the jungle wall would
+/// put bare earth up the side of a three-metre hedge.
+fn ground_colour(map: &Map, tile: Tile) -> Color {
+    let terrain = map.terrain(tile);
+    if !terrain.passable() {
+        return terrain_colour(terrain);
+    }
+    let centre = map.town_centre();
+    let reach = (tile.x - centre.x).abs().max((tile.y - centre.y).abs());
+    if reach <= DEPOT_RADIUS {
+        DEPOT_PAD
+    } else if reach <= DEPOT_EDGE_RADIUS {
+        DEPOT_EDGE
+    } else {
+        terrain_colour(terrain)
+    }
+}
+
 /// A mesh under construction, in projected space with per-vertex colour.
 ///
 /// Vertex colours are what let the entire ground plane be one draw call:
@@ -245,7 +288,7 @@ fn ground_mesh(map: &Map) -> Mesh {
     for y in 0..map.height() {
         for x in 0..map.width() {
             let tile = Tile::new(x, y);
-            builder.quad(diamond(tile), terrain_colour(map.terrain(tile)));
+            builder.quad(diamond(tile), ground_colour(map, tile));
         }
     }
     builder.build()
@@ -591,6 +634,32 @@ mod tests {
         // Square to the walk, so nobody has to route through the building.
         let outbound = (tile_centre(map.worked_grove().tile) - centre).normalize();
         assert!((stall - centre).normalize().dot(outbound).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_delivery_point_is_visible_ground_rather_than_bare_lawn() {
+        // A new player is asked to drag a banana to the town centre. Before the
+        // depot was trodden in, the town centre drew nothing at all - the same
+        // green as the forty tiles around it - so the drag's target was a word.
+        let map = crate::map::start();
+        let centre = map.town_centre();
+        assert_eq!(ground_colour(map, centre), DEPOT_PAD);
+        assert_ne!(ground_colour(map, centre), terrain_colour(Terrain::Town));
+        // With an edge, so it reads as worn rather than as a painted rectangle.
+        let edge = Tile::new(centre.x + DEPOT_EDGE_RADIUS, centre.y);
+        assert_eq!(ground_colour(map, edge), DEPOT_EDGE);
+        // And it stops: the town is still the town a few tiles out.
+        let away = Tile::new(centre.x + DEPOT_EDGE_RADIUS + 1, centre.y);
+        assert_eq!(ground_colour(map, away), terrain_colour(map.terrain(away)));
+        // It never climbs the jungle wall, which is not ground anyone treads.
+        for y in 0..map.height() {
+            for x in 0..map.width() {
+                let tile = Tile::new(x, y);
+                if !map.terrain(tile).passable() {
+                    assert_eq!(ground_colour(map, tile), terrain_colour(map.terrain(tile)));
+                }
+            }
+        }
     }
 
     #[test]

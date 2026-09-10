@@ -248,12 +248,19 @@ pub fn all() -> Vec<Scenario> {
             placement: Placement::Restored { seed: Some(42) },
         },
         Scenario {
+            name: "first-drag",
+            summary: "the opening frame, and nothing else: watch it at 390x844 and at \
+                      844x390. A stranger should be able to point at the banana and at \
+                      where it goes within five seconds, without touching anything",
+            run: Seed::default().run(),
+            placement: Placement::Restored { seed: Some(1) },
+        },
+        Scenario {
             name: "survey",
-            summary: "for the camera: monkeys spread down the whole walk, so there is \
-                      something to find at both ends. Drag the grass to pan, wheel or \
-                      +/- to zoom, C to recentre; the board should follow the cursor \
-                      exactly, refuse to leave the village behind, and come to rest on \
-                      a whole zoom step with no shimmer; first arrivals pay nothing",
+            summary: "for the camera: monkeys spread down the whole walk. Drag the \
+                      grass - the metre under the cursor should stay under it, and the \
+                      whole crowd should slide with the ground and not jitter against \
+                      it; first arrivals pay nothing",
             run: Seed {
                 bananas: 400.0,
                 workers: 18,

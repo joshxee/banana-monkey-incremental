@@ -155,6 +155,20 @@ pub(crate) struct BadgeLabel;
 /// Soil-dark, so cream text on it stays readable over sky, sign and white hat
 /// alike.
 const BADGE_PLATE: Color = Color::srgb(0.24, 0.12, 0.06);
+/// The plate's size at unit zoom. Scaled by [`badge_scale`], along with the
+/// font size, so the two stay the same shape at every zoom.
+const BADGE_PLATE_TEXELS: Vec2 = Vec2::new(26.0, 14.0);
+/// The badge's font size at unit zoom.
+const BADGE_FONT: f32 = 10.0;
+
+/// How much bigger a badge is drawn than its unit-zoom size.
+///
+/// Tracks the world scale so a phone does not get a badge twice its intended
+/// size against a 32 px monkey - but only partly, because a label that scaled
+/// fully would dominate the monkeys it counts.
+fn badge_scale(layout: &SceneLayout) -> f32 {
+    (layout.world_scale() * 0.6).max(0.8)
+}
 
 impl SupportRole {
     /// Sprite tint, so three identical monkeys are still three distinguishable
@@ -357,8 +371,8 @@ pub(crate) fn sync_support_badges(
     mut commands: Commands,
     layout: Res<SceneLayout>,
     staff: Res<Staff>,
-    mut badges: Query<(&SupportBadge, &mut Transform, &mut Visibility)>,
-    mut labels: Query<(&ChildOf, &mut Text2d), With<BadgeLabel>>,
+    mut badges: Query<(&SupportBadge, &mut Transform, &mut Visibility, &mut Sprite)>,
+    mut labels: Query<(&ChildOf, &mut Text2d, &mut TextFont), With<BadgeLabel>>,
 ) {
     let existing: Vec<SupportRole> = badges.iter().map(|(badge, ..)| badge.0).collect();
     for role in SupportRole::ALL {
@@ -367,7 +381,7 @@ pub(crate) fn sync_support_badges(
                 .spawn((
                     SupportBadge(role),
                     BadgePlate,
-                    Sprite::from_color(BADGE_PLATE, Vec2::new(26.0, 14.0)),
+                    Sprite::from_color(BADGE_PLATE, BADGE_PLATE_TEXELS),
                     Transform::default(),
                     Visibility::Hidden,
                 ))
@@ -375,7 +389,7 @@ pub(crate) fn sync_support_badges(
                     BadgeLabel,
                     Text2d::new(String::new()),
                     TextColor(CREAM),
-                    TextFont::from_font_size(10.0),
+                    TextFont::from_font_size(BADGE_FONT),
                     // In front of its own plate, and in front of the monkeys.
                     Transform::from_xyz(0.0, 0.0, 0.01),
                 ));
@@ -383,8 +397,9 @@ pub(crate) fn sync_support_badges(
     }
 
     let scale = layout.world_scale();
+    let plate = BADGE_PLATE_TEXELS * badge_scale(&layout);
     let per_role = avatars_per_role(&layout);
-    for (badge, mut transform, mut visibility) in &mut badges {
+    for (badge, mut transform, mut visibility, mut sprite) in &mut badges {
         let hired = staff.count(badge.0);
         // Only once the sprites stop being able to carry the count. A "x1" on a
         // lone chef is noise, and "x3" over three visible chefs reads as nine.
@@ -396,6 +411,9 @@ pub(crate) fn sync_support_badges(
         };
         if !shown {
             continue;
+        }
+        if sprite.custom_size != Some(plate) {
+            sprite.custom_size = Some(plate);
         }
 
         // `support_point` answers in metres on the ground, so this has to be
@@ -414,19 +432,29 @@ pub(crate) fn sync_support_badges(
             // A badge counts monkeys rather than standing among them, so it
             // belongs over the board, not in it.
             .extend(isometric::OVERLAY_Z);
-        // Tracks the world scale so a phone does not get a badge twice its
-        // intended size against a 32 px monkey - but only partly, because a
-        // label that scaled fully would dominate the monkeys it counts.
-        transform.scale = Vec3::splat((scale * 0.6).max(0.8));
+        // Scale the *plate*, never the glyph. `Text2d` rasterises at its font
+        // size and is then resampled by the transform, so scaling the badge up
+        // took a 10 px rendering and smeared it: at the camera's opening zoom
+        // "x6" read as "x fi". The font size is set from the same factor
+        // instead, in `sync_badge_text`, and this stays at 1.
+        transform.scale = Vec3::ONE;
     }
 
-    for (parent, mut text) in &mut labels {
+    // Rasterised at the size it is drawn at, so it stays a crisp glyph instead
+    // of a resampled 10 px one. Rounded, because a font size of 17.3 px picks a
+    // different hinting than 17 and the badge shimmers as the player pinches.
+    let font = (BADGE_FONT * badge_scale(&layout)).round().max(BADGE_FONT);
+    for (parent, mut text, mut text_font) in &mut labels {
         let Ok((badge, ..)) = badges.get(parent.parent()) else {
             continue;
         };
         let next = format!("x{}", staff.count(badge.0));
         if text.0 != next {
             text.0 = next;
+        }
+        let sized = bevy::text::FontSize::Px(font);
+        if text_font.font_size != sized {
+            text_font.font_size = sized;
         }
     }
 }

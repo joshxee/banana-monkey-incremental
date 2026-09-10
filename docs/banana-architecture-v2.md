@@ -626,12 +626,27 @@ makes the whole cast jump in zoom-sized steps against smoothly sliding terrain
 the moment the player can pan. `board_snapped` quantises the offset from the
 origin instead, and the origin itself is rounded to whole pixels.
 
-*The pan clamp is the played ground, not the map.* The focus is clamped to the
-box containing the town centre, the home tree and every grove, inflated by
-twelve metres. A map-sized leash still lets a player flick into forty metres of
-identical jungle with no way of knowing which way is back; this one lengthens as
-more of the map is worked, so it fits "fill out the map over their playtime"
-without ever losing the village.
+*The pan clamp is measured from the walk, and it bounds what is on screen
+rather than where the focus is.* The field is the **polyline** through the home
+tree, the town centre and the *worked* grove, with a margin; the slack allowed
+off it shrinks as the player zooms in, capped at whatever keeps the nearest
+point of the walk inside the short side of the safe area. The guarantee is
+therefore "some of the ground your monkeys cover is always on screen" — and
+deliberately not "the village is always on screen", because looking at the
+middle of the route with neither end in frame is a thing a player should be able
+to do.
+
+The two obvious cheaper versions both fail, and both failed here first. A
+map-sized leash lets a player flick into forty metres of identical jungle with
+no way of knowing which way is back. A *bounding box* around the same three
+points is barely better: its corners are two hundred projected pixels from
+anything, and clamping the bare focus into it let ten drags on a phone land on a
+corner of canopy and a screenful of empty sky. The test that was supposed to
+prevent that asserted the clamped focus was nearer a landmark than the
+*diagonal of the box*, which is true by construction — a tautology that passed
+throughout. The grove that is never worked is out of the field for the same
+reason: folding in a node 117 m south stretched the leash half again as far for
+ground nobody has ever been to. It joins the walk the day it is worked.
 
 *The floor is how big a monkey is, not how much map fits.* A monkey is 22 texels,
 so zoom 2 renders it 44 logical pixels. Fitting the whole 69×69 board on a phone
@@ -657,6 +672,30 @@ separation. The line separated its members on screen only because the far one
 was twice as far out as the near one, and the eleven-metre station left the
 screen entirely at the camera's opening zoom — a chef the player had paid for,
 drawing wages somewhere they could not see.
+
+*The delivery point is drawn.* It was not, and that is the flaw the camera made
+impossible to keep ignoring. The town centre is where every delivery lands and
+where the opening hand-harvest drag ends, and it rendered as the same green as
+the forty tiles around it: a new player was shown a lawn with the word VILLAGE
+floating over it and asked to drag a banana onto the label. The one prop that
+could have named the spot — the stall — stands eight metres aside so it does not
+swallow the arriving queue (D25), which is off the side of a phone at the
+opening zoom. A depot is now trodden into the **ground mesh** at the town
+centre: nine tiles of bare earth with a scuffed ring around them. Painting it
+into the terrain rather than building a prop is what makes it free — no draw
+call, no sorting, and above all no *span*, because it sits exactly where the
+board is already aimed and so cannot push anything else off the screen. The
+label reads DEPOT, names the drop target rather than the terrain, and sits a
+monkey's height above the pad instead of six metres over empty sky.
+
+*Floaters carry their own edge.* Every floater colour failed contrast against
+the ground it lands on: town floor is #A3C975 at luminance 0.508 and GOLD is
+0.586, which is 1.14:1 — under the 3:1 floor for large text before the alpha
+fade even begins. The palette was chosen against the cream HUD, not against
+grass. Four INK copies behind each glyph take it to 8.4:1 and fix all four
+floater colours at once, without repainting a palette that is right everywhere
+else. This matters more than it sounds: the floater is the game's primary
+reward feedback.
 
 ---
 
