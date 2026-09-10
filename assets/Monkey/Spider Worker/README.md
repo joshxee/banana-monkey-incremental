@@ -1,5 +1,56 @@
 # Spider worker monkey
 
+## Eight-direction walking and carrying
+
+The latest correction pass reconnects every down-facing ankle and toe contour.
+Rear-facing N/NE/NW arm cels now render below the body, while their dedicated
+`Tail foreground` cels render above it; this keeps the crossing arm occluded and
+the tail readable in front. The carrying variants use the same ordering.
+
+`spider_monkey_directional_walks.aseprite` contains **16 clips / 192 frames**:
+eight empty-handed walks and eight walks holding one banana. Each clip has
+12 frames and a 720 ms loop, timed 70, 60, 50 ms repeated four times. All frames
+use untrimmed transparent 64 × 64 cells with the shared ground anchor (32, 56).
+The original empty-handed SE cycle is preserved pixel for pixel.
+
+| Export | Layout |
+| --- | --- |
+| `spider_monkey_walk_8dir.png` | 768 × 512; 12 columns × 8 direction rows |
+| `spider_monkey_carry_walk_8dir.png` | Identical layout and timing |
+| `spider_monkey_directional_walks.json` | Clip names, source frames, sheet rectangles, timing and anchor |
+| `spider_monkey_8dir_preview.gif` | Looping 2× comparison; walking above carrying |
+| `directional_walks_preview.html` | Paired directions, pause/scrub, speed, native/2×/4× and three grounds |
+
+Rows and preview columns run **N, NE, E, SE, S, SW, W, NW**. Directions are
+screen compass directions: N is up. Diagonal motion follows 2:1 ground axes.
+Tags are `walk_N` … `walk_NW`, followed by `carry_walk_N` … `carry_walk_NW`.
+The five authored views are N, NE, E, SE and S; NW, W and SW are exact pixel
+reflections. Reflection maps pixel x to 63−x, about the canvas boundary x=32.
+Carrying changes one arm into a bent supporting pose, with separate editable
+Banana and Banana grip layers. Body, tail, legs and free arm keep their phase.
+Switch states at the same phase/time offset; these are in-place walks.
+
+Open `directional_walks_preview.html` in a browser and watch for **15 seconds**.
+Then pause, inspect at Native and 4×, and scrub frame 12 → 1. Pass: the feet
+alternate, each direction and banana remain readable, the loop has no snap or
+clipped pixels, and paired feet/tails stay aligned. Review grounds are excluded
+from both game sheets. These assets are not wired into the runtime.
+
+Regenerate from the repository root after setting `ASEPRITE_BIN` to your local
+Aseprite executable:
+
+```powershell
+sprite-axi run 'assets/Monkey/Spider Worker/create_directional_walks.lua'
+sprite-axi run 'assets/Monkey/Spider Worker/export_directional_walks.lua' -f 'assets/Monkey/Spider Worker/spider_monkey_directional_walks.aseprite'
+sprite-axi run 'assets/Monkey/Spider Worker/verify_directional_walks.lua' -f 'assets/Monkey/Spider Worker/spider_monkey_directional_walks.aseprite'
+```
+
+The verifier checks all 192 PNG/master pairs, canonical palette membership,
+binary transparency, margins, exact mirrored views, loop/tag timing, loop
+boundaries, visible fruit, paired state alignment, and unchanged approved SE.
+
+## Original down-right idle and transitions
+
 Down-right pixel animations built with sprite-axi, revised against the user's
 spider-monkey gait video and still reference. The monkey rests on all fours
 with a lifted rump over bent legs and splayed palms beneath the shoulders,

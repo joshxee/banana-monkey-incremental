@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spider Worker · eight directions</title>
+<style>
+  :root { color-scheme: dark; font: 15px/1.5 system-ui, sans-serif; background: #20262c; color: #eee7d5; }
+  body { max-width: 1180px; margin: 36px auto; padding: 0 24px 32px; }
+  h1 { margin-bottom: 4px; font-size: 28px; } p { color: #bfc5bb; }
+  .controls { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin: 24px 0; }
+  button, select { font: inherit; color: inherit; background: #343c40; border: 1px solid #59635d; border-radius: 6px; padding: 6px 10px; }
+  input { accent-color: #fdd179; vertical-align: middle; } output { font-variant-numeric: tabular-nums; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  article { border: 1px solid #46504b; border-radius: 8px; overflow: hidden; }
+  h2 { margin: 0; padding: 8px 14px; font-size: 15px; font-weight: 500; }
+  .pair { display: flex; justify-content: space-around; background: #d4c692; }
+  canvas { width: 128px; height: 128px; image-rendering: pixelated; }
+  .labels { display: flex; justify-content: space-around; font-size: 12px; color: #bdc3b7; padding: 6px 0; }
+  .native canvas { width: 64px; height: 64px; }
+  .native .pair { min-height: 128px; align-items: center; }
+  .large { grid-template-columns: repeat(2, 1fr); }
+  .large canvas { width: 256px; height: 256px; }
+  @media(max-width: 850px) { .grid { grid-template-columns: repeat(2, 1fr); } .large { grid-template-columns: 1fr; } }
+  @media(max-width: 540px) { .grid { grid-template-columns: 1fr; } .large canvas { width: 192px; height: 192px; } }
+</style>
+<h1>Spider Worker</h1>
+<p>Eight directions · empty hands and carrying a banana · 12 frames per loop · 720 ms</p>
+<div class="controls">
+  <button id="play" type="button">Pause</button>
+  <label>Speed <select id="speed"><option value="1">1×</option><option value="0.5">½×</option><option value="0.25">¼×</option></select></label>
+  <label>Scale <select id="scale"><option value="">2×</option><option value="native">Native</option><option value="large">4×</option></select></label>
+  <label>Ground <select id="ground"><option value="#d4c692">Sand</option><option value="#819447">Olive</option><option value="#546756">Jungle shade</option></select></label>
+  <label>Frame <input id="phase" type="range" min="0" max="11" step="1" value="0"> <output id="readout">1 / 12</output></label>
+</div>
+<div class="grid" id="grid"></div>
+<p>Watch for 15 seconds at 1×, then inspect Native scale and the 12 → 1 boundary. Pass: alternating steps, readable directions and banana, no clipped pixels or loop snap; paired poses keep the same feet and tail phase.</p>
+<script>
+  const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  const durations = [70, 60, 50, 70, 60, 50, 70, 60, 50, 70, 60, 50];
+  const grid = document.getElementById('grid');
+  const play = document.getElementById('play');
+  const phase = document.getElementById('phase');
+  const readout = document.getElementById('readout');
+  const speed = document.getElementById('speed');
+  const contexts = [];
+  dirs.forEach((dir, row) => {
+    const article = document.createElement('article');
+    article.innerHTML = `<h2>${dir}</h2><div class="pair"><canvas width="64" height="64" aria-label="${dir} walking"></canvas><canvas width="64" height="64" aria-label="${dir} carrying banana"></canvas></div><div class="labels"><span>Walking</span><span>Carrying banana</span></div>`;
+    article.querySelectorAll('canvas').forEach((canvas, state) => contexts.push({ ctx: canvas.getContext('2d'), row, state }));
+    grid.append(article);
+  });
+  const sheets = ['spider_monkey_walk_8dir.png', 'spider_monkey_carry_walk_8dir.png'].map(src => {
+    const img = new Image(); img.src = src; return img;
+  });
+  let running = true, elapsed = 0, previous = 0;
+  function render(frame) {
+    phase.value = frame; readout.textContent = `${frame + 1} / 12`;
+    for (const { ctx, row, state } of contexts) {
+      ctx.clearRect(0, 0, 64, 64);
+      ctx.drawImage(sheets[state], frame * 64, row * 64, 64, 64, 0, 0, 64, 64);
+    }
+  }
+  play.onclick = () => { running = !running; play.textContent = running ? 'Pause' : 'Play'; };
+  phase.oninput = () => {
+    running = false; play.textContent = 'Play';
+    const frame = Number(phase.value);
+    elapsed = durations.slice(0, frame).reduce((a, b) => a + b, 0);
+    render(frame);
+  };
+  document.getElementById('scale').onchange = event => { grid.className = `grid ${event.target.value}`; };
+  document.getElementById('ground').onchange = event => {
+    document.querySelectorAll('.pair').forEach(pair => { pair.style.background = event.target.value; });
+  };
+  function tick(now) {
+    if (previous && running) elapsed = (elapsed + Math.min(now - previous, 100) * Number(speed.value)) % 720;
+    previous = now;
+    let t = elapsed, frame = 0;
+    while (frame < 11 && t >= durations[frame]) t -= durations[frame++];
+    render(frame);
+    requestAnimationFrame(tick);
+  }
+  Promise.all(sheets.map(img => img.decode())).then(() => requestAnimationFrame(tick)).catch(() => {
+    readout.textContent = 'Could not load the PNG sheets. Keep this page beside the exported PNG files.';
+  });
+</script>
+</html>
