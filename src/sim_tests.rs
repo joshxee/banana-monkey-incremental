@@ -127,6 +127,39 @@ fn a_fresh_hire_delivers_at_tick_950_and_eats_at_tick_1000() {
 }
 
 #[test]
+fn the_swarm_never_reaches_the_economy() {
+    // D24 and D27. Every swarm offset - the fraction wobble that re-times where
+    // a monkey is *drawn* along the walk, the corridor spread, the along-route
+    // scatter, the standing ring - is presentation and only presentation. The
+    // one construction `map` exists to prevent is a drawn path and a cycle time
+    // that are two different journeys, and the way that would show up here is a
+    // crowd delivering on a different tick from a monkey walking alone.
+    //
+    // The wobble is the dangerous one, because a sine bulge genuinely changes
+    // how far along the route a monkey appears at a given moment. It is chosen
+    // to vanish at both ends for exactly this reason;
+    // `worker::tests::the_swarm_never_moves_an_arrival` pins the arithmetic and
+    // this pins the consequence.
+    let mut alone = Headless::scenario("one-worker");
+    let start = alone.treasury();
+    let solo = alone.tick_until(2_000, |sim| sim.treasury() != start);
+    assert_eq!(solo, Some(DELIVERY_TICK));
+
+    // Sixty monkeys, every one with a different wobble, spread and scatter,
+    // all setting out together from the stall.
+    let mut crowd = Headless::from_run(run(600.0, 60), Placement::AtStall);
+    let start = crowd.treasury();
+    let together = crowd.tick_until(2_000, |sim| sim.treasury() != start);
+    assert_eq!(
+        together, solo,
+        "a crowd delivers on a different tick from a monkey walking alone"
+    );
+    // And on that tick every one of them arrives, because the swarm changed
+    // where they are drawn and not how far any of them walked.
+    assert_eq!(crowd.treasury(), start + PAYLOAD * 60.0);
+}
+
+#[test]
 fn a_worker_visits_every_segment_in_order_and_only_carries_on_the_way_back() {
     let mut sim = Headless::scenario("one-worker");
     let mut visits: Vec<(Segment, u32)> = Vec::new();

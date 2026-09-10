@@ -697,6 +697,66 @@ floater colours at once, without repainting a palette that is right everywhere
 else. This matters more than it sounds: the floater is the game's primary
 reward feedback.
 
+**D27 — A crowd is per-monkey, and none of it reaches the economy.**
+*(Swarm increment.)*
+
+Three rows and five stagger steps is fifteen distinct positions, so every
+fifteenth hire was drawn pixel-identical to the first — and at thirty workers
+the repeat is the thing the eye locks onto. Worse, two monkeys on the same
+segment fraction were a *rigid constellation*: the same distance apart for the
+whole trip, every trip, never passing. That is what made a crowd read as a
+formation. Every offset is now a continuous function of the hire index.
+
+*The offsets are hashed from the hire index, never stored and never drawn from
+an RNG.* The index is already persisted, so a monkey comes back from a reload
+standing exactly where it stood, and the save format learns nothing. An RNG
+would need five more numbers per worker to say the same thing.
+
+*The fraction remap is a sine bulge, and the shape is the whole argument.*
+`f' = f + a·sin(πf)` with `|a| ≤ 0.06` re-times where a monkey is **drawn**
+along the walk without changing where the economy has it. `sin(0)` and `sin(π)`
+are both zero, so the remap is the identity at both ends: a monkey leaves the
+depot on exactly the tick the economy says and arrives on exactly the tick it
+says, and only the middle moves. That is what lets the swarm be free while D24
+holds unchanged, and it is pinned twice — on the arithmetic in
+`the_swarm_never_moves_an_arrival`, and on the consequence in
+`the_swarm_never_reaches_the_economy`, which asserts a crowd of sixty delivers
+on the same tick as a monkey walking alone.
+
+Neither half of the offset produces overtaking on its own, which is why both
+exist. The bulge opens a gap proportional to `sin(πf)` — it grows and shrinks
+but never changes sign. The along-route scatter is a constant. Added together,
+the varying term can overtake the constant one, and about one pair in nine
+genuinely swaps order over a walk.
+
+*The swarm is drawn across the local corridor, not across a constant.* A fixed
+lane width has to be narrow enough for the tightest point on the route, so it is
+that narrow everywhere. `Map::corridor_half_width` casts a ray either way across
+the walk and answers with the *smaller* clearance, so a crowd centred on the
+route stays inside the gap rather than leaning into whichever wall is further
+off. On the shipped map that is eight metres of crowd across the open town,
+squeezing to five and a half at the gap near the grove and opening out again —
+one pinch, because the shipped map only offers one.
+
+The traversal is a grid ray-cast rather than a sampled march, and the reason is
+continuity rather than precision. Probing at fixed intervals answers in whole
+steps, so the width jumps by a step as the ray creeps forward, and a swarm drawn
+across that width snaps narrower and wider as it walks. It reads as the crowd
+flinching, and it is what
+`an_outer_offset_turns_a_corner_instead_of_teleporting_across_it` caught.
+
+*Standing is a different shape from walking.* At an endpoint a monkey takes a
+bearing and a radius instead of a lane, so the group is a ring around the thing
+it is queueing at. Three rows read as inventory and a filled disc reads as a
+mob; an annulus reads as a crowd gathered *around* something, and it leaves the
+middle clear, which is what keeps the depot pad and the palm visible under the
+monkeys standing on them.
+
+The cart's bay is measured from the swarm's own edge rather than set at a fixed
+distance, so it leads the crowd through the pinch instead of parking in the
+hedge beside it: the ground the swarm has to squeeze through is the ground the
+cart has to squeeze through.
+
 ---
 
 ## 4. Data Model

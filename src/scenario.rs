@@ -256,6 +256,24 @@ pub fn all() -> Vec<Scenario> {
             placement: Placement::Restored { seed: Some(1) },
         },
         Scenario {
+            name: "swarm",
+            summary: "sixty monkeys and no carts, the state the swarm was built for: the \
+                      crowd should spread wide across the town, squeeze through the gap \
+                      near the grove and open out again, with monkeys passing each other \
+                      the whole way and nobody walking in step; first arrivals pay nothing",
+            run: Seed {
+                bananas: 600.0,
+                workers: 60,
+                chefs: 4,
+                unpackers: 3,
+                technologists: 1,
+                research: 200.0,
+                ..Seed::default()
+            }
+            .run(),
+            placement: Placement::Restored { seed: Some(61) },
+        },
+        Scenario {
             name: "survey",
             summary: "for the camera: monkeys spread down the whole walk. Drag the \
                       grass - the metre under the cursor should stay under it, and the \

@@ -128,6 +128,18 @@ impl Tile {
             (f64::from(self.y) + 0.5) * TILE_METRES,
         )
     }
+
+    /// The tile a position in metres falls on.
+    ///
+    /// Floored rather than truncated, so a position west or north of the origin
+    /// lands on the negative tile it is actually on instead of folding onto
+    /// tile zero — the same reason [`Tile`] is signed at all.
+    pub fn containing(at: DVec2) -> Self {
+        Self::new(
+            (at.x / TILE_METRES).floor() as i32,
+            (at.y / TILE_METRES).floor() as i32,
+        )
+    }
 }
 
 /// A banana node worked by monkeys, with its walk already measured.
@@ -465,6 +477,75 @@ impl Map {
     /// The shortest grid walk between two tiles, straightened.
     ///
     /// `None` when either end is jungle or the goal is walled off.
+    /// How much open ground there is either side of `at`, along `across`.
+    ///
+    /// The swarm is drawn across this rather than across a constant, which is
+    /// what lets one crowd read as two different things: shoulder to shoulder
+    /// where the walk threads a gap, and spread wide where it crosses the open
+    /// town. A fixed lane width has to be narrow enough for the tightest point
+    /// on the route, so it is that narrow everywhere.
+    ///
+    /// Symmetric — the *smaller* of the two sides — so a swarm centred on the
+    /// route stays inside the corridor rather than leaning into whichever wall
+    /// is further away. Measured by marching, because the alternative is a
+    /// distance field over 4761 tiles for a question asked along one line.
+    pub fn corridor_half_width(&self, at: DVec2, across: DVec2) -> f64 {
+        /// Beyond this the answer stops mattering: the swarm has its own cap.
+        const REACH: f64 = 10.0;
+
+        let across = across.normalize_or_zero();
+        if across == DVec2::ZERO || !self.terrain(Tile::containing(at)).passable() {
+            return 0.0;
+        }
+        self.clearance(at, across, REACH)
+            .min(self.clearance(at, -across, REACH))
+    }
+
+    /// How far a ray from `at` travels before it enters impassable ground.
+    ///
+    /// A grid traversal rather than a sampled march, and the difference is not
+    /// precision but *continuity*. Probing at fixed intervals answers in whole
+    /// steps, so the width jumps by a step as the ray creeps forward - and a
+    /// swarm drawn across that width snaps narrower and wider as it walks,
+    /// which reads as the crowd flinching. This returns the exact distance to
+    /// the wall, so the width is a continuous function of where the monkey is.
+    fn clearance(&self, at: DVec2, direction: DVec2, reach: f64) -> f64 {
+        let mut tile = Tile::containing(at);
+        let mut crossing = DVec2::INFINITY;
+        let mut stride = DVec2::INFINITY;
+        let mut step = (0, 0);
+
+        if direction.x != 0.0 {
+            let ahead = if direction.x > 0.0 { 1.0 } else { 0.0 };
+            crossing.x = ((f64::from(tile.x) + ahead) * TILE_METRES - at.x) / direction.x;
+            stride.x = TILE_METRES / direction.x.abs();
+            step.0 = if direction.x > 0.0 { 1 } else { -1 };
+        }
+        if direction.y != 0.0 {
+            let ahead = if direction.y > 0.0 { 1.0 } else { 0.0 };
+            crossing.y = ((f64::from(tile.y) + ahead) * TILE_METRES - at.y) / direction.y;
+            stride.y = TILE_METRES / direction.y.abs();
+            step.1 = if direction.y > 0.0 { 1 } else { -1 };
+        }
+
+        loop {
+            let travelled = crossing.x.min(crossing.y);
+            if !travelled.is_finite() || travelled >= reach {
+                return reach;
+            }
+            if crossing.x < crossing.y {
+                tile.x += step.0;
+                crossing.x += stride.x;
+            } else {
+                tile.y += step.1;
+                crossing.y += stride.y;
+            }
+            if !self.terrain(tile).passable() {
+                return travelled;
+            }
+        }
+    }
+
     pub fn route(&self, from: Tile, to: Tile) -> Option<Route> {
         if !self.passable_at(from.x, from.y) || !self.passable_at(to.x, to.y) {
             return None;

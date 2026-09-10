@@ -15,7 +15,7 @@ use crate::{
     },
     game::{Delivery, DeliveryKind, DeliveryQueue, SceneLayout},
     isometric,
-    map::{Route, WorkedRoute},
+    map::{Map, Route, Village, WorkedRoute},
 };
 
 const FRAME_SIZE: u32 = 22;
@@ -23,20 +23,52 @@ const MONKEY_SIZE: Vec2 = Vec2::new(13.0, 22.0);
 const MONKEY_FILL: Color = Color::srgb(0.94, 0.82, 0.67);
 const MONKEY_EDGE: Color = Color::srgb(0.34, 0.17, 0.10);
 
-/// Three lanes is enough to keep a crowd legible without turning the route into
-/// a parade ground.
-const LANES: u32 = 3;
-/// Metres between lanes, measured across the route rather than along it.
-const LANE_SPACING: f32 = 1.6;
+/// How far a monkey drifts ahead of or behind the point the economy has it at,
+/// as a fraction of the whole walk.
+///
+/// This is what makes a crowd rather than a formation. Two monkeys on the same
+/// segment fraction used to be a rigid constellation: the same distance apart
+/// for the whole trip, every trip, never passing each other. A per-monkey bulge
+/// re-times the *drawing* of the journey without touching its length, so the
+/// gap between any two of them opens and closes as they walk.
+///
+/// Six percent of a sixty-metre walk is three and a half metres, which is a
+/// monkey and a half - enough to overtake, small enough that nobody appears to
+/// be racing.
+const SWARM_WOBBLE: f32 = 0.06;
 
-/// Metres a cart stands off the route, one lane beyond the frontmost worker row.
+/// Metres a monkey walks ahead of or behind where the wobble put it.
+///
+/// Continuous, where this used to be five discrete steps of 1.2 m. Five steps
+/// times three rows is fifteen distinct positions, so every fifteenth hire was
+/// pixel-identical to the first - and at thirty workers the repeat is what the
+/// eye locks onto. It reads as formation precisely because it is one.
+const SWARM_SCATTER_METRES: f32 = 7.0;
+
+/// How close to the jungle a monkey is willing to walk.
+const CORRIDOR_MARGIN_METRES: f64 = 0.9;
+/// The narrowest the swarm ever pinches to, in metres either side of the walk.
+const SWARM_HALF_MIN: f64 = 1.0;
+/// And the widest it blooms, however much open ground there is.
+const SWARM_HALF_MAX: f64 = 4.0;
+
+/// The band standing monkeys form around an endpoint, in metres.
+///
+/// A band, not a disc and not rows. A disc fills in and reads as a mob; three
+/// rows read as inventory. An annulus reads as a crowd gathered *around*
+/// something, which is what they are - and it leaves the middle clear, so the
+/// depot pad and the palm they are gathered at stay visible.
+const RING_INNER: f32 = 2.5;
+const RING_OUTER: f32 = 6.0;
+
+/// How far off the walk a cart stands, in metres, beyond the swarm's own edge.
 ///
 /// A vehicle is what walkers pass behind, and drawing it in front is also what
 /// keeps its long dwell at the depot off the top of the unloading queue. This
 /// used to be spelled `Lane(u32::MAX)`, which is not a lane in front of row
 /// zero: `u32::MAX % 3` *is* row zero, and its stagger is worker zero's, so the
 /// cart and the first monkey hired stood on the same ground.
-const CART_LANE_METRES: f32 = ((LANES as f32 - 1.0) * 0.5 + 1.0) * LANE_SPACING;
+const CART_CLEARANCE_METRES: f32 = 1.6;
 
 /// How far either side of a walker its direction of travel is measured over.
 ///
@@ -127,33 +159,63 @@ impl NextLane {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Lane(u32);
 
+/// Salts, so one hire index yields four uncorrelated numbers. Arbitrary odd
+/// constants; only their difference matters.
+const SALT_WOBBLE: u32 = 0x9E37_79B9;
+const SALT_ACROSS: u32 = 0x85EB_CA6B;
+const SALT_SCATTER: u32 = 0xC2B2_AE35;
+const SALT_ANGLE: u32 = 0x27D4_EB2F;
+const SALT_RADIUS: u32 = 0x1656_67B1;
+
 impl Lane {
-    /// Depth row, front to back.
-    fn row(self) -> u32 {
-        self.0 % LANES
+    /// A stable, well-spread number in `0.0..1.0` for this monkey and purpose.
+    ///
+    /// Hashed from the hire index rather than drawn from an RNG, and that is
+    /// what keeps the swarm free: the index is already persisted, so every
+    /// offset survives a save and a reload without being stored, and a monkey
+    /// comes back standing where it stood. An RNG would need five more numbers
+    /// per worker in the save format to say the same thing.
+    fn dial(self, salt: u32) -> f32 {
+        // A small integer avalanche. The hire indices handed out are 0, 1, 2,
+        // ... - the least random input there is - so the mixing has to do all
+        // of the work, and a weaker hash shows up immediately as neighbours
+        // walking in step.
+        let mut bits = self.0.wrapping_mul(0x9E37_79B9) ^ salt;
+        bits ^= bits >> 16;
+        bits = bits.wrapping_mul(0x7FEB_352D);
+        bits ^= bits >> 15;
+        bits = bits.wrapping_mul(0x846C_A68B);
+        bits ^= bits >> 16;
+        // The top 24 bits, so the value is exact in `f32`.
+        (bits >> 8) as f32 / f32::from(1u16 << 8).powi(3)
     }
 
-    /// A small along-route offset, in metres, so that workers sharing a row are
-    /// not identical.
-    ///
-    /// Without it, workers 0 and 3 occupy the same lane at the same phase with
-    /// the same animation frame and draw exactly on top of each other: hire
-    /// four in a burst and the player counts three monkeys while the store
-    /// reads OWNED 4. Removing spawn jitter is what exposed this - phases used
-    /// to differ, so positions did too.
-    fn stagger_metres(self) -> f32 {
-        const SPREAD: u32 = 5;
-        (self.0 / LANES % SPREAD) as f32 * 1.2 - 2.4
+    /// The same, signed: `-1.0..1.0`.
+    fn swing(self, salt: u32) -> f32 {
+        self.dial(salt).mul_add(2.0, -1.0)
     }
 
-    /// Metres towards the viewer from the route's centre line, so the rows read
-    /// as a crowd walking together rather than a queue.
-    ///
-    /// Row zero is the *front* row, so its offset is the largest: which
-    /// direction across the route that actually is depends on the route's
-    /// bearing, and [`near_side`] is what turns it into a side.
-    fn lane_metres(self) -> f32 {
-        ((LANES as f32 - 1.0) * 0.5 - self.row() as f32) * LANE_SPACING
+    /// How far ahead of or behind its economic position this monkey is drawn.
+    fn wobble(self) -> f32 {
+        self.swing(SALT_WOBBLE) * SWARM_WOBBLE
+    }
+
+    /// Where across the corridor it walks, as a fraction of the half-width.
+    /// Positive is towards the viewer; [`near_side`] turns that into a side.
+    fn across(self) -> f32 {
+        self.swing(SALT_ACROSS)
+    }
+
+    /// Metres along the route from where the wobble put it.
+    fn scatter(self) -> f32 {
+        self.swing(SALT_SCATTER) * SWARM_SCATTER_METRES
+    }
+
+    /// Where it stands when it is not walking: a bearing, and how far out.
+    fn ring(self) -> (f32, f32) {
+        let angle = self.dial(SALT_ANGLE) * std::f32::consts::TAU;
+        let radius = RING_INNER + self.dial(SALT_RADIUS) * (RING_OUTER - RING_INNER);
+        (angle, radius)
     }
 
     /// A stable, bounded separation for two actors that would otherwise sort
@@ -162,6 +224,34 @@ impl Lane {
     fn nudge(self) -> f32 {
         (self.0 % 8) as f32 * isometric::NUDGE_STEP
     }
+}
+
+/// Where a monkey is *drawn* along the walk, given where the economy has it.
+///
+/// A sine bulge, and the shape is chosen for one property: `sin(0)` and
+/// `sin(PI)` are both zero, so the remap is the identity at **both ends of the
+/// walk**. A monkey leaves the depot at exactly the tick the economy says and
+/// arrives at exactly the tick it says; all that moves is where it is drawn in
+/// between. That is what lets the swarm be free without touching D24 — the
+/// cycle boundary is bit-identical at any wobble, which
+/// `the_swarm_never_moves_an_arrival` pins.
+fn swarm_fraction(fraction: f64, wobble: f32) -> f64 {
+    fraction + f64::from(wobble) * (std::f64::consts::PI * fraction).sin()
+}
+
+/// How far either side of the route the swarm spreads at a point, in metres.
+///
+/// A fraction of the *local* corridor, so one crowd reads as two different
+/// things: shoulder to shoulder where the walk threads a gap in the jungle, and
+/// spread wide where it crosses the open town. On the shipped map that is ten
+/// metres of clearance for three quarters of the walk and three at the pinch
+/// near the grove, so the swarm visibly squeezes and lets go again.
+fn corridor_spread(map: &Map, at: Vec2, across: Vec2) -> f32 {
+    let wide = map.corridor_half_width(
+        bevy::math::DVec2::new(f64::from(at.x), f64::from(at.y)),
+        bevy::math::DVec2::new(f64::from(across.x), f64::from(across.y)),
+    );
+    (wide - CORRIDOR_MARGIN_METRES).clamp(SWARM_HALF_MIN, SWARM_HALF_MAX) as f32
 }
 
 /// The banana a worker carries home. Deliberately *not* the `Banana` marker:
@@ -344,14 +434,36 @@ fn walk_step(route: &Route, fraction: f64, sideways: f32, forward: f32) -> (Vec2
     (at + across * sideways + along * forward, along)
 }
 
-/// Where a walker of a given lane stands, and which way it faces.
-fn walk_point(route: &Route, fraction: f64, lane: Lane) -> (Vec2, Vec2) {
+/// Where a walking monkey is drawn, and which way it faces.
+fn walk_point(map: &Map, route: &Route, fraction: f64, lane: Lane) -> (Vec2, Vec2) {
+    let drawn = swarm_fraction(fraction, lane.wobble());
+    // The corridor is measured where this monkey actually is, not where the
+    // crowd's centre is: at the pinch near the grove the difference between the
+    // two is the difference between walking the gap and walking the hedge.
+    let (centre, along) = walk_step(route, drawn, 0.0, 0.0);
+    let across = Vec2::new(-along.y, along.x);
+    let spread = corridor_spread(map, centre, across);
     walk_step(
         route,
-        fraction,
-        near_side(route) * lane.lane_metres(),
-        lane.stagger_metres(),
+        drawn,
+        near_side(route) * lane.across() * spread,
+        lane.scatter(),
     )
+}
+
+/// Where a monkey stands when it is not walking, and which way it faces.
+///
+/// An endpoint is where a crowd *gathers*, and gathering is a different shape
+/// from walking: the lane-and-stagger grid that reads as a swarm in motion
+/// reads as a stock list standing still. So a standing monkey takes a bearing
+/// and a radius instead, and the group becomes a ring around the thing it is
+/// queueing at.
+fn stand_point(route: &Route, fraction: f64, lane: Lane) -> (Vec2, Vec2) {
+    let step = route.sample(fraction);
+    let at = Vec2::new(step.at.x as f32, step.at.y as f32);
+    let along = Vec2::new(step.heading.x as f32, step.heading.y as f32);
+    let (angle, radius) = lane.ring();
+    (at + Vec2::from_angle(angle) * radius, along)
 }
 
 /// Which way `walk_step`'s "across" leans towards the viewer, as +1 or -1.
@@ -378,8 +490,16 @@ fn near_side(route: &Route) -> f32 {
 }
 
 /// Where a cart stands, and which way it faces.
-fn cart_point(route: &Route, fraction: f64) -> (Vec2, Vec2) {
-    walk_step(route, fraction, near_side(route) * CART_LANE_METRES, 0.0)
+///
+/// Just outside the swarm's own edge rather than at a fixed distance, so it
+/// leads the crowd through the pinch instead of parking in the hedge beside it:
+/// the ground the swarm has to squeeze through is exactly the ground the cart
+/// has to squeeze through.
+fn cart_point(map: &Map, route: &Route, fraction: f64) -> (Vec2, Vec2) {
+    let (centre, along) = walk_step(route, fraction, 0.0, 0.0);
+    let across = Vec2::new(-along.y, along.x);
+    let bay = corridor_spread(map, centre, across) + CART_CLEARANCE_METRES;
+    walk_step(route, fraction, near_side(route) * bay, 0.0)
 }
 
 /// Everything `position_workers` touches on one worker.
@@ -396,6 +516,7 @@ pub fn position_workers(
     time: Res<Time>,
     mut commands: Commands,
     layout: Res<SceneLayout>,
+    village: Res<Village>,
     route: Res<WorkedRoute>,
     multipliers: Res<Multipliers>,
     mut workers: Query<WorkerView, With<Worker>>,
@@ -414,12 +535,24 @@ pub fn position_workers(
             // monkey stays put and keeps facing it.
             Segment::Unload | Segment::Snack => (0.0, false),
         };
+        let standing = matches!(
+            cycle.segment(),
+            Segment::Pick | Segment::Unload | Segment::Snack
+        );
 
-        let (point, along) = walk_point(&route.0, fraction, *lane);
+        // Walking and standing are two different shapes. See `stand_point`.
+        let (point, along) = if standing {
+            stand_point(&route.0, fraction, *lane)
+        } else {
+            walk_point(&village, &route.0, fraction, *lane)
+        };
         let travel = if outbound { along } else { -along };
         let facing_right = isometric::project(travel).x >= 0.0;
 
-        let back = lane.row() as f32;
+        // Depth cue, from where across the corridor it walks rather than from a
+        // row index there no longer is: fully forward is unshaded, fully back
+        // is a shade darker.
+        let back = (1.0 - lane.across()) * 0.5;
         let half_height = FRAME_SIZE as f32 * 0.5 * layout.world_scale();
 
         let screen = layout.board_snapped(point, half_height);
@@ -437,8 +570,7 @@ pub fn position_workers(
             sprite.flip_x = !facing_right;
         }
 
-        // Depth cue: rows further back sit slightly in shade.
-        let shade = 1.0 - 0.09 * back;
+        let shade = 1.0 - 0.18 * back;
         let base = MONKEY_FILL.to_srgba();
         let mut tint = Vec3::new(base.red, base.green, base.blue) * shade;
         // A worker stuck waiting for a banana to eat has stopped producing, and
@@ -520,47 +652,206 @@ mod tests {
         .reference_route()
     }
 
-    #[test]
-    fn lanes_spread_across_the_route_and_sort_by_depth() {
-        // Lanes are metres across the ground now, not rows of screen y, so the
-        // property is the one that actually matters: a crowd walking together
-        // spreads perpendicular to wherever the route happens to point, and the
-        // near lane draws over the far one.
-        //
-        // On *both* bearings, which is the whole reason the second route is
-        // here: `near_side` is -1 on the shipped walk and +1 on this one, and a
-        // fixed sign satisfies one of them while drawing the front row at the
-        // back on the other. Nothing on the shipped map can see that, because
-        // the shipped map has one bearing.
-        for route in [WorkedRoute::start().0, bent_route()] {
-            assert!(!near_side(&route).is_nan());
-            let placed: Vec<(Vec2, Vec2)> = (0..LANES)
-                .map(|row| walk_point(&route, 0.5, Lane(row)))
-                .collect();
+    /// The shipped map, for the corridor the swarm is drawn across.
+    fn village() -> &'static Map {
+        crate::map::start()
+    }
 
-            for pair in placed.windows(2) {
-                // Rows run front to back, so each one draws behind the last -
-                // which is what the shade cue in `position_workers` is also
-                // saying.
-                assert!(
-                    isometric::stand_z(pair[1].0, 0.0) < isometric::stand_z(pair[0].0, 0.0),
-                    "lanes are not depth ordered front to back: {placed:?}"
-                );
-                // Spread is across the walk, not along it: a lane must not make
-                // one monkey's journey longer than another's.
-                let offset = (pair[1].0 - pair[0].0).dot(pair[0].1);
-                assert!(
-                    offset.abs() < 1e-3,
-                    "a lane pushed a monkey along its route by {offset}"
-                );
+    #[test]
+    fn the_swarm_never_moves_an_arrival() {
+        // The rule the whole increment is built to respect (D24). Every offset
+        // is *drawn*, never simulated, and the fraction remap is the one that
+        // could break that: it re-times the journey. The sine bulge is chosen
+        // because it vanishes at both ends, so however far a monkey drifts in
+        // the middle, it leaves the depot and reaches the grove at exactly the
+        // fraction the economy says.
+        //
+        // Asserted at the extremes of the wobble and exactly, not nearly: a
+        // boundary that is off by a float's worth is a tick that is off by a
+        // float's worth, and the contracts in `sim_tests` assert exact ticks.
+        for wobble in [SWARM_WOBBLE, -SWARM_WOBBLE, 0.0] {
+            assert_eq!(swarm_fraction(0.0, wobble), 0.0, "wobble {wobble}");
+            assert_eq!(swarm_fraction(1.0, wobble), 1.0, "wobble {wobble}");
+        }
+        // And every monkey the game can hire is inside those extremes.
+        for index in 0..5_000u32 {
+            let wobble = Lane(index).wobble();
+            assert!(
+                wobble.abs() <= SWARM_WOBBLE,
+                "worker {index} wobbles {wobble}, past the bound"
+            );
+            assert_eq!(swarm_fraction(0.0, wobble), 0.0);
+            assert_eq!(swarm_fraction(1.0, wobble), 1.0);
+        }
+        // The drawn fraction also stays on the route rather than running off
+        // either end of it, which `Route::sample` would otherwise clamp into a
+        // pile at the endpoint.
+        for step in 0..=1_000 {
+            let fraction = f64::from(step) / 1000.0;
+            for wobble in [SWARM_WOBBLE, -SWARM_WOBBLE] {
+                let drawn = swarm_fraction(fraction, wobble);
+                assert!((0.0..=1.0).contains(&drawn), "{fraction} became {drawn}");
             }
         }
     }
 
     #[test]
+    fn monkeys_overtake_each_other_instead_of_holding_formation() {
+        // The defect this increment exists to fix. Two monkeys at the same
+        // economic fraction used to be a rigid constellation: the same distance
+        // apart for the whole trip, every trip, never passing.
+        //
+        // Neither half of the offset does this alone, which is why both exist.
+        // The wobble is a sine bulge, so the gap it opens is proportional to
+        // `sin(PI f)` - it grows and shrinks but never changes sign. The
+        // scatter is a constant. Added together, the varying term can overtake
+        // the constant one, and *that* is where passing comes from.
+        let route = WorkedRoute::start().0;
+        let length = route.length() as f32;
+        // Where a monkey is along the walk, in metres, as it is drawn.
+        let along = |fraction: f64, lane: Lane| {
+            swarm_fraction(fraction, lane.wobble()) as f32 * length + lane.scatter()
+        };
+
+        let mut passes = 0;
+        let mut pairs = 0;
+        for index in 0..60u32 {
+            let (a, b) = (Lane(index), Lane(index + 1));
+            pairs += 1;
+            // Asymmetric fractions on purpose: `sin(PI f)` takes the same value
+            // at 0.15 and 0.85, so a pair sampled either side of the midpoint
+            // has an identical gap and any test using them proves nothing.
+            let early = along(0.1, a) - along(0.1, b);
+            let middle = along(0.5, a) - along(0.5, b);
+            assert!(
+                (early - middle).abs() > 1e-3,
+                "workers {index} and {} hold a constant gap",
+                index + 1
+            );
+            if early.signum() != middle.signum() {
+                passes += 1;
+            }
+        }
+        // Not every neighbouring pair swaps order - that would be its own kind
+        // of formation - but a real share of them must, or the crowd is still
+        // just breathing in and out around fixed places.
+        // Every pair in the crowd, not just neighbouring hire indices: two
+        // monkeys hired one after another have wildly different scatters, so
+        // the pairs that actually swap are the ones whose scatters are close.
+        let crowd: Vec<Lane> = (0..60).map(Lane).collect();
+        let mut swapped = 0;
+        let mut total = 0;
+        for (index, a) in crowd.iter().enumerate() {
+            for b in &crowd[index + 1..] {
+                total += 1;
+                let early = along(0.1, *a) - along(0.1, *b);
+                let middle = along(0.5, *a) - along(0.5, *b);
+                if early.signum() != middle.signum() {
+                    swapped += 1;
+                }
+            }
+        }
+        // 201 of 1770 as it stands. The bar is set below that rather than at
+        // it: the exact figure is a property of the hash, and pinning it would
+        // make any future change to the mixing look like a regression in the
+        // swarm.
+        assert!(
+            swapped * 100 >= total * 8,
+            "only {swapped} of {total} pairs in the crowd change order \
+             ({passes} of {pairs} neighbouring)"
+        );
+    }
+
+    #[test]
+    fn no_two_monkeys_in_a_crowd_are_drawn_alike() {
+        // The old lane yielded fifteen distinct offsets - three rows times five
+        // stagger steps - so every fifteenth hire was pixel-identical to the
+        // first, and at thirty workers the repeat is what the eye locks onto.
+        // Sixty is the crowd the `swarm` scenario shows.
+        let mut seen: Vec<(u32, u32, u32)> = Vec::new();
+        for index in 0..60u32 {
+            let lane = Lane(index);
+            let print = (
+                lane.wobble().to_bits(),
+                lane.across().to_bits(),
+                lane.scatter().to_bits(),
+            );
+            assert!(
+                !seen.contains(&print),
+                "worker {index} is drawn exactly like an earlier one"
+            );
+            seen.push(print);
+        }
+        // And the offsets are spread rather than clustered: over a crowd, both
+        // sides of the route are used and the middle is not the only place
+        // anybody stands.
+        let across: Vec<f32> = (0..60).map(|index| Lane(index).across()).collect();
+        assert!(across.iter().any(|value| *value < -0.5));
+        assert!(across.iter().any(|value| *value > 0.5));
+        assert!(across.iter().any(|value| value.abs() < 0.35));
+    }
+
+    #[test]
+    fn the_swarm_pinches_where_the_jungle_pinches() {
+        // One crowd reading as two different things is the point of measuring
+        // the corridor: shoulder to shoulder where the walk threads a gap, wide
+        // across the open town. If these ever come out equal the swarm has
+        // stopped noticing the map and is back to a constant lane width.
+        let route = WorkedRoute::start().0;
+        let spread_at = |fraction: f64| {
+            let (centre, along) = walk_step(&route, fraction, 0.0, 0.0);
+            corridor_spread(village(), centre, Vec2::new(-along.y, along.x))
+        };
+        let open = spread_at(0.4);
+        let pinch = spread_at(0.9);
+        assert!(
+            pinch < open,
+            "the swarm is {pinch} m wide at the gap and {open} m in the open"
+        );
+        // And it never spreads into the jungle it is squeezing past.
+        for step in 0..=200 {
+            let fraction = f64::from(step) / 200.0;
+            let spread = spread_at(fraction);
+            assert!(
+                (SWARM_HALF_MIN as f32..=SWARM_HALF_MAX as f32).contains(&spread),
+                "the swarm is {spread} m wide at {fraction}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_standing_crowd_is_a_ring_and_not_a_grid() {
+        // Three rows read as inventory and a filled disc reads as a mob. A ring
+        // reads as a crowd gathered around something - and it leaves the middle
+        // clear, which is what keeps the depot pad and the palm visible under
+        // the monkeys queueing at them.
+        let route = WorkedRoute::start().0;
+        let depot = Vec2::new(route.sample(0.0).at.x as f32, route.sample(0.0).at.y as f32);
+        let mut bearings = [false; 8];
+        for index in 0..60u32 {
+            let (at, _) = stand_point(&route, 0.0, Lane(index));
+            let out = at.distance(depot);
+            assert!(
+                (RING_INNER..=RING_OUTER).contains(&out),
+                "worker {index} stands {out} m from the depot"
+            );
+            let offset = at - depot;
+            let sector = ((offset.y.atan2(offset.x) + std::f32::consts::TAU)
+                % std::f32::consts::TAU
+                / (std::f32::consts::TAU / 8.0)) as usize;
+            bearings[sector.min(7)] = true;
+        }
+        assert!(
+            bearings.iter().all(|used| *used),
+            "a crowd of sixty left a gap in the ring: {bearings:?}"
+        );
+    }
+
+    #[test]
     fn the_two_test_routes_lean_opposite_ways() {
-        // The guard on the test above: if both routes ever agreed on a side it
-        // would go on passing while asserting half of what it says it does.
+        // The guard on the corridor and cart tests: if both routes ever agreed
+        // on a side they would go on passing while asserting half of what they
+        // say they do.
         assert_eq!(
             near_side(&WorkedRoute::start().0) * near_side(&bent_route()),
             -1.0
@@ -568,116 +859,127 @@ mod tests {
     }
 
     #[test]
-    fn workers_sharing_a_row_do_not_draw_on_top_of_each_other() {
-        // Without spawn jitter, same lane plus same phase means pixel-identical
-        // sprites: four hires would show three monkeys. Every worker sharing a
-        // row within one spread must sit at a different offset.
-        let mut seen = std::collections::HashSet::new();
-        for index in 0..LANES * 5 {
-            let lane = Lane(index);
-            assert!(
-                seen.insert((lane.row(), lane.stagger_metres().to_bits())),
-                "worker {index} collides with an earlier one"
-            );
-        }
-        // And the spread stays inside the route rather than walking off it.
-        for index in 0..200u32 {
-            assert!(Lane(index).stagger_metres().abs() <= 2.4);
-        }
-    }
-
-    #[test]
-    fn a_cart_keeps_its_own_lane_in_front_of_every_worker() {
+    fn a_cart_keeps_its_own_bay_outside_the_swarm() {
         // Spelling this `Lane(u32::MAX)` did not put the cart in front of row
         // zero, it put the cart *in* row zero - `u32::MAX % 3` is 0, and its
         // stagger is worker zero's - so a cart and the first monkey hired stood
-        // on the same ground.
-        let route = WorkedRoute::start();
-        let (cart, _) = cart_point(&route.0, 0.5);
-        for row in 0..LANES {
-            // At the same point on the walk and with the stagger taken out: a
-            // worker genuinely further along the route than the cart is nearer
-            // the viewer and *should* draw in front, so comparing whole
-            // positions would be asking the lane question and the stagger
-            // question at once.
-            let (worker, _) = walk_step(&route.0, 0.5, Lane(row).lane_metres(), 0.0);
-            assert!(
-                isometric::stand_z(cart, 0.0) > isometric::stand_z(worker, 0.0),
-                "worker row {row} draws in front of the cart"
-            );
+        // on the same ground. It now sits outside whatever the swarm's own edge
+        // is at that point on the walk, so it leads the crowd through the pinch
+        // rather than parking in the hedge beside it.
+        let route = WorkedRoute::start().0;
+        for step in 1..20 {
+            let fraction = f64::from(step) / 20.0;
+            let (cart, _) = cart_point(village(), &route, fraction);
+            let (centre, along) = walk_step(&route, fraction, 0.0, 0.0);
+            let across = Vec2::new(-along.y, along.x);
+            let spread = corridor_spread(village(), centre, across);
+            for index in 0..60u32 {
+                // The lateral question only: a worker genuinely further along
+                // the route than the cart is nearer the viewer and *should*
+                // draw in front, so comparing whole positions would be asking
+                // the bay question and the scatter question at once.
+                let (worker, _) = walk_step(
+                    &route,
+                    fraction,
+                    near_side(&route) * Lane(index).across() * spread,
+                    0.0,
+                );
+                assert!(
+                    isometric::stand_z(cart, 0.0) > isometric::stand_z(worker, 0.0),
+                    "worker {index} draws in front of the cart at {fraction}"
+                );
+            }
         }
     }
 
     #[test]
-    fn a_lane_changes_apparent_speed_and_never_cycle_time() {
-        // The one rule the swarm must not break (D24). Offsets are drawn, not
-        // simulated: every monkey is at the same fraction at the same tick, so
-        // an outer lane covers slightly more ground in the same time and that is
-        // the whole of the difference.
+    fn an_offset_changes_apparent_speed_and_never_cycle_time() {
+        // Offsets are drawn, not simulated: every monkey is at the same
+        // fraction at the same tick, so a monkey on the outside covers slightly
+        // more ground in the same time and that is the whole of the difference.
         //
         // Measured on a route that *turns*. On a straight one the offsets are
         // constant and this can only ever pass, which is the trap the first
         // version of this test fell into.
-        let walk = |route: &Route, lane: Lane| {
+        let walk = |map: &Map, route: &Route, lane: Lane| {
             let mut walked = 0.0;
-            let mut previous = walk_point(route, 0.0, lane).0;
+            let mut previous = walk_point(map, route, 0.0, lane).0;
             for step in 1..=400 {
-                let at = walk_point(route, f64::from(step) / 400.0, lane).0;
+                let at = walk_point(map, route, f64::from(step) / 400.0, lane).0;
                 walked += previous.distance(at);
                 previous = at;
             }
             walked
         };
 
-        // On the shipped walk - one straight leg - two per cent is the
-        // threshold below which a desynchronised crowd is invisible rather than
-        // reading as a bug.
+        // On the shipped walk - one straight leg - the drawn journey differs
+        // from the nominal one only by the corridor opening and closing under
+        // the monkey, which is a few metres over sixty.
         let shipped = WorkedRoute::start().0;
         let nominal = shipped.length() as f32;
-        for row in 0..LANES {
-            let walked = walk(&shipped, Lane(row));
+        for index in 0..30u32 {
+            let walked = walk(village(), &shipped, Lane(index));
             assert!(
-                (walked - nominal).abs() / nominal < 0.02,
-                "lane {row} walks {walked} m against a nominal {nominal} m"
+                (walked - nominal).abs() / nominal < 0.15,
+                "worker {index} walks {walked} m against a nominal {nominal} m"
             );
         }
 
-        // Around a corner an outer lane genuinely covers more ground - that is
-        // what the outside of a turn costs, not a defect. What has to hold is
-        // that the excess is bounded by the offset times the total turning, so
-        // it stays proportional to the lane rather than running away with the
-        // route's shape.
+        // Around a corner an outer offset genuinely covers more ground - that
+        // is what the outside of a turn costs, not a defect. What has to hold
+        // is that the excess stays bounded by the offsets times the total
+        // turning, so it is proportional to the offset rather than running away
+        // with the route's shape.
         let bent = bent_route();
+        let map = Map::parse(concat!(
+            "#########\n",
+            "#.......#\n",
+            "#.@.#.*.#\n",
+            "#...#...#\n",
+            "#.......#\n",
+            "#########",
+        ))
+        .expect("the test map parses");
         let nominal = bent.length() as f32;
-        for row in 0..LANES {
-            let lane = Lane(row);
-            // Both offsets count: a stagger along the route swings with the
-            // heading at a corner just as a lateral offset does.
-            let offset = lane.lane_metres().abs() + lane.stagger_metres().abs();
-            let bound = offset * std::f32::consts::PI + 0.05;
-            let excess = (walk(&bent, lane) - nominal).abs();
+        for index in 0..30u32 {
+            let lane = Lane(index);
+            // Every offset counts: a scatter along the route swings with the
+            // heading at a corner just as a lateral one does, and the wobble
+            // stretches the sampling on top of both.
+            let offset = SWARM_HALF_MAX as f32 + lane.scatter().abs();
+            let bound = offset * std::f32::consts::PI + nominal * SWARM_WOBBLE + 0.05;
+            let excess = (walk(&map, &bent, lane) - nominal).abs();
             assert!(
                 excess <= bound,
-                "lane {row} is {excess} m over a bent walk, past a bound of {bound}"
+                "worker {index} is {excess} m over a bent walk, past a bound of {bound}"
             );
         }
     }
 
     #[test]
-    fn an_outer_lane_turns_a_corner_instead_of_teleporting_across_it() {
+    fn an_outer_offset_turns_a_corner_instead_of_teleporting_across_it() {
         // Taking the offset axis from the current leg's heading swings it
-        // through the whole turn in one frame, and an outer-lane monkey jumps
-        // sideways by twice its lane width. Nothing on the shipped map turns
-        // yet, so only a bent route can see this.
+        // through the whole turn in one frame, and an outer monkey jumps
+        // sideways by twice its offset. Nothing on the shipped map turns yet,
+        // so only a bent route can see this.
         let route = bent_route();
+        let map = Map::parse(concat!(
+            "#########\n",
+            "#.......#\n",
+            "#.@.#.*.#\n",
+            "#...#...#\n",
+            "#.......#\n",
+            "#########",
+        ))
+        .expect("the test map parses");
         let lane = Lane(0);
-        let mut previous = walk_point(&route, 0.0, lane).0;
+        let mut previous = walk_point(&map, &route, 0.0, lane).0;
         for step in 1..=400 {
-            let at = walk_point(&route, f64::from(step) / 400.0, lane).0;
+            let at = walk_point(&map, &route, f64::from(step) / 400.0, lane).0;
             let jump = previous.distance(at);
             assert!(
-                jump < 0.2,
-                "an outer lane jumped {jump} m in one four-hundredth of a walk"
+                jump < 0.4,
+                "an outer offset jumped {jump} m in one four-hundredth of a walk"
             );
             previous = at;
         }
@@ -889,8 +1191,10 @@ type CartAvatarQuery<'w, 's> = Query<
 ///
 /// Only the box is placed: the seats are its children, so their offsets and
 /// scale follow for free. All this loop decides is how many of them are visible.
+#[allow(clippy::too_many_arguments)]
 pub fn position_carts(
     layout: Res<SceneLayout>,
+    village: Res<Village>,
     route: Res<WorkedRoute>,
     multipliers: Res<Multipliers>,
     carts_res: Res<Carts>,
@@ -927,7 +1231,7 @@ pub fn position_carts(
         // workers pass behind it instead of through it. That is one lane's
         // worth of ground towards the viewer, which the depth rule then
         // handles on its own.
-        let (point, _) = cart_point(&route.0, fraction);
+        let (point, _) = cart_point(&village, &route.0, fraction);
         transform.translation = layout
             .board_snapped(point, CART_BOX_TEXELS.y * 0.5 * scale)
             .extend(isometric::stand_z(point, isometric::NUDGE_STEP));
