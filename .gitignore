@@ -13,3 +13,9 @@ __pycache__/
 
 # Local Tailscale proxy status output
 /127.0.0.1:*
+
+# Screenshots captured while playtesting or reviewing. The rendering work is
+# verified by capturing frames from a running game (`docs/testing.md`), and
+# those land wherever the person capturing them happened to be standing - which
+# is usually here. Root level only: the actual art lives under `assets/`.
+/*.png
