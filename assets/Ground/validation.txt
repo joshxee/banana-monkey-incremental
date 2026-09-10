@@ -1,0 +1,8 @@
+PASS: 64 tiles; 128x64 cells; 4096 opaque pixels each.
+PASS: all ground colors in canonical 31-color palette; binary alpha.
+PASS: source / atlas / individual PNG equality.
+PASS: all 128 compatible edge pairs at 129 samples; all variant edge strips identical.
+PASS: 960x640 assembled scene: every pixel covered exactly once.
+PASS: five unchanged 64x64 worker references, visible bounds 38x55.
+PASS: sparse authored texture occupies less than 3.5% of each tile.
+Scope: asset exports only; no runtime or economy changes.
