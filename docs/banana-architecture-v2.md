@@ -581,6 +581,301 @@ That is an interim: pointed at the town centre, the grove sat off the top of the
 screen and took the whole outbound leg with it, and a fixed board has to hold
 both ends of the economy for a playtest to mean anything. A camera the player
 can pan and zoom replaces it, and is what the mobile brief actually asks for.
+**Superseded by D26.**
+
+**D26 — Where the player is looking belongs to the player.**
+*(Camera increment.)*
+
+`SceneLayout` recomputed its aim from the window every frame and pointed the
+board at the midpoint of the walk. Pan and zoom are now a `BoardCamera`
+resource — a focus in **metres** and a zoom — and the layout derives its origin
+and scale from it. The window still decides the HUD's reserve: the banner's
+strip, the store's panel, and the square the two of them leave. It no longer
+decides where the board is pointed.
+
+The focus is kept in metres rather than as a screen origin, and that is what
+makes it survive a zoom, a rotation and a resize without drifting: the player is
+looking at a *place*, not at a pixel.
+
+*Both gestures are one operation.* `hold(world, screen)` re-aims the camera so a
+given metre sits under a given point. A drag holds the metre the finger landed
+on; a pinch holds the metre between two fingers while the scale changes under
+it. Neither is expressed as "move the camera by an amount", which is how a pinch
+ends up sliding the ground out from between the fingers pinching it.
+
+*Harvest gets right of first refusal on a pointer; the camera takes what is
+left.* A manual harvest is a drag that starts on a banana node and a pan is a
+drag that starts anywhere else, so the only way to tell them apart is the order
+the two systems run in. Eligibility is decided once, at touch-down, and never
+revisited — a finger that starts on the store and slides onto the grass is still
+scrolling the store. A pinch needs *two* unclaimed touches, so a second finger
+cannot tear a banana out of the player's hand. Adding the drag-and-drop harvest
+of a later increment adds a place harvest claims, and the camera gives it up
+without knowing the node exists.
+
+*Zoom is continuous during a pinch and settles onto a whole step on release.*
+The ground is a vertex-coloured mesh and takes any scale; it is the sprites that
+crawl off the texel grid, and a gesture is the one moment the player is looking
+at their own fingers rather than at a monkey's texels. Rest is when the grid
+shows, so rest is where it is enforced.
+
+*Texel snapping is measured from the board, not from the window.* `snap` used to
+round an absolute screen position, and `origin` is not a multiple of `zoom` — a
+fixed sub-pixel bias nobody could see on a fixed board, and a per-frame one that
+makes the whole cast jump in zoom-sized steps against smoothly sliding terrain
+the moment the player can pan. `board_snapped` quantises the offset from the
+origin instead, and the origin itself is rounded to whole pixels.
+
+*The pan clamp is measured from the walk, and it bounds what is on screen
+rather than where the focus is.* The field is the **polyline** through the home
+tree, the town centre and the *worked* grove, with a margin; the slack allowed
+off it shrinks as the player zooms in, capped at whatever keeps the nearest
+point of the walk inside the short side of the safe area. The guarantee is
+therefore "some of the ground your monkeys cover is always on screen" — and
+deliberately not "the village is always on screen", because looking at the
+middle of the route with neither end in frame is a thing a player should be able
+to do.
+
+The two obvious cheaper versions both fail, and both failed here first. A
+map-sized leash lets a player flick into forty metres of identical jungle with
+no way of knowing which way is back. A *bounding box* around the same three
+points is barely better: its corners are two hundred projected pixels from
+anything, and clamping the bare focus into it let ten drags on a phone land on a
+corner of canopy and a screenful of empty sky. The test that was supposed to
+prevent that asserted the clamped focus was nearer a landmark than the
+*diagonal of the box*, which is true by construction — a tautology that passed
+throughout. The grove that is never worked is out of the field for the same
+reason: folding in a node 117 m south stretched the leash half again as far for
+ground nobody has ever been to. It joins the walk the day it is worked.
+
+*The floor is how big a monkey is, not how much map fits.* A monkey is 22 texels,
+so zoom 2 renders it 44 logical pixels. Fitting the whole 69×69 board on a phone
+would need about zoom 0.3 and a six-pixel monkey: the entire map visible and
+nothing on it worth looking at.
+
+Two limits are stated here rather than left to be rediscovered. **The board opens
+at its floor**, so pinching outwards on a fresh board does nothing. It sits there
+because the opening hand-harvest drag (D24) and the three support stations must
+all be inside the safe area, and on an 844×390 landscape phone — the tightest
+safe area the game supports, 286 px square — that fails at any zoom above 2. And
+**the village is wider than a phone at that zoom**: the projected span from the
+home tree to the stall exceeds the safe area at *any* focus, so the opening frame
+guarantees the interaction — home tree, town centre, support stations — and lets
+the hut sit just off the right edge, one short drag away. The alternative was
+pulling the stall back towards the delivery point it was deliberately moved off
+(D25), trading a known-good property for a framing nicety.
+
+The support stations moved from a line out from the delivery point (five, eleven
+and five metres) onto an 8.2 m ring at bearings chosen for *projected*
+separation, which the isometric fold makes a different question from ground
+separation. The line separated its members on screen only because the far one
+was twice as far out as the near one, and the eleven-metre station left the
+screen entirely at the camera's opening zoom — a chef the player had paid for,
+drawing wages somewhere they could not see.
+
+*The delivery point is drawn.* It was not, and that is the flaw the camera made
+impossible to keep ignoring. The town centre is where every delivery lands and
+where the opening hand-harvest drag ends, and it rendered as the same green as
+the forty tiles around it: a new player was shown a lawn with the word VILLAGE
+floating over it and asked to drag a banana onto the label. The one prop that
+could have named the spot — the stall — stands eight metres aside so it does not
+swallow the arriving queue (D25), which is off the side of a phone at the
+opening zoom. A depot is now trodden into the **ground mesh** at the town
+centre: nine tiles of bare earth with a scuffed ring around them. Painting it
+into the terrain rather than building a prop is what makes it free — no draw
+call, no sorting, and above all no *span*, because it sits exactly where the
+board is already aimed and so cannot push anything else off the screen. The
+label reads DEPOT, names the drop target rather than the terrain, and sits a
+monkey's height above the pad instead of six metres over empty sky.
+
+*Floaters carry their own edge.* Every floater colour failed contrast against
+the ground it lands on: town floor is #A3C975 at luminance 0.508 and GOLD is
+0.586, which is 1.14:1 — under the 3:1 floor for large text before the alpha
+fade even begins. The palette was chosen against the cream HUD, not against
+grass. Four INK copies behind each glyph take it to 8.4:1 and fix all four
+floater colours at once, without repainting a palette that is right everywhere
+else. This matters more than it sounds: the floater is the game's primary
+reward feedback.
+
+**D27 — A crowd is per-monkey, and none of it reaches the economy.**
+*(Swarm increment.)*
+
+Three rows and five stagger steps is fifteen distinct positions, so every
+fifteenth hire was drawn pixel-identical to the first — and at thirty workers
+the repeat is the thing the eye locks onto. Worse, two monkeys on the same
+segment fraction were a *rigid constellation*: the same distance apart for the
+whole trip, every trip, never passing. That is what made a crowd read as a
+formation. Every offset is now a continuous function of the hire index.
+
+*The offsets are hashed from the hire index, never stored and never drawn from
+an RNG.* The index is already persisted, so a monkey comes back from a reload
+standing exactly where it stood, and the save format learns nothing. An RNG
+would need five more numbers per worker to say the same thing.
+
+*The fraction remap is a sine bulge, and the shape is the whole argument.*
+`f' = f + a·sin(πf)` with `|a| ≤ 0.06` re-times where a monkey is **drawn**
+along the walk without changing where the economy has it. The remap is the
+identity at both ends, so a monkey is drawn leaving the depot and reaching the
+grove at exactly the fractions the economy has it at, and only the middle moves.
+
+That identity is a *floating-point* fact, not an algebraic one, and the first
+version of this decision claimed otherwise. `sin(π)` in `f64` is 1.22e-16, not
+zero; `f + a·sin(πf)` is exactly 1.0 at f = 1 only while `|a|·1.22e-16` stays
+under half an ulp, which holds for `|a| < 0.907`. There is fifteen thousand
+times that margin at the shipped 0.06, and the test asserts the equality rather
+than trusting the algebra.
+
+Two further bounds on `a`, neither of them the aesthetic one. **Monotonicity**
+needs `|a| < 1/π ≈ 0.318`, since `d/df = 1 + aπ·cos(πf)`; past it a monkey
+visibly walks backwards, and monotonicity plus fixed endpoints is also what
+makes the range exactly [0,1], so no separate range argument is needed.
+**Apparent speed** is what actually binds: the drawn speed is `v·(1 ± aπ)`, so
+the shipped 0.06 already means leaving 19% fast and arriving 19% slow.
+
+*What protects the economy is the plugin seam, not the shape of the remap.*
+`swarm_fraction` is reachable only from `walk_point`, which only presentation
+calls; the vanishing endpoints buy *visual* continuity at a segment boundary.
+Two contracts hold the seam from different sides:
+`the_swarm_never_reaches_the_economy` asserts a crowd of sixty delivers on the
+same tick as a monkey walking alone — which catches a spread or scatter leak,
+and cannot catch a wobble leak, because a wobble routed into the simulation
+would still deliver on tick 950. `the_hire_index_is_invisible_to_the_economy` is
+the one that sees that: it runs the same world from two different hire-index
+bases and demands bit-identical deliveries and treasury.
+
+Neither half of the offset produces overtaking on its own, which is why both
+exist. Relative position is `Δb·sin(πf) + Δs`; `sin` is non-negative with zeros
+at both ends, so a pair swaps **iff the two differences have opposite signs and
+the varying one is larger** — closed form, not something to sample. Independent
+uniform draws put that at 14.95% of pairs; the shipped crowd of sixty measures
+18.8%.
+
+Two limits of the bulge, recorded rather than fixed. The order at *both
+endpoints* is `Δs` — a fixed function of the hire indices, identical on every
+trip forever, so every overtake is transient and exactly undone by arrival.
+And the passing is **end-loaded**: relative velocity is `∝ cos πf`, which is
+zero at the midpoint, so three quarters of crossings happen before f = 0.25 and
+the middle of the walk is the rigid read the increment set out to kill. An
+index-hashed second harmonic `c·sin(2πf)` has its maximum rate at the midpoint
+and would fix that, but it is bought with apparent speed, which is already the
+binding budget.
+
+*The swarm is drawn across the local corridor, not across a constant.* A fixed
+lane width has to be narrow enough for the tightest point on the route, so it is
+that narrow everywhere. `Map::corridor_half_width` casts a ray either way across
+the walk and answers with the *smaller* clearance, so a crowd centred on the
+route stays inside the gap rather than leaning into whichever wall is further
+off. The clearance is measured **after** the along-route scatter, at the point
+the monkey actually stands: measuring it before and then displacing by up to
+seven metres asks the width of one place and spends it at another, which drew
+four of sixty workers up to a metre and a half inside the jungle wall.
+
+Two things worth stating plainly about what this is currently worth. The
+corridor sits at its cap for **94.8% of the shipped walk** — the machinery is
+inert almost everywhere, and the one squeeze (eight metres of crowd to five and
+a half) lasts about a second out of a twenty-second leg. And the *slope* is
+unbounded: the ray-cast made the width continuous, not gentle, so at the pinch
+the outermost monkey crosses sideways at four metres a second while walking at
+three. Both are investments in maps that do not exist yet. A map with a real
+neck — mid-route, four or five metres wide, several seconds long — is what would
+make the mechanism worth the reader's attention, and is also what would make the
+slope worth bounding.
+
+The traversal is a grid ray-cast rather than a sampled march, and the reason is
+continuity rather than precision. Probing at fixed intervals answers in whole
+steps, so the width jumps by a step as the ray creeps forward, and a swarm drawn
+across that width snaps narrower and wider as it walks. It reads as the crowd
+flinching, and it is what
+`an_outer_offset_turns_a_corner_instead_of_teleporting_across_it` caught.
+
+*Standing is a different shape from walking, and the two are blended rather than
+switched between.* At an endpoint a monkey takes a bearing and a radius instead
+of a corridor offset, so the group is a crowd around the thing it is queueing
+at. The two shapes share no term, and switching between them on the segment
+boundary cost a **six metre jump** — three tiles, ten at worst — four times per
+cycle per monkey, at exactly the moment a delivery lands. The walking path is
+held to a continuity bar and the handoff was allowed thirty times it. A monkey
+now steps aside over the first third of the arriving segment, and the bar covers
+the whole cycle: the worst jump is 0.10 m in a rendered frame, against 0.05 m
+for ordinary walking.
+
+The crowd is a **horseshoe, open away from the viewer**, not a full ring. A ring
+is symmetric on the ground and asymmetric on screen, because every sprite grows
+upward from its feet: the far arc's bodies pile over the middle while the near
+arc's feet leave the near half bare, and the whole thing reads as a heap beside
+the landmark rather than a crowd around it. Leaving the up-screen arc empty
+keeps the pad and the trunk visible, and a crowd at a counter stands in front of
+it anyway. The outer radius is sized to the depot's own trodden ground, so the
+pad contains the crowd standing on it.
+
+One scaling risk, recorded because it is not a constant tweak: the band's area
+is fixed while the standing share of a cycle *rises* with Chefs, and the worker
+cap is a thousand. Holding density constant needs the radius to grow with the
+square root of the crowd, which means passing the standing count into the
+placement.
+
+The cart's bay is measured from the swarm's own edge rather than set at a fixed
+distance, so it leads the crowd through the pinch instead of parking in the
+hedge beside it: the ground the swarm has to squeeze through is the ground the
+cart has to squeeze through.
+
+**D28 — The art sets the scale, and the simulation never touches it.**
+*(Art increment.)*
+
+The cast and the scenery were placeholders: coloured rectangles with a two-texel
+outline, a hut built from three shaded quads, a palm whose crown was a 0.7 m
+slab. Every one of them is now drawn art — the spider worker's walk and idle
+loops, the town centre treehouse, five jungle plants and the two banana states.
+
+*One scale, taken from the worker.* The assets were all authored against the
+same 64×64 worker reference, so they already agree with each other; the game
+needs exactly one conversion from art pixels to world texels. `ART_SCALE` is
+pinned by the monkey — its 55-pixel silhouette comes out 22 texels, the height
+the placeholder rectangle was drawn at — so the board, the camera's zoom floor
+and the support fan all keep the numbers they were tuned against, and every
+tree, roof and leaf inherits its proportion to the monkey from the artist rather
+than from a constant chosen here.
+
+The one deviation is stated as one. The town centre is drawn at about ten
+monkeys tall, which is a fine building and a poor *landmark*: at the shared
+scale it is wider than a phone's entire safe area, and it covered the depot pad
+it stands beside, the crowd unloading there and both ends of the opening drag.
+It is drawn at 0.62.
+
+*Sprites are anchored at their feet, and that is what let the art replace the
+meshes without touching the layering.* Every manifest gives a ground anchor in
+art pixels rather than a centre, and Bevy's `Anchor` takes a fraction out from
+the centre with the y axis the other way up. A sprite anchored that way sorts
+through `stand_z` exactly as a prism built from its footprint did (D25), so the
+treehouse covers a monkey behind it and not one in front, with nothing new in
+the sorting rule. Sizing a sprite to its opaque bounds instead is the tempting
+shortcut and is exactly wrong: the two banana states differ only in whether the
+bunch is on, and bounds-fitting would move the plant the moment it was picked.
+
+*The simulation spawns the monkey; the presentation dresses it.* The spawn
+systems used to build their own `Sprite`s, which worked only because a coloured
+rectangle needs no resource to make — the first sprite that needed an asset
+server broke every headless contract at once. `dress_actors` runs in
+presentation and gives art to any actor that has none, so a thousand ticks of a
+sixty-monkey economy still runs with no window.
+
+*The playhead is per monkey, seeded from the hire index.* A shared animation
+clock would have sixty monkeys plant the same foot on the same frame — the
+formation read D27's offsets exist to break, reintroduced in the one channel
+those offsets cannot reach. Only the two loops are played. The artist also
+supplied `rise` and `settle` transitions, but they are one-shot clips needing
+playback state and an interruption rule, and *moving* and *not moving* is the
+whole of what the board has to say.
+
+Two things are deliberately left as they were. The idle animations for the
+jungle and the town centre move by a single native pixel, which at this scale is
+four tenths of a texel and cannot render, so those use the static exports and
+the game loads five small textures instead of two atlases of 2688×2816. And the
+support roles are still told apart by a tinted primitive worn over the sprite —
+a cap, a crate, a desk — because there is no prop art. Those primitives are now
+placed from the art's measured silhouette rather than from the rectangle they
+were authored against, which is why they read as carried rather than as floating
+squares, but they remain the weakest thing on the board.
 
 ---
 

@@ -1,3 +1,4 @@
+mod art;
 mod domain;
 mod game;
 #[cfg(test)]

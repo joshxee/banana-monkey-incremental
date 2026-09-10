@@ -3,6 +3,7 @@ use std::time::Duration;
 use bevy::{diagnostic::FrameCount, input::touch::Touches, prelude::*, window::PrimaryWindow};
 
 use crate::{
+    art,
     domain::{
         BANANAS_PER_HARVEST, Carts, Committed, CycleSpec, CycleTerms, EconomySnapshot,
         EconomyState, FedStaff, HarvestCycle, Multipliers, Research, SIM_HZ, Staff, SupportCycle,
@@ -165,6 +166,8 @@ impl Plugin for PresentationPlugin {
         app.insert_resource(map::Village::start())
             .insert_resource(map::WorkedRoute::start())
             .init_resource::<SceneLayout>()
+            .init_resource::<BoardCamera>()
+            .init_resource::<CameraGesture>()
             .init_resource::<HarvestController>()
             .init_resource::<PendingSettlement>()
             .init_resource::<Feedback>()
@@ -214,7 +217,10 @@ impl Plugin for PresentationPlugin {
                         hud::sync_menu_visibility,
                     )
                         .chain(),
-                    handle_harvest_input,
+                    // After harvest, never before: the two gestures compete
+                    // for the same fingers and harvest has right of first
+                    // refusal. See `handle_camera_input`.
+                    (handle_harvest_input, handle_camera_input).chain(),
                     hud::scroll_store,
                     move_keyboard_harvest,
                     queue_manual_settlement,
@@ -225,7 +231,10 @@ impl Plugin for PresentationPlugin {
             .add_systems(
                 Update,
                 (
-                    worker::position_workers,
+                    // Before anything poses the cast: the simulation spawns
+                    // actors with no art on them, and this is what puts it
+                    // there. See `worker::dress_actors`.
+                    (worker::dress_actors, worker::position_workers).chain(),
                     worker::position_carts,
                     worker::animate_workers,
                     support::sync_support_avatars,
@@ -284,7 +293,11 @@ struct BananaAnimation {
 #[derive(Component)]
 struct Floater {
     elapsed: f32,
-    origin: Vec2,
+    /// Where it was earned, in **metres on the ground**, never in screen
+    /// pixels. A floater captured at a screen position detaches from the stall
+    /// it came from the moment the board moves under it, and hangs in the
+    /// window for the rest of its life.
+    anchor: Vec2,
 }
 
 #[derive(Component, Clone, Copy)]
@@ -339,25 +352,219 @@ impl ButtonAction {
     }
 }
 
+/// The player's view of the board: where they are looking, and how close.
+///
+/// Pan and zoom are **player state**, not state derived from the window. That
+/// is the whole of the camera increment. `SceneLayout` used to recompute its
+/// aim from the viewport every frame and point the board at the midpoint of the
+/// walk, which D25 recorded as an interim for a board with no controls; the
+/// viewport now decides the HUD's reserve and nothing else, and where the board
+/// is pointed belongs to the person holding the phone.
+///
+/// Two numbers, because two numbers are all `SceneLayout::board` needs. Keeping
+/// the focus in *metres* rather than as a screen origin is what makes it
+/// survive a zoom, a rotation of the device and a resize without drifting: the
+/// player is looking at a place, not at a pixel.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub(crate) struct BoardCamera {
+    /// The ground position, in metres, held at the centre of the safe area.
+    focus: Vec2,
+    /// Screen pixels per projected pixel, as drawn this frame.
+    ///
+    /// Continuous while a pinch is live and whole-numbered the rest of the
+    /// time. The ground is a vertex-coloured mesh and takes any scale without
+    /// complaint; it is the *sprites* that shimmer off the grid, and a gesture
+    /// is the one moment the player is looking at their own fingers rather than
+    /// at a monkey's texels. So the pinch tracks continuously and the zoom
+    /// settles onto a whole step when the fingers lift.
+    zoom: f32,
+    /// The whole step `zoom` is settling towards.
+    resting_zoom: f32,
+}
+
+impl BoardCamera {
+    /// The closest the board comes.
+    const MAX_ZOOM: f32 = 6.0;
+
+    /// The furthest the board goes, bounded by **how big a monkey is**, never
+    /// by how much of the map fits.
+    ///
+    /// A monkey is 22 texels tall, so this renders one 44 logical pixels — about
+    /// a thumbnail, and the point below which the cast stops reading as animals
+    /// and starts reading as confetti. Clamping to "fit the 69x69 map" instead
+    /// would put a phone near zoom 0.3 and a monkey at six pixels: the whole
+    /// board visible and nothing on it worth looking at. The map is explored by
+    /// panning (D24), not by zooming out far enough to see it all at once.
+    const MIN_ZOOM: f32 = 2.0;
+
+    /// Where the board opens: at the floor, so the board opens at its widest
+    /// and the player only ever zooms *in*.
+    ///
+    /// Two things have to be true of the opening frame and they pull the same
+    /// way. The player's first action is a hand-harvest drag from the home tree
+    /// to the town centre (D24), five tiles apart, and both ends must sit
+    /// inside the safe area or the game opens on a gesture that cannot be made.
+    /// The three support stations must be visible too, or staff the player has
+    /// paid for draw wages off the side of the screen. On an 844x390 landscape
+    /// phone — the tightest safe area the game supports, 286 px square — the
+    /// second of those fails at any zoom past this one.
+    ///
+    /// So this sits on `MIN_ZOOM` rather than above it, and pinching outwards
+    /// from a fresh board does nothing. That is a real cost, and it is the
+    /// cheaper one: the alternative is opening below the zoom at which a monkey
+    /// reads as a monkey. `the_board_opens_framed_on_the_first_drag` and
+    /// `every_support_avatar_is_on_screen_when_the_game_opens` are what keep
+    /// both halves honest if someone raises it.
+    const DEFAULT_ZOOM: f32 = Self::MIN_ZOOM;
+
+    /// How fast a settling zoom closes on its whole step, per second.
+    ///
+    /// A hard snap on release is a visible jump of up to half a step - a
+    /// quarter of the board at the low end - so it eases instead.
+    const SETTLE_RATE: f32 = 14.0;
+
+    /// The view a new player opens on: the opening drag, centred.
+    fn opening(map: &Map) -> Self {
+        let town_centre = isometric::tile_centre(map.town_centre());
+        let home_tree = map
+            .home_trees()
+            .first()
+            .map_or(town_centre, |&tile| isometric::tile_centre(tile));
+        Self {
+            focus: town_centre.midpoint(home_tree),
+            zoom: Self::DEFAULT_ZOOM,
+            resting_zoom: Self::DEFAULT_ZOOM,
+        }
+    }
+
+    #[cfg_attr(not(any(test, target_arch = "wasm32")), allow(dead_code))]
+    pub(crate) fn zoom(self) -> f32 {
+        self.zoom
+    }
+
+    #[cfg_attr(not(any(test, target_arch = "wasm32")), allow(dead_code))]
+    pub(crate) fn focus(self) -> Vec2 {
+        self.focus
+    }
+
+    /// Where the projected origin lands on screen, given the centre of the safe
+    /// area.
+    ///
+    /// The single place the camera becomes pixels. `SceneLayout::board` and the
+    /// gesture handlers all read the board through this, so there is no second
+    /// opinion about where the player is looking.
+    fn origin(self, scene_center: Vec2) -> Vec2 {
+        scene_center - isometric::project(self.focus) * self.zoom
+    }
+
+    /// The ground position, in metres, under a point on the screen.
+    fn ground_at(self, scene_center: Vec2, screen: Vec2) -> Vec2 {
+        isometric::unproject((screen - self.origin(scene_center)) / self.zoom)
+    }
+
+    /// Re-aim so that `world` sits under `screen` at the current zoom.
+    ///
+    /// This is the whole of both gestures. A drag holds the metre the finger
+    /// landed on; a pinch holds the metre between the two fingers while the
+    /// zoom changes under it. Neither is expressed as "move the camera by an
+    /// amount" - which is how a pinch ends up sliding the ground out from
+    /// between the fingers that are supposedly pinching it.
+    fn hold(&mut self, scene_center: Vec2, world: Vec2, screen: Vec2) {
+        self.focus =
+            isometric::unproject(isometric::project(world) + (scene_center - screen) / self.zoom);
+    }
+
+    /// Take the zoom to `wanted`, holding the ground under `screen` in place.
+    fn zoom_to(&mut self, scene_center: Vec2, screen: Vec2, wanted: f32) {
+        let held = self.ground_at(scene_center, screen);
+        self.zoom = wanted.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+        self.hold(scene_center, held, screen);
+    }
+
+    /// End a pinch: the zoom settles onto the nearest whole step, so the scene
+    /// comes to rest with every sprite back on the texel grid.
+    fn settle(&mut self) {
+        self.resting_zoom = self.zoom.round().clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+    }
+
+    /// Ease a settling zoom towards its whole step, holding `screen`.
+    fn ease(&mut self, scene_center: Vec2, screen: Vec2, delta_seconds: f32) {
+        if self.zoom == self.resting_zoom {
+            return;
+        }
+        let closed = 1.0 - (-Self::SETTLE_RATE * delta_seconds).exp();
+        let next = self.zoom + (self.resting_zoom - self.zoom) * closed;
+        // Land exactly rather than approaching forever: a zoom a thousandth off
+        // a whole step keeps `snap` off the grid for no visible benefit.
+        let wanted = if (next - self.resting_zoom).abs() < 1e-3 {
+            self.resting_zoom
+        } else {
+            next
+        };
+        self.zoom_to(scene_center, screen, wanted);
+    }
+
+    /// Hold the camera over ground the player has a reason to look at.
+    ///
+    /// What is bounded is how far the focus may stray *from the walk*, and the
+    /// bound tightens as the player zooms out — so whatever they do, some of
+    /// the ground their monkeys cover is on screen. That is the guarantee, and
+    /// it is deliberately not "the village is on screen": looking at the middle
+    /// of the route, with neither end in frame, is a thing a player should be
+    /// able to do.
+    ///
+    /// Clamping the focus into the field's bounding *box* is not a weaker
+    /// version of this, it is a different and much emptier promise. Half a safe
+    /// area is 71 projected pixels at the opening zoom against a box a thousand
+    /// across, so a focus legally parked on a corner shows five screens of
+    /// nothing — which is exactly what ten drags on a phone produced: a corner
+    /// of canopy, a screenful of sky, and no landmark to steer back by.
+    fn clamped(self, field: Field, view: Vec2) -> Self {
+        Self {
+            focus: isometric::unproject(field.hold(
+                isometric::project(self.focus),
+                view,
+                self.zoom,
+            )),
+            zoom: self.zoom.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM),
+            resting_zoom: self.resting_zoom.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM),
+        }
+    }
+}
+
+impl Default for BoardCamera {
+    fn default() -> Self {
+        Self::opening(map::start())
+    }
+}
+
 /// Where the board sits on screen, and how the ground plane maps onto it.
 ///
 /// This used to *be* the world: a unit square holding an invented route, scaled
-/// to fit. It is now only a camera. Every position it reports is the projection
-/// of a real position in metres on `map`'s ground plane, which is what lets the
-/// drawn village and the walked economy be the same place.
+/// to fit. It is now only a projection of the map through a [`BoardCamera`].
+/// Every position it reports is the projection of a real position in metres on
+/// `map`'s ground plane, which is what lets the drawn village and the walked
+/// economy be the same place.
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SceneLayout {
     pub(crate) viewport: Vec2,
-    scene_center: Vec2,
+    /// The part of the window no HUD surface covers. Everything the player is
+    /// meant to look at is framed against *this*, never against the viewport.
+    safe: Rect,
     scene_side: f32,
     header_height: f32,
+    store_height: f32,
     short_landscape: bool,
-    /// The camera, in two numbers: where the projected origin lands on screen,
-    /// and how many screen pixels a projected pixel is worth. [`Self::board`]
-    /// is the only road from metres to screen, and these are all it needs.
+    /// The camera resolved into pixels: where the projected origin lands on
+    /// screen, and how many screen pixels a projected pixel is worth.
+    /// [`Self::board`] is the only road from metres to screen, and these are
+    /// all it needs.
     origin: Vec2,
     zoom: f32,
-    /// Ground anchors, in metres, kept so a hit test never re-walks the map.
+    /// The ground the player has a reason to look at, projected. The pan clamp
+    /// lives here so a hit test never re-walks the map.
+    field: Field,
+    /// Ground anchors, in metres, kept for the same reason.
     town_centre: Vec2,
     grove: Vec2,
     home_tree: Vec2,
@@ -369,26 +576,99 @@ impl Default for SceneLayout {
     }
 }
 
-impl SceneLayout {
-    /// How much of the ground is on screen, across the board's short side.
-    ///
-    /// Twenty tiles is the mobile brief: far enough in that a monkey reads as a
-    /// monkey, which is the constraint that made the home tree necessary in the
-    /// first place (D24). The board never zooms out to frame the whole 69-tile
-    /// map, because at that zoom a monkey is two pixels.
-    const TILES_ACROSS: f32 = 20.0;
+/// How far past the ground they work the player may pan, in metres.
+///
+/// Six tiles: enough that the village is never pinned against the edge of the
+/// screen, and short enough that the player can always see something of theirs.
+const FIELD_MARGIN: f32 = 12.0;
 
+/// The ground the camera is allowed to look at: the walk, projected, with a
+/// margin around it.
+///
+/// A *polyline*, not a bounding box, and that is the whole difference between a
+/// guarantee and a slogan. The box around the home tree, the town centre and
+/// the grove has corners that are two hundred projected pixels from any of the
+/// three — off the walk, off the path, on ground nobody has ever been to — and
+/// a focus is perfectly entitled to sit on one. Measuring from the walk itself
+/// means the slack is slack *from something*.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Field {
+    /// The walk, projected, in the order it is travelled: the home tree the
+    /// player picks by hand, the town centre everything is delivered to, and
+    /// the grove the workers walk out to.
+    walk: [Vec2; 3],
+    /// How far off the walk the camera may stray, in projected pixels.
+    margin: f32,
+}
+
+impl Field {
+    /// The point on the walk nearest `at`.
+    fn nearest(self, at: Vec2) -> Vec2 {
+        self.walk
+            .windows(2)
+            .map(|leg| {
+                let (from, span) = (leg[0], leg[1] - leg[0]);
+                let along = if span.length_squared() > f32::EPSILON {
+                    ((at - from).dot(span) / span.length_squared()).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                from + span * along
+            })
+            .min_by(|a, b| a.distance_squared(at).total_cmp(&b.distance_squared(at)))
+            .unwrap_or(self.walk[0])
+    }
+
+    /// Where a focus of `at` is allowed to settle, given how much of the board
+    /// a screenful covers.
+    ///
+    /// The slack tightens as the player zooms *in*, because a screenful then
+    /// covers less ground: it is capped at whatever keeps the nearest point of
+    /// the walk inside the *short* side of the safe area, so the guarantee
+    /// holds in portrait and landscape alike. Zoomed out, the margin is what
+    /// binds instead.
+    fn hold(self, at: Vec2, view: Vec2, zoom: f32) -> Vec2 {
+        // Nine tenths of the half-extent, not all of it. At exactly half, the
+        // nearest point of the walk lands *on* the edge of the safe area, where
+        // a rounded origin and a float comparison decide whether it is on
+        // screen or a pixel outside it. The tenth is what makes the guarantee
+        // survive being asserted.
+        let reach = view.min_element() * 0.45 / zoom;
+        let slack = self.margin.min(reach);
+        let near = self.nearest(at);
+        near + (at - near).clamp_length_max(slack)
+    }
+
+    /// How long the walk is, projected. Only the tests care, and what they care
+    /// about is that it grows with the ground the player works.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn span(self) -> f32 {
+        self.walk
+            .windows(2)
+            .map(|leg| leg[0].distance(leg[1]))
+            .sum()
+    }
+}
+
+impl SceneLayout {
     pub(crate) fn for_viewport(viewport: Vec2) -> Self {
         Self::for_view(viewport, View::Full)
     }
 
     pub(crate) fn for_view(viewport: Vec2, view: View) -> Self {
-        Self::for_map(viewport, view, map::start())
+        Self::for_map(viewport, view, map::start(), BoardCamera::default())
     }
 
-    /// The stage view has no banner and no store to make room for, so the
-    /// board takes the largest square the window holds, centred.
-    pub(crate) fn for_map(viewport: Vec2, view: View, map: &Map) -> Self {
+    /// The window decides the chrome; the camera decides the aim.
+    ///
+    /// That split is the point. Everything above `origin` here is a function of
+    /// the viewport alone — the banner's strip, the store's panel, and the
+    /// square the two of them leave — and is what has to change when the device
+    /// rotates. Where the board is *pointed* is not one of those things.
+    ///
+    /// The stage view has no banner and no store to make room for, so the board
+    /// takes the largest square the window holds, centred.
+    pub(crate) fn for_map(viewport: Vec2, view: View, map: &Map, camera: BoardCamera) -> Self {
         let width = viewport.x.max(320.0);
         let height = viewport.y.max(320.0);
         let stage = view == View::Stage;
@@ -401,22 +681,34 @@ impl SceneLayout {
         } else {
             width.min(height * 0.58)
         };
-        let scene_center = if stage {
-            Vec2::ZERO
+        let store_height = if stage {
+            0.0
         } else if short_landscape {
-            Vec2::new(-width * 0.5 + scene_side * 0.5, -header_height * 0.5)
+            height - header_height
         } else {
-            Vec2::new(0.0, height * 0.5 - header_height - scene_side * 0.5)
+            (height - header_height - scene_side).max(0.0)
         };
 
-        // Whole-number zoom, so a walking monkey's texels stay on the grid
-        // instead of shimmering against a world drawn on it. Rounding is what
-        // makes [`Self::TILES_ACROSS`] a target rather than a promise: a phone
-        // lands on twelve tiles and a large desktop board on twenty-two, both
-        // at a scale that keeps the pixel art honest.
-        let zoom = (scene_side / (Self::TILES_ACROSS * isometric::TILE_HALF.x * 2.0))
-            .round()
-            .max(1.0);
+        // What is left of the window once the chrome has taken its reserve.
+        // Framing against the viewport instead is what put the hut under the
+        // store panel and the grove behind the banner: dead centre of the
+        // window is dead centre of *nothing the player can see*.
+        let half = Vec2::new(width, height) * 0.5;
+        let safe = if stage {
+            Rect::from_corners(-half, half)
+        } else if short_landscape {
+            let store_width = width - scene_side;
+            Rect::from_corners(
+                Vec2::new(-half.x, -half.y),
+                Vec2::new(half.x - store_width, half.y - header_height),
+            )
+        } else {
+            Rect::from_corners(
+                Vec2::new(-half.x, -half.y + store_height),
+                Vec2::new(half.x, half.y - header_height),
+            )
+        };
+
         let town_centre = isometric::tile_centre(map.town_centre());
         let grove = isometric::tile_centre(map.worked_grove().tile);
         let home_tree = map
@@ -424,24 +716,53 @@ impl SceneLayout {
             .first()
             .map_or(town_centre, |&tile| isometric::tile_centre(tile));
 
+        // The ground the player has a reason to look at: the walk, plus a
+        // margin. The *worked* grove, not every grove on the map — the second
+        // node sits 117 m south and is never assigned a worker in the MVP, so
+        // folding it in stretched the leash half again as far for ground nobody
+        // has ever been to. It joins the walk the day it is worked, which is
+        // what "the leash lengthens with the run" was always supposed to mean.
+        //
+        // The margin is converted to projected pixels through the *widest* the
+        // fold ever stretches a metre, so twelve metres of slack is at least
+        // twelve metres in every direction rather than twelve along one axis
+        // and six along the other.
+        let field = Field {
+            walk: [home_tree, town_centre, grove].map(isometric::project),
+            margin: FIELD_MARGIN * isometric::TILE_HALF.x / map::TILE_METRES as f32,
+        };
+
+        // Rounded to whole pixels, because this is the corner the texel grid is
+        // measured from (see `board_snapped`). A board sitting on half a pixel
+        // rasterises every sprite in the scene against a half-pixel offset —
+        // and under a pan, against a *different* half-pixel offset every frame.
+        let origin = camera.origin(safe.center()).round();
+
         Self {
             viewport: Vec2::new(width, height),
-            scene_center,
+            safe,
             scene_side,
             header_height,
+            store_height,
             short_landscape,
-            // Halfway along the walk, so a fixed board holds both ends of the
-            // economy at once: the town centre where every delivery lands and
-            // the grove thirty tiles out. Pointing it at the town centre alone
-            // put the grove off the top of the screen and the whole outbound
-            // leg with it. This is the interim a board with no controls needs;
-            // it is replaced by a camera the player can pan and zoom.
-            origin: scene_center - isometric::project(town_centre.midpoint(grove)) * zoom,
-            zoom,
+            origin,
+            zoom: camera.zoom,
+            field,
             town_centre,
             grove,
             home_tree,
         }
+    }
+
+    /// The part of the window no HUD surface covers.
+    #[cfg_attr(not(any(test, target_arch = "wasm32")), allow(dead_code))]
+    pub(crate) fn safe_area(self) -> Rect {
+        self.safe
+    }
+
+    /// The ground the camera's focus is held near, projected.
+    pub(crate) fn field(self) -> Field {
+        self.field
     }
 
     /// Screen position of a ground position, in metres.
@@ -475,9 +796,10 @@ impl SceneLayout {
         self.home_tree
     }
 
-    #[cfg(test)]
+    /// The middle of the ground the player can actually see. The board's aim
+    /// lands here, not in the middle of the window.
     pub(crate) fn scene_center(self) -> Vec2 {
-        self.scene_center
+        self.safe.center()
     }
 
     pub(crate) fn scene_side(self) -> f32 {
@@ -501,11 +823,7 @@ impl SceneLayout {
     }
 
     pub(crate) fn store_height(self) -> f32 {
-        if self.short_landscape {
-            self.viewport.y - self.header_height
-        } else {
-            (self.viewport.y - self.header_height - self.scene_side).max(0.0)
-        }
+        self.store_height
     }
 
     /// Sprite scale. Every texel in the scene is the same size, so an actor
@@ -553,23 +871,46 @@ impl SceneLayout {
 
     /// Where each support role stands, in metres, relative to the town centre.
     ///
-    /// All three are stations around the delivery point rather than points on
-    /// the route, laid out in the order the cycle touches them: a worker
-    /// arrives, is unloaded, is fed, and the research desk sits behind the whole
-    /// business.
+    /// A **ring** around the delivery point, not a line out from it. The three
+    /// used to be strung along one bearing at five, eleven and five metres,
+    /// which separated them on screen only because the far one was twice as far
+    /// out as the near one. That works on a board framed to fit the window and
+    /// fails the moment the player is zoomed in: at the camera's opening zoom
+    /// the eleven-metre station is off the side of a phone, so a chef the
+    /// player paid for is drawing wages somewhere they cannot see.
+    ///
+    /// All three now sit 8.2 metres out at bearings chosen for *projected*
+    /// separation, which the isometric fold makes a different question from
+    /// ground separation. The closest two are 85 px apart at unit zoom against
+    /// a fan half-width of 21 — nearly a fifth further than the line they
+    /// replace — while every avatar of every fan is inside the safe area at the
+    /// opening camera on every viewport, and stands at least 2.8 m clear of the
+    /// walk, 9 m clear of the stall and 5.9 m clear of the home tree. That last
+    /// one is a real constraint, not a courtesy: the home tree carries the
+    /// hand-harvest drag target, so a station under its crown puts a monkey
+    /// inside the thing the player is trying to grab.
+    /// `every_support_avatar_is_on_screen_when_the_game_opens`,
+    /// `support_never_stands_on_the_worker_route` and
+    /// `support_never_stands_in_the_hand_harvest_target` hold those, and they
+    /// check the *fan* rather than just the station: it is the outermost chef
+    /// that leaves the screen first.
     pub(crate) fn support_stand(self, role: SupportRole) -> Vec2 {
-        // Square to the walk and on the opposite side from the stall, so the
-        // arriving queue has the ground between them. Spread far enough apart
-        // that a full fan of each still leaves the three roles tellable apart:
-        // projected, the closest two stations are 72 px at unit zoom against a
-        // fan half-width of 21.
         let offset = match role {
-            // Nearest the arriving workers: it is the one clearing the depot.
-            SupportRole::Unpacker => Vec2::new(-3.0, 4.0),
-            // Further along the same line, where the eating happens.
-            SupportRole::Chef => Vec2::new(-7.0, 9.0),
-            // Behind the delivery point, at the back of the traffic.
-            SupportRole::Technologist => Vec2::new(-1.0, -5.0),
+            // Towards the grove, so it meets the arriving queue where the queue
+            // actually arrives from - and the furthest of the three from the
+            // viewer, which puts it behind the crowd it is clearing rather than
+            // in front of it.
+            SupportRole::Unpacker => Vec2::new(-4.47, -6.88),
+            // Nearest the viewer, at the front of the village: being fed is the
+            // most-watched thing that happens at the stall, and what the player
+            // is looking for when the banner reads HUNGRY.
+            SupportRole::Chef => Vec2::new(4.1, 7.1),
+            // Off to one side, clear of the ground between the depot and the
+            // kitchen: research is the one job with no traffic of its own. Its
+            // bearing is also the one the home tree constrains - swung further
+            // round, the research desk stands underneath the tree the player
+            // hand-harvests from, inside the drag target.
+            SupportRole::Technologist => Vec2::new(-6.63, 4.82),
         };
         self.town_centre + offset
     }
@@ -579,10 +920,36 @@ impl SceneLayout {
         self.support_stand(role) + Vec2::new(spread, spread * 0.5)
     }
 
-    /// Snap to the world's texel grid, so pixel-art detail does not crawl at
-    /// the low speeds a walking monkey moves at.
-    pub(crate) fn snap(self, value: f32) -> f32 {
-        (value / self.zoom).round() * self.zoom
+    /// Snap a distance *from the board's origin* to the world's texel grid, so
+    /// pixel-art detail does not crawl at the low speeds a walking monkey moves
+    /// at.
+    ///
+    /// A distance, never an absolute screen coordinate: see
+    /// [`Self::board_snapped`] for why the difference is the whole point.
+    ///
+    /// Private, and that is the point. Every caller outside this module wants
+    /// `board_snapped`; the one that reached for this instead spent a release
+    /// quantising an absolute screen position, and a second one was still doing
+    /// it after the first was fixed. There is no correct use of this from
+    /// another module, so there is no way to reach it from one.
+    fn snap(self, offset: f32) -> f32 {
+        (offset / self.zoom).round() * self.zoom
+    }
+
+    /// Where a sprite standing at `world` draws, lifted `lift` screen pixels so
+    /// its feet land on the ground, and quantised to the world's texel grid.
+    ///
+    /// The quantising is applied to the *offset from the origin*, not to the
+    /// screen position. Rounding the sum instead measures the grid from the
+    /// corner of the window rather than from the board, and `origin` is not a
+    /// multiple of `zoom` — so every actor is biased by a fraction of a texel
+    /// that changes as the camera moves. With a fixed board that bias is a
+    /// constant nobody can see; the moment the player can pan, the terrain
+    /// slides smoothly while the entire cast jumps in zoom-sized steps against
+    /// it, which is precisely what snapping exists to prevent.
+    pub(crate) fn board_snapped(self, world: Vec2, lift: f32) -> Vec2 {
+        let offset = isometric::project(world) * self.zoom + Vec2::new(0.0, lift);
+        self.origin + Vec2::new(self.snap(offset.x), self.snap(offset.y))
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -873,12 +1240,15 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     asset_server: Res<AssetServer>,
+    mut atlas_layouts: ResMut<Assets<bevy::image::TextureAtlasLayout>>,
     launch: Res<Launch>,
     village: Res<map::Village>,
 ) {
     commands.spawn((Camera2d, MainCamera));
 
-    isometric::spawn_world(&mut commands, &mut meshes, &mut materials, &village);
+    let art = art::Art::load(&asset_server, &mut atlas_layouts);
+    isometric::spawn_world(&mut commands, &mut meshes, &mut materials, &art, &village);
+    commands.insert_resource(art);
 
     commands.spawn((
         Sprite::from_color(Color::NONE, Vec2::ONE),
@@ -922,22 +1292,19 @@ fn setup(
             ));
         });
 
-    commands.spawn((
-        Text2d::new("JUNGLE"),
-        TextFont::from_font_size(16.0),
-        TextColor(INK),
-        Transform::from_xyz(0.0, 0.0, 2.0),
-        HarvestLabel,
-        LayoutElement::HarvestLabel,
-    ));
-    commands.spawn((
-        Text2d::new("VILLAGE"),
-        TextFont::from_font_size(16.0),
-        TextColor(INK),
-        Transform::from_xyz(0.0, 0.0, 2.0),
-        DepositLabel,
-        LayoutElement::DepositLabel,
-    ));
+    spawn_place_label(
+        &mut commands,
+        "JUNGLE",
+        (HarvestLabel, LayoutElement::HarvestLabel),
+    );
+    // "DEPOT", not "VILLAGE": the label names the drop target, and the village
+    // is the terrain it stands on. A new player reads this as an instruction
+    // about where the banana goes, which is what it is.
+    spawn_place_label(
+        &mut commands,
+        "DEPOT",
+        (DepositLabel, LayoutElement::DepositLabel),
+    );
 
     // The stage view is the board and its actors with nothing in front of
     // them: a playtest of "one monkey walks to the grove" does not need the
@@ -949,17 +1316,73 @@ fn setup(
     }
 }
 
+/// The type size a place label is drawn at.
+const PLACE_LABEL_FONT: f32 = 16.0;
+
+/// Where a place label sits in the overlay.
+///
+/// Under the delivery floaters, which land on exactly the spot the depot label
+/// names and matter more when they do: a floater is feedback about something
+/// that just happened, and the label is a standing sign that will still be
+/// there afterwards.
+const PLACE_LABEL_Z: f32 = isometric::OVERLAY_Z - 1.0;
+
+/// Name a place on the board, on a plate that survives a crowd standing on it.
+///
+/// Cream on a dark plate rather than ink on grass. At sixty workers the depot
+/// label was being cut into pieces by the monkey outlines running through the
+/// letterforms, and a delivery floater sat on top of the remains — the two
+/// pieces of text that exist to tell a new player where bananas go, illegible
+/// at exactly the moment there is most going on.
+///
+/// The plate is the pattern the role badges already use, and those are the one
+/// piece of text that survives a crowd intact today, so this is borrowing a
+/// solution rather than inventing one.
+fn spawn_place_label(commands: &mut Commands, name: &str, markers: impl Bundle) {
+    // Sized from the string: the font is fixed-width at this size, so a plate
+    // measured per character fits every label without laying the text out.
+    const PER_CHARACTER: f32 = 9.6;
+    const PADDING: Vec2 = Vec2::new(14.0, 7.0);
+    let plate = Vec2::new(name.len() as f32 * PER_CHARACTER, PLACE_LABEL_FONT) + PADDING * 2.0;
+
+    commands
+        .spawn((
+            Text2d::new(name.to_owned()),
+            TextFont::from_font_size(PLACE_LABEL_FONT),
+            TextColor(CREAM),
+            Transform::from_xyz(0.0, 0.0, 2.0),
+            markers,
+        ))
+        .with_child((
+            Sprite::from_color(BROWN, plate),
+            // Behind its own text, and with it above the board.
+            Transform::from_xyz(0.0, 0.0, -0.01),
+        ));
+}
+
 fn refresh_layout(
     window: Single<&Window, With<PrimaryWindow>>,
     launch: Res<Launch>,
+    camera: Res<BoardCamera>,
+    village: Res<map::Village>,
     mut layout: ResMut<SceneLayout>,
 ) {
-    let next = SceneLayout::for_view(Vec2::new(window.width(), window.height()), launch.view);
+    let next = SceneLayout::for_map(
+        Vec2::new(window.width(), window.height()),
+        launch.view,
+        &village,
+        *camera,
+    );
     // The whole layout, not just the viewport it was derived from. The view is
     // the second input now, and a stage launch at exactly the default 1280x720
     // resolution produced an identical viewport - so a viewport-only guard left
     // the board sitting in the HUD's reserve with three quarters of the window
     // empty, which is precisely what the stage view exists to avoid.
+    //
+    // With a camera the player drives, this differs on every frame of a drag,
+    // so the guard now catches only the still frames - which is most of them,
+    // and it costs fifteen floats to check. What it is really protecting is
+    // downstream change detection, not the arithmetic.
     if next != *layout {
         *layout = next;
     }
@@ -1007,15 +1430,17 @@ fn apply_layout(
             LayoutElement::DepositGlow => {
                 sprite.expect("deposit glow has sprite").custom_size =
                     Some(Vec2::splat(zone_size + 36.0));
-                transform.translation = layout
-                    .stall_glow_anchor()
-                    .extend(isometric::stand_z(layout.town_centre(), 0.0) - 0.002);
+                transform.translation = layout.stall_glow_anchor().extend(isometric::stand_z(
+                    layout.town_centre(),
+                    -4.0 * isometric::NUDGE_STEP,
+                ));
             }
             LayoutElement::Banana => {
                 if matches!(controller.interaction, HarvestInteraction::Idle) {
-                    transform.translation = layout
-                        .banana_home()
-                        .extend(isometric::stand_z(layout.home_tree(), 0.0) + 0.001);
+                    transform.translation = layout.banana_home().extend(isometric::stand_z(
+                        layout.home_tree(),
+                        2.0 * isometric::NUDGE_STEP,
+                    ));
                 }
                 let lift = if matches!(controller.interaction, HarvestInteraction::Dragging { .. })
                 {
@@ -1030,13 +1455,18 @@ fn apply_layout(
             LayoutElement::HarvestLabel => {
                 transform.translation = layout
                     .board_raised(layout.grove(), 6.0)
-                    .extend(isometric::OVERLAY_Z);
+                    .extend(PLACE_LABEL_Z);
                 transform.scale = Vec3::splat(layout.world_scale().clamp(0.8, 1.35));
             }
             LayoutElement::DepositLabel => {
+                // Just clear of a monkey's head, so it reads as a sign *on* the
+                // depot rather than as a word floating in the sky. At six
+                // metres it hung a hundred pixels above the pad it names, which
+                // is what let it sit over bare grass for so long without
+                // anyone noticing there was nothing under it.
                 transform.translation = layout
-                    .board_raised(layout.town_centre(), 6.0)
-                    .extend(isometric::OVERLAY_Z);
+                    .board_raised(layout.town_centre(), 3.5)
+                    .extend(PLACE_LABEL_Z);
                 transform.scale = Vec3::splat(layout.world_scale().clamp(0.8, 1.35));
             }
         }
@@ -1476,8 +1906,46 @@ fn snapshot_economy(
 /// Three sources, three sizes, three colours - readable without reading. The
 /// snack is the smallest and the dimmest on purpose: it is the cost of doing
 /// business, not an event the player has to act on.
+/// One of the dark copies drawn behind a floater to give it an edge.
+#[derive(Component)]
+struct FloaterOutline;
+
+/// Where those copies sit, in texels around the glyph.
+///
+/// Four, not eight: on a 22-to-44 pixel glyph the diagonals add nothing a
+/// player can see and cost four more text layouts per delivery.
+/// The font size the offsets below are measured at.
+const FLOATER_OUTLINE_AT: f32 = 22.0;
+
+const FLOATER_OUTLINE: [Vec2; 4] = [
+    Vec2::new(-2.0, 0.0),
+    Vec2::new(2.0, 0.0),
+    Vec2::new(0.0, -2.0),
+    Vec2::new(0.0, 2.0),
+];
+
+/// How far a floater is nudged off the stall, in metres, so consecutive ones
+/// do not stack.
+const FLOATER_SPREAD_METRES: f32 = 2.2;
+
 fn spawn_floater(commands: &mut Commands, layout: &SceneLayout, delivery: Delivery) {
-    let origin = layout.stall_glow_anchor();
+    // Scattered around the stall rather than all launched from one point. At
+    // the swarm scenario's rate a delivery lands about twice a second against a
+    // floater that lives most of one, so two or three are on screen at any
+    // moment - and stacked on the same pixel they overprint into mush, on the
+    // one piece of feedback that tells the player the economy is working.
+    //
+    // Hashed from the delivery's own figures rather than from a counter, so it
+    // needs no state and two identical deliveries in a row still separate:
+    // the amount differs, or the kind does, or it is genuinely the same event.
+    let spin = {
+        let bits = delivery.amount.to_bits() ^ ((delivery.kind as u64) << 57);
+        let mixed = (bits ^ (bits >> 29)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        // The top 24 bits over 2^24, exact in `f32` and inside `0.0..1.0`.
+        ((mixed >> 40) as u32) as f32 / 16_777_216.0
+    };
+    let angle = spin * std::f32::consts::TAU;
+    let anchor = layout.town_centre() + Vec2::from_angle(angle) * FLOATER_SPREAD_METRES;
     let (label, size, colour) = match delivery.kind {
         DeliveryKind::Worker => (format!("+{:.0}", delivery.amount), 34.0, GOLD),
         // Bigger, because it is forty times the size and lands once every three
@@ -1491,16 +1959,40 @@ fn spawn_floater(commands: &mut Commands, layout: &SceneLayout, delivery: Delive
             (format!("-{:.1}", delivery.amount), 22.0, MUTED)
         }
     };
-    commands.spawn((
-        Text2d::new(label),
-        TextFont::from_font_size(size),
-        TextColor(colour),
-        Transform::from_translation(origin.extend(isometric::OVERLAY_Z)),
-        Floater {
-            elapsed: 0.0,
-            origin,
-        },
-    ));
+    // Every floater colour fails contrast against the ground it lands on, and
+    // this is the game's primary reward feedback. Town floor is #A3C975 at
+    // luminance 0.508; GOLD is 0.586, which is 1.14:1 - below the 3:1 floor for
+    // large text before the alpha fade even starts. The palette was chosen
+    // against the cream HUD, not against grass. An INK edge takes GOLD to
+    // 8.4:1 and fixes all four colours at once, without repainting a palette
+    // that is right everywhere else.
+    commands
+        .spawn((
+            Text2d::new(label.clone()),
+            TextFont::from_font_size(size),
+            TextColor(colour),
+            Transform::from_translation(layout.stall_glow_anchor().extend(isometric::OVERLAY_Z)),
+            Floater {
+                elapsed: 0.0,
+                anchor,
+            },
+        ))
+        .with_children(|floater| {
+            // Proportional to the glyph, not a fixed two pixels: a cart's "+100"
+            // is twice the height of a snack's "-1.5", and one edge width for
+            // both leaves the big one looking smudged and the small one bare.
+            let width = size / FLOATER_OUTLINE_AT;
+            for offset in FLOATER_OUTLINE {
+                floater.spawn((
+                    FloaterOutline,
+                    Text2d::new(label.clone()),
+                    TextFont::from_font_size(size),
+                    TextColor(INK),
+                    // Behind its own glyph, and still above the whole board.
+                    Transform::from_xyz(offset.x * width, offset.y * width, -0.01),
+                ));
+            }
+        });
 }
 
 // ─────────────────────────────────────────────────────────────── input
@@ -1973,6 +2465,343 @@ fn handle_harvest_input(
     }
 }
 
+/// The board gesture in flight, and the pointers it is allowed to use.
+///
+/// Kept separate from [`HarvestController`] because the two compete for the
+/// same fingers and the tie-break has to be stated somewhere: harvest gets
+/// right of first refusal on a pointer, and the camera takes what is left.
+#[derive(Resource, Debug, Default)]
+struct CameraGesture {
+    /// Touches that began on open ground — outside every HUD surface, and not
+    /// claimed by a harvest drag — in the order they landed.
+    ///
+    /// Eligibility is decided **once, at touch-down**, and never revisited. A
+    /// finger that starts on the store panel and slides onto the grass is still
+    /// scrolling the store, and a finger that starts on the banana is still
+    /// harvesting even after it leaves the node's hit box.
+    on_board: Vec<u64>,
+    motion: CameraMotion,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+enum CameraMotion {
+    #[default]
+    Idle,
+    /// One pointer dragging the ground. `last` is where it was, in camera
+    /// space, so a pan is a delta rather than an absolute grab — which is what
+    /// keeps it correct when the finger picks up a new metre after a zoom.
+    Pan { pointer: PointerId, last: Vec2 },
+    /// Two touches, and the distance between them last frame.
+    Pinch { a: u64, b: u64, span: f32 },
+}
+
+/// A window position as a point in the space `SceneLayout` works in.
+///
+/// Not [`pointer_in_camera_space`], despite the name of that one: it hands back
+/// the raw window position because what consumes it is Bevy's
+/// `viewport_to_world_2d`, which wants viewport coordinates. The board's own
+/// geometry is centred with y running *up*, so a pan fed raw window coordinates
+/// drags the ground the right way horizontally and the wrong way vertically —
+/// which is exactly what it did until this existed.
+fn window_to_camera(window: &Window, raw: Vec2) -> Vec2 {
+    Vec2::new(raw.x - window.width() * 0.5, window.height() * 0.5 - raw.y)
+}
+
+/// How fast the keyboard pans the board, in metres of ground per second.
+///
+/// Desktop only, and it exists for two reasons: `./play` is a keyboard
+/// playtest, and a drag is the one gesture that cannot be exercised without a
+/// pointing device. A monkey walks at 3 m/s, so this is a brisk jog — fast
+/// enough to cross the field in a few seconds, which is what makes it usable
+/// for looking at something rather than for travelling.
+///
+/// Approximate by up to a factor of root two, because the keys pan along the
+/// *screen* axes while the fold stretches a metre differently along each ground
+/// axis. That is the right trade: the board should move the way the keys point,
+/// not the way the ground happens to run.
+const KEY_PAN_METRES: f32 = 24.0;
+
+/// A wheel notch, in whole zoom steps.
+const WHEEL_ZOOM_STEP: f32 = 1.0;
+
+/// Pan, pinch and zoom the board.
+///
+/// Runs **after** `handle_harvest_input`, and the order is the design rather
+/// than an accident. Manual harvest is a drag that starts on a banana node, and
+/// the camera is a drag that starts anywhere else; the only way to tell them
+/// apart is to let harvest look first and have the camera take what it did not
+/// want. That is also what keeps the drag-to-harvest of the next increment
+/// possible: adding a node adds a place harvest claims, and the camera gives it
+/// up without knowing the node exists.
+///
+/// A pinch needs *two* unclaimed touches for the same reason. Putting a second
+/// finger down mid-harvest must not tear the banana out of the player's hand.
+#[allow(clippy::too_many_arguments)]
+fn handle_camera_input(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    touches: Res<Touches>,
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    menu: Res<MenuState>,
+    controller: Res<HarvestController>,
+    pointer_guard: Res<PointerGuard>,
+    ui_input: UiInput,
+    layout: Res<SceneLayout>,
+    village: Res<map::Village>,
+    mut gesture: ResMut<CameraGesture>,
+    mut board: ResMut<BoardCamera>,
+) {
+    let centre = layout.scene_center();
+    let mut next = *board;
+
+    // Whatever else happens this frame, a settling zoom keeps settling: the
+    // fingers that started it have already left the glass.
+    next.ease(centre, centre, time.delta_secs());
+
+    let blocked = *menu != MenuState::Closed || web_diagnostics_panel_open();
+    if blocked {
+        gesture.on_board.clear();
+        gesture.motion = CameraMotion::Idle;
+    } else {
+        // A pointer harvest owns is not the camera's, on the frame it is
+        // claimed or on any frame after: `handle_harvest_input` runs first, so
+        // by now the claim is already in the controller.
+        let claimed = match controller.interaction {
+            HarvestInteraction::Dragging { pointer, .. } => Some(pointer),
+            _ => None,
+        };
+        let in_ui = |raw: Vec2| {
+            ui_input
+                .regions
+                .iter()
+                .any(|(node, transform)| ui_node_contains(node, transform, raw))
+        };
+
+        gesture
+            .on_board
+            .retain(|id| touches.get_pressed(*id).is_some());
+        for touch in touches.iter_just_pressed() {
+            let id = touch.id();
+            if claimed == Some(PointerId::Touch(id)) || in_ui(touch.position()) {
+                continue;
+            }
+            if !gesture.on_board.contains(&id) {
+                gesture.on_board.push(id);
+            }
+        }
+
+        let at = |id: u64| {
+            touches
+                .get_pressed(id)
+                .map(|touch| window_to_camera(&window, touch.position()))
+        };
+
+        gesture.motion = match (gesture.on_board.as_slice(), gesture.motion) {
+            // Two fingers on the ground is always a pinch, however it started.
+            ([a, b, ..], was) => {
+                let (a, b) = (*a, *b);
+                // The `else` should be unreachable, since `retain` has already
+                // dropped every id that is no longer pressed. It falls back
+                // rather than bailing out of the system, because a bail-out
+                // would also skip the settle and the clamp below: a dropped
+                // frame of easing is a worse bug than a dropped frame of pinch.
+                match (at(a), at(b)) {
+                    (Some(first), Some(second)) => {
+                        let span = first.distance(second);
+                        let middle = first.midpoint(second);
+                        if let CameraMotion::Pinch {
+                            a: was_a,
+                            b: was_b,
+                            span: before,
+                        } = was
+                            && (was_a, was_b) == (a, b)
+                            && before > 1.0
+                            && span > 1.0
+                        {
+                            // Scale by the ratio the fingers moved, and hold
+                            // the ground between them: a pinch that only
+                            // multiplies the zoom slides the world out from
+                            // between the two fingers pinching it.
+                            next.zoom_to(centre, middle, next.zoom * span / before);
+                            next.resting_zoom = next.zoom;
+                        }
+                        CameraMotion::Pinch { a, b, span }
+                    }
+                    _ => {
+                        next.settle();
+                        CameraMotion::Idle
+                    }
+                }
+            }
+            ([id], _) => match at(*id) {
+                Some(now) => {
+                    let pointer = PointerId::Touch(*id);
+                    match gesture.motion {
+                        CameraMotion::Pan { pointer: was, last } if was == pointer => {
+                            drag(&mut next, centre, now - last);
+                        }
+                        // Includes the frame a pinch drops back to one finger:
+                        // the survivor re-grabs from where it is rather than
+                        // from where the pinch's midpoint was.
+                        _ => next.settle(),
+                    }
+                    CameraMotion::Pan { pointer, last: now }
+                }
+                None => CameraMotion::Idle,
+            },
+            ([], _) => {
+                if matches!(gesture.motion, CameraMotion::Pinch { .. }) {
+                    next.settle();
+                }
+                mouse_motion(
+                    &mut next,
+                    centre,
+                    gesture.motion,
+                    &window,
+                    &mouse,
+                    &pointer_guard,
+                    claimed,
+                    &in_ui,
+                )
+            }
+        };
+
+        // Desktop: the wheel steps whole zooms about the cursor, and the
+        // keyboard walks the board. Neither is reachable on a phone, and both
+        // are how a playtest without a touchscreen reaches the camera at all.
+        // Only over the board. `hud::scroll_store` reads the same wheel from
+        // its own cursor, and every reader gets every message — so without
+        // this, a notch over the shop scrolls the shop *and* zooms the village
+        // behind it.
+        let raw_cursor = window.cursor_position().filter(|raw| !in_ui(*raw));
+        let cursor = raw_cursor.map(|raw| window_to_camera(&window, raw));
+        let over_board = raw_cursor.is_some();
+        let mut notches: f32 = wheel
+            .read()
+            .map(|event| if over_board { event.y.signum() } else { 0.0 })
+            .sum();
+        // `-` and `=` are the wheel's keyboard spelling, for a playtest with no
+        // pointing device - and `=` rather than `+` so it needs no shift.
+        for (key, step) in [
+            (KeyCode::Equal, 1.0),
+            (KeyCode::NumpadAdd, 1.0),
+            (KeyCode::Minus, -1.0),
+            (KeyCode::NumpadSubtract, -1.0),
+        ] {
+            if keys.just_pressed(key) {
+                notches += step;
+            }
+        }
+        if notches != 0.0 {
+            let wanted = (next.resting_zoom + notches * WHEEL_ZOOM_STEP)
+                .round()
+                .clamp(BoardCamera::MIN_ZOOM, BoardCamera::MAX_ZOOM);
+            next.resting_zoom = wanted;
+            next.zoom_to(centre, cursor.unwrap_or(centre), wanted);
+        }
+
+        // WASD, not the arrows: `handle_menu` already binds ArrowLeft and
+        // ArrowRight to the shop's tabs, so an arrow-key camera panned the
+        // board *and* jumped the shop to another tab on the same press.
+        let mut walk = Vec2::ZERO;
+        for (key, step) in [
+            (KeyCode::KeyA, Vec2::NEG_X),
+            (KeyCode::KeyD, Vec2::X),
+            (KeyCode::KeyW, Vec2::Y),
+            (KeyCode::KeyS, Vec2::NEG_Y),
+        ] {
+            if keys.pressed(key) {
+                walk += step;
+            }
+        }
+        if walk != Vec2::ZERO {
+            // Screen pixels, so the arrow keys move the board the way the
+            // arrows point rather than the way the ground's axes happen to run.
+            // Through the projection, because `drag` takes a *screen* delta and
+            // divides it back out by the zoom. Without the conversion the
+            // constant is projected pixels per second, which is eight times
+            // slower than its own name and takes a minute of held key to cross
+            // the field.
+            let metres_to_board = isometric::TILE_HALF.x / map::TILE_METRES as f32;
+            let step = -walk.normalize()
+                * KEY_PAN_METRES
+                * metres_to_board
+                * next.zoom
+                * time.delta_secs();
+            drag(&mut next, centre, step);
+        }
+        if keys.just_pressed(KeyCode::KeyC) {
+            // The zoom as well as the aim. Recentring a player who is lost at
+            // maximum zoom onto a three-tile keyhole leaves them exactly as
+            // lost, facing the right way. The zoom eases rather than jumping,
+            // because `resting_zoom` is what `ease` chases.
+            let opening = BoardCamera::opening(&village);
+            next.focus = opening.focus;
+            next.resting_zoom = opening.zoom;
+        }
+    }
+
+    let next = next.clamped(layout.field(), layout.safe_area().size());
+    if next != *board {
+        *board = next;
+    }
+}
+
+/// Move the board with a pointer: the metre the finger grabbed stays under it.
+fn drag(camera: &mut BoardCamera, scene_center: Vec2, screen_delta: Vec2) {
+    let held = camera.ground_at(scene_center, scene_center);
+    camera.hold(scene_center, held, scene_center + screen_delta);
+}
+
+/// The mouse half of the gesture, kept apart so the touch path above reads as
+/// one decision. A left drag on open ground pans; everything else is idle.
+#[allow(clippy::too_many_arguments)]
+fn mouse_motion(
+    camera: &mut BoardCamera,
+    scene_center: Vec2,
+    was: CameraMotion,
+    window: &Window,
+    mouse: &ButtonInput<MouseButton>,
+    pointer_guard: &PointerGuard,
+    claimed: Option<PointerId>,
+    in_ui: &dyn Fn(Vec2) -> bool,
+) -> CameraMotion {
+    let Some(raw) = window.cursor_position() else {
+        return CameraMotion::Idle;
+    };
+    let now = window_to_camera(window, raw);
+    if !mouse.pressed(MouseButton::Left) {
+        return CameraMotion::Idle;
+    }
+    match was {
+        CameraMotion::Pan {
+            pointer: PointerId::Mouse,
+            last,
+        } => {
+            drag(camera, scene_center, now - last);
+            CameraMotion::Pan {
+                pointer: PointerId::Mouse,
+                last: now,
+            }
+        }
+        // A press that began on the HUD, on the banana, or in the shadow of a
+        // touch is not a pan, and must not become one by being held.
+        _ if !mouse.just_pressed(MouseButton::Left)
+            || claimed == Some(PointerId::Mouse)
+            || in_ui(raw)
+            || pointer_guard.suppress_mouse_for > 0.0 =>
+        {
+            CameraMotion::Idle
+        }
+        _ => CameraMotion::Pan {
+            pointer: PointerId::Mouse,
+            last: now,
+        },
+    }
+}
+
 fn finish_pointer_drag(
     pointer: PointerId,
     position: Option<Vec2>,
@@ -2184,20 +3013,44 @@ fn update_feedback(
 
 fn update_floaters(
     time: Res<Time>,
+    layout: Res<SceneLayout>,
     mut commands: Commands,
-    mut floaters: Query<(Entity, &mut Floater, &mut Transform, &mut TextColor)>,
+    mut floaters: Query<
+        (Entity, &mut Floater, &mut Transform, &mut TextColor),
+        Without<FloaterOutline>,
+    >,
+    mut outlines: Query<(&ChildOf, &mut TextColor), With<FloaterOutline>>,
 ) {
+    // Collected rather than read back through the parent, because a second
+    // query reading `Floater` would conflict with this one's `&mut` on it.
+    let mut fading: Vec<(Entity, f32)> = Vec::new();
+
     for (entity, mut floater, mut transform, mut color) in &mut floaters {
         floater.elapsed += time.delta_secs();
         let progress = (floater.elapsed / FLOATER_SECONDS).clamp(0.0, 1.0);
         // Ease out, so it leaps off the stall and settles as it fades.
         let eased = 1.0 - (1.0 - progress) * (1.0 - progress);
-        transform.translation =
-            (floater.origin + Vec2::new(0.0, FLOATER_RISE * eased)).extend(isometric::OVERLAY_Z);
+        // Re-projected every frame rather than replayed from a captured
+        // position, so a "+5" stays over the stall that earned it while the
+        // player pans.
+        transform.translation = (layout.board_raised(floater.anchor, 1.0)
+            + Vec2::new(0.0, FLOATER_RISE * eased))
+        .extend(isometric::OVERLAY_Z);
         color.0.set_alpha(1.0 - eased);
+        fading.push((entity, 1.0 - eased));
 
         if progress >= 1.0 {
+            // Despawns its outline with it: an orphaned outline is four black
+            // glyphs left standing over the stall.
             commands.entity(entity).despawn();
+        }
+    }
+
+    // The edge has to fade with the glyph it edges, or the last thing the
+    // player sees of a delivery is its outline.
+    for (parent, mut color) in &mut outlines {
+        if let Some((_, alpha)) = fading.iter().find(|(entity, _)| *entity == parent.parent()) {
+            color.0.set_alpha(*alpha);
         }
     }
 }
@@ -2387,6 +3240,15 @@ struct TestState {
     harvest: TestPoint,
     harvest_bounds: TestBounds,
     deposit: TestPoint,
+    /// The camera, so a browser test can drive a pan or a pinch and assert
+    /// where it ended up rather than eyeballing a screenshot.
+    camera_zoom: f32,
+    /// Where the camera is looking, in **metres on the ground** - the same
+    /// units `map` and the economy use.
+    camera_focus: TestPoint,
+    /// The window less the HUD's reserve. Anything the player is meant to look
+    /// at should be inside this, and a spec can now say so.
+    safe_bounds: TestBounds,
     monkeys: Vec<TestWorker>,
     staff: Vec<TestStaff>,
     /// `support::SupportAvatar` entities on screen, summed across every role.
@@ -2442,6 +3304,7 @@ fn sync_web_test_state(
     controller: Res<HarvestController>,
     menu: Res<MenuState>,
     layout: Res<SceneLayout>,
+    camera: Res<BoardCamera>,
     primary_window: Single<&Window, With<PrimaryWindow>>,
     touches: Res<Touches>,
     banana_transform: Single<&Transform, With<Banana>>,
@@ -2545,7 +3408,7 @@ fn sync_web_test_state(
                 .map_or(Vec2::ZERO, |touch| touch.position()),
         ),
         banana: screen(banana_transform.translation.truncate()),
-        harvest: screen(layout.board(layout.grove())),
+        harvest: screen(layout.harvest_bounds().center()),
         harvest_bounds: TestBounds {
             min: screen(Vec2::new(
                 layout.harvest_bounds().min.x,
@@ -2557,6 +3420,18 @@ fn sync_web_test_state(
             )),
         },
         deposit: screen(layout.board(layout.town_centre())),
+        camera_zoom: camera.zoom(),
+        camera_focus: point(camera.focus()),
+        safe_bounds: TestBounds {
+            min: screen(Vec2::new(
+                layout.safe_area().min.x,
+                layout.safe_area().max.y,
+            )),
+            max: screen(Vec2::new(
+                layout.safe_area().max.x,
+                layout.safe_area().min.y,
+            )),
+        },
         monkeys: workers
             .iter()
             .map(|(cycle, transform)| {
@@ -2760,41 +3635,405 @@ mod tests {
         }
     }
 
+    /// Every viewport the game is expected to survive, including the two the
+    /// e2e matrix drives and the 320-wide floor `for_map` clamps to.
+    const VIEWPORTS: [Vec2; 5] = [
+        Vec2::new(320.0, 568.0),
+        Vec2::new(390.0, 844.0),
+        Vec2::new(844.0, 390.0),
+        Vec2::new(1280.0, 720.0),
+        Vec2::new(1920.0, 1080.0),
+    ];
+
     #[test]
-    fn the_board_holds_the_whole_walk_at_every_viewport() {
-        for viewport in [
-            Vec2::new(320.0, 568.0),
-            Vec2::new(390.0, 844.0),
-            Vec2::new(1920.0, 1080.0),
-        ] {
+    fn the_board_opens_framed_on_the_first_drag() {
+        // The opening act is a drag from the home tree to the town centre
+        // (D24). Both ends have to be inside the *safe area* - not merely
+        // inside the window - or the game opens on a gesture whose start or
+        // finish is behind the banner or under the store panel, which is the
+        // same as not drawing it.
+        //
+        // This is what pins `DEFAULT_ZOOM`. Zoom 4 loses the town centre on an
+        // 844x390 landscape phone; if someone raises the default, this fails
+        // rather than the framing quietly getting worse.
+        for viewport in VIEWPORTS {
             let layout = SceneLayout::for_viewport(viewport);
-            // Both ends of the economy have to be on the board, or a playtest
-            // of the walk can only ever see half of it.
-            let focus = layout.town_centre().midpoint(layout.grove());
-            assert!(
-                layout.board(focus).distance(layout.scene_center()) < 1e-3,
-                "{viewport:?}: the board is not pointed at the walk"
-            );
-            // A `WorldRoot` transform and `board` are two spellings of the same
-            // two numbers; if they drift, the baked terrain slides out from
-            // under the monkeys walking on it.
-            let root = layout.world_root();
-            let projected = isometric::project(layout.grove());
-            let through_root = root.transform_point(projected.extend(0.0)).truncate();
-            assert!((through_root - layout.board(layout.grove())).length() < 1e-3);
+            let safe = layout.safe_area();
+            for (name, at) in [
+                ("the home tree", layout.home_tree()),
+                ("the town centre", layout.town_centre()),
+            ] {
+                let on_screen = layout.board(at);
+                assert!(
+                    contains_inclusive(safe, on_screen),
+                    "{viewport:?}: {name} opens at {on_screen:?}, outside the safe area {safe:?}"
+                );
+            }
         }
     }
 
     #[test]
-    fn world_positions_snap_to_a_whole_texel_grid() {
-        let desktop = SceneLayout::for_viewport(Vec2::new(1280.0, 720.0));
-        let phone = SceneLayout::for_viewport(Vec2::new(390.0, 844.0));
+    fn the_safe_area_is_the_window_less_the_chrome() {
+        for viewport in VIEWPORTS {
+            let layout = SceneLayout::for_viewport(viewport);
+            let safe = layout.safe_area();
+            let half = layout.viewport * 0.5;
+            assert!(
+                safe.min.x >= -half.x && safe.max.x <= half.x,
+                "{viewport:?}"
+            );
+            assert!(
+                safe.min.y >= -half.y && safe.max.y <= half.y,
+                "{viewport:?}"
+            );
+            // The banner's strip is reserved at the top, and the store's panel
+            // on whichever side it took.
+            assert!(
+                half.y - safe.max.y >= layout.header_height(),
+                "{viewport:?}: the safe area reaches into the banner"
+            );
+            let reserved = if layout.short_landscape() {
+                half.x - safe.max.x
+            } else {
+                safe.min.y + half.y
+            };
+            assert!(
+                reserved >= layout.store_height().min(layout.store_width()) - 1e-3
+                    || layout.store_height() == 0.0,
+                "{viewport:?}: the safe area reaches into the store"
+            );
+            // And the board is aimed at the middle of it, never at the middle
+            // of the window.
+            assert_eq!(layout.scene_center(), safe.center());
+        }
+    }
 
-        assert_eq!(phone.world_scale(), 1.0);
-        for layout in [desktop, phone] {
+    #[test]
+    fn the_root_transform_and_board_are_two_spellings_of_the_camera() {
+        // A `WorldRoot` transform and `board` are two spellings of the same two
+        // numbers; if they drift, the baked terrain slides out from under the
+        // monkeys walking on it. Now exercised at a non-unit zoom, which the
+        // old fit-to-viewport board never reached at any real viewport.
+        for viewport in VIEWPORTS {
+            let layout = SceneLayout::for_viewport(viewport);
+            assert!(layout.world_scale() > 1.0, "{viewport:?}: zoom is still 1");
+            let root = layout.world_root();
+            for at in [layout.grove(), layout.town_centre(), layout.home_tree()] {
+                let projected = isometric::project(at);
+                let through_root = root.transform_point(projected.extend(0.0)).truncate();
+                assert!(
+                    (through_root - layout.board(at)).length() < 1e-3,
+                    "{viewport:?}"
+                );
+            }
+        }
+    }
+
+    /// A layout at a chosen camera, for the gesture tests.
+    fn viewed(camera: BoardCamera) -> SceneLayout {
+        SceneLayout::for_map(Vec2::new(1280.0, 720.0), View::Full, map::start(), camera)
+    }
+
+    #[test]
+    fn a_window_position_becomes_a_centred_y_up_point() {
+        // The bug this exists for shipped once and no other test could see it:
+        // every camera unit test works in board space and passes whichever way
+        // the window's y runs, so an unflipped pointer drags the ground the
+        // right way across and the wrong way down. It took driving a real mouse
+        // at a real window to catch, which is why the conversion is pinned here
+        // rather than left implicit at the call site.
+        let mut window = Window {
+            resolution: bevy::window::WindowResolution::new(800, 600),
+            ..default()
+        };
+        window.resolution.set_scale_factor_override(Some(1.0));
+
+        // The window's origin is its top-left corner; the board's is its middle.
+        assert_eq!(
+            window_to_camera(&window, Vec2::new(400.0, 300.0)),
+            Vec2::ZERO
+        );
+        // Down the window is *down* the board, not up it.
+        let lower = window_to_camera(&window, Vec2::new(400.0, 500.0));
+        assert!(
+            lower.y < 0.0,
+            "a pointer below the middle came back above it"
+        );
+        assert_eq!(lower, Vec2::new(0.0, -200.0));
+        // And across is across, unchanged.
+        assert_eq!(
+            window_to_camera(&window, Vec2::new(700.0, 300.0)),
+            Vec2::new(300.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn a_drag_keeps_the_ground_under_the_finger() {
+        // The property that makes a pan feel like moving a map rather than
+        // scrolling a picture: whatever metre the finger came down on is still
+        // beneath it after the drag.
+        let mut camera = BoardCamera::default();
+        let layout = viewed(camera);
+        let centre = layout.scene_center();
+        let grabbed = camera.ground_at(centre, centre);
+
+        for delta in [
+            Vec2::new(120.0, 0.0),
+            Vec2::new(-37.0, 64.0),
+            Vec2::new(0.0, -210.0),
+        ] {
+            let before = camera.ground_at(centre, centre);
+            drag(&mut camera, centre, delta);
+            let landed = camera.ground_at(centre, centre + delta);
+            assert!(
+                landed.distance(before) < 1e-2,
+                "a drag of {delta:?} slid the ground by {}",
+                landed.distance(before)
+            );
+        }
+        // And a drag is a pan, never a zoom.
+        assert_eq!(camera.zoom(), BoardCamera::DEFAULT_ZOOM);
+        assert!(camera.focus != grabbed || grabbed == camera.focus);
+    }
+
+    #[test]
+    fn a_pinch_keeps_the_ground_between_the_fingers() {
+        // The same property, for the gesture that changes scale: the metre
+        // between the two fingers must not slide out from between them.
+        let mut camera = BoardCamera::default();
+        let layout = viewed(camera);
+        let centre = layout.scene_center();
+
+        for anchor in [centre, centre + Vec2::new(180.0, -90.0)] {
+            for wanted in [2.0, 4.5, 6.0, 3.0] {
+                let held = camera.ground_at(centre, anchor);
+                camera.zoom_to(centre, anchor, wanted);
+                assert_eq!(camera.zoom(), wanted);
+                let still = camera.ground_at(centre, anchor);
+                assert!(
+                    still.distance(held) < 1e-2,
+                    "zooming to {wanted} at {anchor:?} moved the ground by {}",
+                    still.distance(held)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_zoom_is_bounded_by_how_big_a_monkey_is() {
+        // Not by how much of the map fits. A monkey is 22 texels tall, and the
+        // floor keeps it a readable 44 logical pixels.
+        const MONKEY_TEXELS: f32 = 22.0;
+        const { assert!(MONKEY_TEXELS * BoardCamera::MIN_ZOOM >= 44.0) };
+        // The counter-case, stated so nobody "fixes" the floor by fitting the
+        // map: the whole 69-tile board on a phone needs a zoom that renders a
+        // monkey unreadable.
+        let across = map::start().width() as f32 * isometric::TILE_HALF.x * 2.0;
+        let to_fit = 390.0 / across;
+        assert!(
+            to_fit < 0.5 && MONKEY_TEXELS * to_fit < 12.0,
+            "fitting the map would draw a monkey {} pixels tall",
+            MONKEY_TEXELS * to_fit
+        );
+        const { assert!(BoardCamera::MIN_ZOOM <= BoardCamera::DEFAULT_ZOOM) };
+        const { assert!(BoardCamera::DEFAULT_ZOOM < BoardCamera::MAX_ZOOM) };
+    }
+
+    #[test]
+    fn a_pinch_settles_the_zoom_back_onto_a_whole_step() {
+        // Continuous while the fingers are down, whole-numbered once they lift:
+        // the ground mesh takes any scale, but a sprite off the texel grid
+        // crawls, and rest is when that shows.
+        let layout = viewed(BoardCamera::default());
+        let centre = layout.scene_center();
+        for landed_on in [2.4, 3.7, 5.5, 1.2, 9.0] {
+            let mut camera = BoardCamera::default();
+            camera.zoom_to(centre, centre, landed_on);
+            camera.settle();
+            for _ in 0..600 {
+                camera.ease(centre, centre, 1.0 / 60.0);
+            }
+            assert_eq!(
+                camera.zoom(),
+                camera.zoom().round(),
+                "settled on a fractional zoom from {landed_on}"
+            );
+            assert!((BoardCamera::MIN_ZOOM..=BoardCamera::MAX_ZOOM).contains(&camera.zoom()));
+        }
+    }
+
+    #[test]
+    fn the_player_cannot_pan_the_village_away() {
+        // Shove the camera as hard as any gesture could, from every direction,
+        // at every zoom the player can reach, and something of theirs is still
+        // on screen when it comes to rest.
+        //
+        // The assertion this replaces was a tautology: it checked that the
+        // clamped focus was nearer to a landmark than the *diagonal of the
+        // field*, which is true by construction and cannot fail. It passed
+        // while ten drags on a phone landed on a corner of canopy and a
+        // screenful of empty sky, because clamping the bare focus lets the
+        // visible rectangle hang entirely outside the ground being clamped to.
+        for viewport in VIEWPORTS {
+            for step in 0..=4 {
+                let zoom = BoardCamera::MIN_ZOOM
+                    + step as f32 * (BoardCamera::MAX_ZOOM - BoardCamera::MIN_ZOOM) / 4.0;
+                for angle in 0..16 {
+                    let radians = angle as f32 * std::f32::consts::TAU / 16.0;
+                    let mut camera = BoardCamera::default();
+                    let seed = SceneLayout::for_map(viewport, View::Full, map::start(), camera);
+                    camera.zoom_to(seed.scene_center(), seed.scene_center(), zoom);
+                    drag(
+                        &mut camera,
+                        seed.scene_center(),
+                        Vec2::from_angle(radians) * 100_000.0,
+                    );
+                    let camera = camera.clamped(seed.field(), seed.safe_area().size());
+
+                    let layout = SceneLayout::for_map(viewport, View::Full, map::start(), camera);
+                    let safe = layout.safe_area();
+                    // Sampled along the walk in *metres*, so this asks whether
+                    // the player can see ground their monkeys cover rather than
+                    // re-deriving the clamp's own arithmetic and agreeing with
+                    // it. The endpoints alone are too strict: looking at the
+                    // middle of the route with neither end in frame is a thing
+                    // a player should be able to do.
+                    let legs = [
+                        (layout.home_tree(), layout.town_centre()),
+                        (layout.town_centre(), layout.grove()),
+                    ];
+                    let visible = legs.iter().any(|(from, to)| {
+                        (0..=64).any(|step| {
+                            let at = from.lerp(*to, step as f32 / 64.0);
+                            contains_inclusive(safe, layout.board(at))
+                        })
+                    });
+                    assert!(
+                        visible,
+                        "{viewport:?} at zoom {zoom}: a flick at {radians} rad left no part of \
+                         the walk on screen - the ends landed at {:?} in a safe area of {safe:?}",
+                        [
+                            layout.board(layout.home_tree()),
+                            layout.board(layout.town_centre()),
+                            layout.board(layout.grove()),
+                        ],
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_leash_tightens_as_the_player_zooms_in() {
+        // A screenful covers less ground the closer the board comes, so the
+        // focus has to be held nearer the walk to keep any of it in frame. A
+        // bounding-box clamp cannot express this at all: its bound is a
+        // property of the ground and takes no notice of the zoom.
+        let layout = viewed(BoardCamera::default());
+        let field = layout.field();
+        let strays: Vec<f32> = [
+            BoardCamera::MIN_ZOOM,
+            BoardCamera::MAX_ZOOM * 0.5,
+            BoardCamera::MAX_ZOOM,
+        ]
+        .into_iter()
+        .map(|zoom| {
+            let mut camera = BoardCamera::default();
+            camera.zoom_to(layout.scene_center(), layout.scene_center(), zoom);
+            drag(&mut camera, layout.scene_center(), Vec2::splat(100_000.0));
+            let held = isometric::project(camera.clamped(field, layout.safe_area().size()).focus());
+            held.distance(field.nearest(held))
+        })
+        .collect();
+
+        for pair in strays.windows(2) {
+            assert!(
+                pair[1] <= pair[0] + 1e-3,
+                "zooming in was allowed further from the walk: {strays:?}"
+            );
+        }
+        assert!(
+            strays[0] > strays[2] + 1.0,
+            "the leash did not tighten at all across the zoom range: {strays:?}"
+        );
+    }
+
+    #[test]
+    fn the_field_grows_with_the_ground_the_player_works() {
+        // The leash lengthens with the run rather than fencing the opening
+        // village in: a map with a second node further out has a wider field.
+        let near = Map::parse(concat!(
+            "#######\n",
+            "#.....#\n",
+            "#.@.*.#\n",
+            "#.T...#\n",
+            "#######",
+        ))
+        .expect("parses");
+        let far = Map::parse(concat!(
+            "###########\n",
+            "#.........#\n",
+            "#.@.....*.#\n",
+            "#.T.......#\n",
+            "###########",
+        ))
+        .expect("parses");
+        let field = |map: &Map| {
+            SceneLayout::for_map(
+                Vec2::new(1280.0, 720.0),
+                View::Full,
+                map,
+                BoardCamera::opening(map),
+            )
+            .field()
+        };
+        assert!(field(&far).span() > field(&near).span());
+    }
+
+    #[test]
+    fn world_positions_snap_to_a_whole_texel_grid() {
+        for viewport in VIEWPORTS {
+            let layout = SceneLayout::for_viewport(viewport);
             let snapped = layout.snap(11.4);
             let grid_units = snapped / layout.world_scale();
             assert!((grid_units - grid_units.round()).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn a_pan_moves_every_sprite_by_the_same_whole_texels() {
+        // What `board_snapped` is for. The grid is measured from the board's
+        // own origin, so a pan shifts the whole cast together; measured from
+        // the corner of the window instead, each actor rounds against a
+        // different fraction of a texel and the crowd shimmers against ground
+        // that is sliding smoothly underneath it.
+        let mut camera = BoardCamera::default();
+        let before = viewed(camera);
+        let cast = [
+            before.town_centre(),
+            before.grove(),
+            before.home_tree(),
+            before.town_centre() + Vec2::new(1.7, -0.3),
+            before.town_centre() + Vec2::new(-4.25, 9.1),
+        ];
+
+        for nudge in 1..=12 {
+            drag(
+                &mut camera,
+                before.scene_center(),
+                Vec2::new(nudge as f32 * 0.37, 0.0),
+            );
+            let after = viewed(camera);
+            let mut moves = cast
+                .iter()
+                .map(|at| after.board_snapped(*at, 11.0) - before.board_snapped(*at, 11.0));
+            let first = moves.next().expect("the cast is not empty");
+            for step in moves {
+                assert_eq!(
+                    step, first,
+                    "a pan moved one sprite by {step:?} and another by {first:?}"
+                );
+            }
         }
     }
 

@@ -19,7 +19,10 @@ use bevy::{
     prelude::*,
 };
 
-use crate::map::{Map, TILE_METRES, Terrain, Tile};
+use crate::{
+    art::Art,
+    map::{Map, TILE_METRES, Terrain, Tile},
+};
 
 /// Metres per tile, in the `f32` the presentation works in.
 const METRE: f32 = TILE_METRES as f32;
@@ -72,31 +75,39 @@ pub(crate) const NUDGE_STEP: f32 = 0.0005;
 
 pub(crate) const BOARD_SKY: Color = Color::srgb(0.83, 0.93, 0.84);
 
-// The wall top is deliberately close to the canopy it rises out of. Opening a
-// gap between them draws a bright green kerb around the entire jungle boundary,
-// which reads as painted trim on a hedge maze rather than as sunlit canopy. And
-// the village is the brightest ground on the board: the clearing used to be,
-// which pulled the eye into an empty corner and away from the only place
-// anything happens.
+// The jungle's depths are canopy seen from above and stay flat; its edge is
+// drawn with the jungle plants, which is what has to read as a barrier. And the
+// village is the brightest ground on the board: the clearing used to be, which
+// pulled the eye into an empty corner and away from the only place anything
+// happens.
 const JUNGLE_CANOPY: Color = Color::srgb(0.16, 0.34, 0.19);
-const JUNGLE_WALL_TOP: Color = Color::srgb(0.20, 0.43, 0.22);
-const JUNGLE_WALL_LEFT: Color = Color::srgb(0.10, 0.28, 0.13);
-const JUNGLE_WALL_RIGHT: Color = Color::srgb(0.15, 0.38, 0.17);
 const PATH: Color = Color::srgb(0.84, 0.73, 0.51);
 const TOWN: Color = Color::srgb(0.64, 0.79, 0.46);
 const CLEARING: Color = Color::srgb(0.60, 0.71, 0.43);
 
-/// How tall the jungle stands, in metres. Enough to read as a wall a monkey
-/// could not step over, which is what the map says it is.
-const WALL_HEIGHT: f32 = 3.0;
+/// The delivery point, trodden into bare earth.
+///
+/// The town centre used to draw *nothing*. Every delivery in the game lands on
+/// it, the hand-harvest drag ends on it, and a new player opening the game was
+/// shown a flat green lawn with the word VILLAGE floating over it and asked to
+/// drag a banana onto the label. The stall stands eight metres aside so it does
+/// not swallow the arriving queue (D25), and eight metres is off the side of a
+/// phone at the camera's opening zoom - so the one thing that could have named
+/// the spot was the one thing not on screen.
+///
+/// Painted into the ground mesh rather than built as a prop, which is what
+/// makes it free: it is the tile colour of nine tiles, so it costs no draw
+/// call, no sorting, and above all no *span* - it sits exactly at the point the
+/// board is aimed at, so it cannot push anything else off the screen.
+const DEPOT_PAD: Color = Color::srgb(0.77, 0.66, 0.50);
+/// Grass scuffed by traffic, so the pad has an edge rather than a border.
+const DEPOT_EDGE: Color = Color::srgb(0.71, 0.73, 0.48);
 
-const HUT_WALL: Color = Color::srgb(0.86, 0.78, 0.62);
-const HUT_LEFT: Color = Color::srgb(0.52, 0.36, 0.24);
-const HUT_RIGHT: Color = Color::srgb(0.66, 0.47, 0.31);
-const HUT_ROOF: Color = Color::srgb(0.78, 0.36, 0.28);
-const TRUNK: Color = Color::srgb(0.45, 0.31, 0.20);
-const FROND: Color = Color::srgb(0.36, 0.66, 0.29);
-const FROND_SHADE: Color = Color::srgb(0.26, 0.52, 0.23);
+/// How far the trodden ground reaches from the delivery point, in tiles.
+const DEPOT_RADIUS: i32 = 1;
+/// And how far the scuffing around it reaches. The standing ring is sized
+/// against this, so the pad contains the crowd that gathers on it.
+pub(crate) const DEPOT_EDGE_REACH: i32 = 2;
 
 #[derive(Component)]
 pub(crate) struct WorldRoot;
@@ -116,6 +127,22 @@ pub(crate) fn project(world: Vec2) -> Vec2 {
 /// Lift a projected point by a height in metres.
 pub(crate) fn raise(point: Vec2, metres: f32) -> Vec2 {
     Vec2::new(point.x, point.y + metres * HEIGHT_PER_METRE)
+}
+
+/// The ground position, in metres, that [`project`] would put at `point`.
+///
+/// The projection folds two ground axes onto the screen's, and it is invertible
+/// precisely because the ground is a *plane*: there is exactly one metre
+/// position under any point on it. That is what lets a drag on the board be
+/// read as a grab on the ground rather than as a scroll of a picture — the
+/// camera moves so the metre the finger landed on stays under the finger, at
+/// any zoom.
+pub(crate) fn unproject(point: Vec2) -> Vec2 {
+    // `project` is `x - y` across and `-(x + y)` down; recovering the pair from
+    // the sum and the difference is the whole inverse.
+    let difference = point.x / TILE_HALF.x;
+    let sum = -point.y / TILE_HALF.y;
+    Vec2::new(sum + difference, sum - difference) * (METRE * 0.5)
 }
 
 /// How near the viewer a ground position is. Larger is nearer.
@@ -177,6 +204,26 @@ fn terrain_colour(terrain: Terrain) -> Color {
     }
 }
 
+/// The colour of one tile of ground, with the depot trodden into it.
+///
+/// Only walkable ground is trodden: a depot painted over the jungle wall would
+/// put bare earth up the side of a three-metre hedge.
+fn ground_colour(map: &Map, tile: Tile) -> Color {
+    let terrain = map.terrain(tile);
+    if !terrain.passable() {
+        return terrain_colour(terrain);
+    }
+    let centre = map.town_centre();
+    let reach = (tile.x - centre.x).abs().max((tile.y - centre.y).abs());
+    if reach <= DEPOT_RADIUS {
+        DEPOT_PAD
+    } else if reach <= DEPOT_EDGE_REACH {
+        DEPOT_EDGE
+    } else {
+        terrain_colour(terrain)
+    }
+}
+
 /// A mesh under construction, in projected space with per-vertex colour.
 ///
 /// Vertex colours are what let the entire ground plane be one draw call:
@@ -229,7 +276,7 @@ fn ground_mesh(map: &Map) -> Mesh {
     for y in 0..map.height() {
         for x in 0..map.width() {
             let tile = Tile::new(x, y);
-            builder.quad(diamond(tile), terrain_colour(map.terrain(tile)));
+            builder.quad(diamond(tile), ground_colour(map, tile));
         }
     }
     builder.build()
@@ -262,151 +309,6 @@ fn wall_tiles(map: &Map) -> Vec<Tile> {
     tiles
 }
 
-/// The three shades of one raised box: its top, and the two sides that face the
-/// viewer.
-#[derive(Clone, Copy)]
-struct Palette {
-    top: Color,
-    left: Color,
-    right: Color,
-}
-
-const JUNGLE_PALETTE: Palette = Palette {
-    top: JUNGLE_WALL_TOP,
-    left: JUNGLE_WALL_LEFT,
-    right: JUNGLE_WALL_RIGHT,
-};
-
-const HUT_PALETTE: Palette = Palette {
-    top: HUT_ROOF,
-    left: HUT_LEFT,
-    right: HUT_RIGHT,
-};
-
-const FROND_PALETTE: Palette = Palette {
-    top: FROND,
-    left: FROND_SHADE,
-    right: FROND_SHADE,
-};
-
-/// The diamond of a rectangle of ground, projected: top, right, bottom, left.
-fn footprint(origin: Vec2, size: Vec2) -> [Vec2; 4] {
-    [
-        project(origin),
-        project(origin + Vec2::new(size.x, 0.0)),
-        project(origin + size),
-        project(origin + Vec2::new(0.0, size.y)),
-    ]
-}
-
-/// A box over `size` metres of ground, spanning `base` to `base + height`
-/// metres of air.
-///
-/// `base` is what lets a palm's crown sit on top of its trunk rather than in
-/// the grass around it.
-fn prism(
-    builder: &mut MeshBuilder,
-    origin: Vec2,
-    size: Vec2,
-    base: f32,
-    height: f32,
-    palette: Palette,
-) {
-    let [top, right, bottom, left] = footprint(origin, size);
-    let floor = Vec2::new(0.0, base * HEIGHT_PER_METRE);
-    let ceiling = Vec2::new(0.0, (base + height) * HEIGHT_PER_METRE);
-    builder.quad(
-        [
-            top + ceiling,
-            right + ceiling,
-            bottom + ceiling,
-            left + ceiling,
-        ],
-        palette.top,
-    );
-    builder.quad(
-        [
-            left + ceiling,
-            bottom + ceiling,
-            bottom + floor,
-            left + floor,
-        ],
-        palette.left,
-    );
-    builder.quad(
-        [
-            bottom + ceiling,
-            right + ceiling,
-            right + floor,
-            bottom + floor,
-        ],
-        palette.right,
-    );
-}
-
-/// One jungle tile, raised into a wall.
-///
-/// Built around its own origin and placed by a `Transform`, like the hut and
-/// the palms. Baking the tile's position into the vertices instead would give
-/// every one of the two hundred wall tiles a distinct mesh asset, and Bevy can
-/// only batch consecutive items that share one — two hundred draw calls for a
-/// shape that is the same shape two hundred times.
-fn wall_mesh() -> Mesh {
-    let mut builder = MeshBuilder::default();
-    prism(
-        &mut builder,
-        Vec2::splat(-METRE * 0.5),
-        Vec2::splat(METRE),
-        0.0,
-        WALL_HEIGHT,
-        JUNGLE_PALETTE,
-    );
-    builder.build()
-}
-
-/// The hut at the town centre: where every delivery lands, and the first thing
-/// on the board tall enough to hide a monkey behind it.
-fn hut_mesh() -> Mesh {
-    let mut builder = MeshBuilder::default();
-    let size = Vec2::splat(METRE * 2.0);
-    let origin = Vec2::splat(-METRE);
-    prism(&mut builder, origin, size, 0.0, 3.0, HUT_PALETTE);
-    // A pale band under the roof, so the hut is not one flat mass.
-    let [_, right, bottom, left] = footprint(origin, size);
-    let band = Vec2::new(0.0, 1.4 * HEIGHT_PER_METRE);
-    builder.quad([left + band, bottom + band, bottom, left], HUT_WALL);
-    builder.quad([bottom + band, right + band, right, bottom], HUT_WALL);
-    builder.build()
-}
-
-/// A banana palm: a trunk, and a crown wider than the tile it stands on.
-fn palm_mesh() -> Mesh {
-    let mut builder = MeshBuilder::default();
-    prism(
-        &mut builder,
-        Vec2::splat(-0.35),
-        Vec2::splat(0.7),
-        0.0,
-        3.4,
-        Palette {
-            top: TRUNK,
-            left: TRUNK,
-            right: TRUNK,
-        },
-    );
-    // The crown sits on top of the trunk, wider than the tile, so a palm reads
-    // as something you stand under rather than a bush.
-    prism(
-        &mut builder,
-        Vec2::splat(-METRE * 0.85),
-        Vec2::splat(METRE * 1.7),
-        3.1,
-        0.7,
-        FROND_PALETTE,
-    );
-    builder.build()
-}
-
 /// Where the stall stands, in metres: beside the delivery point, never on it.
 ///
 /// The town centre tile *is* where a worker unloads, and the queue spreads a few
@@ -429,17 +331,39 @@ fn stall_stand(map: &Map) -> Vec2 {
     centre + aside * ASIDE
 }
 
+/// Which jungle plant stands on a tile, if any.
+///
+/// A scatter rather than a hedge. Every jungle tile touching open ground used
+/// to be raised into a three-metre block, which read as a wall because it was
+/// one; the plants are fourteen metres of crown apiece, so putting one on every
+/// tile would be a solid green rampart with no silhouette at all. Roughly two
+/// tiles in five carry a plant, and which plant is the tile's own business, so
+/// the tree line is broken and uneven and the same every time the game opens.
+///
+/// Hashed from the tile rather than drawn from an RNG, for the reason every
+/// other scatter in this game is: the map is fixed, so its planting should be
+/// too, and a save that reopens on a differently-shaped jungle is unsettling in
+/// a way nobody can name.
+fn planting(tile: Tile) -> Option<usize> {
+    let mut bits =
+        (tile.x as u32).wrapping_mul(0x9E37_79B9) ^ (tile.y as u32).wrapping_mul(0x85EB_CA6B);
+    bits ^= bits >> 16;
+    bits = bits.wrapping_mul(0x7FEB_352D);
+    bits ^= bits >> 15;
+    // Two in five planted, and an even pick between the three kinds.
+    (bits % 5 < 2).then_some((bits >> 8) as usize % 3)
+}
+
 pub(crate) fn spawn_world(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ColorMaterial>,
+    art: &Art,
     map: &Map,
 ) {
     // One material for every baked surface: the colour lives in the vertices.
     let painted = materials.add(ColorMaterial::from(Color::WHITE));
-    let hut = meshes.add(hut_mesh());
-    let palm = meshes.add(palm_mesh());
-    let wall = meshes.add(wall_mesh());
+    let plant = art.plant_cell();
 
     commands
         .spawn((WorldRoot, Transform::default(), Visibility::default()))
@@ -450,36 +374,54 @@ pub(crate) fn spawn_world(
                 Transform::from_xyz(0.0, 0.0, GROUND_Z),
             ));
 
-            for tile in wall_tiles(map) {
-                let at = tile_centre(tile);
-                let anchor = project(at);
-                root.spawn((
-                    Mesh2d(wall.clone()),
-                    MeshMaterial2d(painted.clone()),
-                    Transform::from_xyz(anchor.x, anchor.y, stand_z(at, 0.0)),
-                ));
-            }
-
             // Anything with height is its own entity, anchored at the ground it
-            // stands on. That is the whole discipline: the hut covers a monkey
-            // behind it and not one in front, without any per-frame sorting.
+            // stands on. That is the whole discipline, and it is why the art
+            // slots in where the meshes were without touching the layering: a
+            // sprite anchored at its feet sorts by `stand_z` exactly as a prism
+            // built from its footprint did. The hut covers a monkey behind it
+            // and not one in front, without any per-frame sorting.
             //
             // A multi-tile footprint can only carry one depth, so each takes its
             // centre's: half a footprint of error either way, rather than a
             // whole one at a corner. Keeping footprints small is what keeps that
-            // invisible.
-            let standing = std::iter::once((stall_stand(map), hut)).chain(
+            // invisible - and it is why the jungle is planted per *tile* rather
+            // than drawn as one wall.
+            let jungle = wall_tiles(map).into_iter().filter_map(|tile| {
+                planting(tile).map(|kind| (tile_centre(tile), &art.jungle[kind], plant))
+            });
+
+            let village = [
+                (stall_stand(map), &art.town_centre, art.town_centre_cell()),
+                // The worked node still has its bunch on; the home tree has had
+                // it cut, and that one banana is the loose one lying at its foot
+                // for the player to pick up. Two states of one plant, which is
+                // also what finally tells the two nodes apart on sight.
+                (
+                    tile_centre(map.worked_grove().tile),
+                    &art.banana_fruiting,
+                    plant,
+                ),
+            ]
+            .into_iter()
+            .chain(
+                map.home_trees()
+                    .iter()
+                    .map(|&tile| (tile_centre(tile), &art.banana_harvested, plant)),
+            )
+            .chain(
                 map.groves()
                     .iter()
                     .map(|grove| grove.tile)
-                    .chain(map.home_trees().iter().copied())
-                    .map(|tile| (tile_centre(tile), palm.clone())),
+                    .filter(|tile| *tile != map.worked_grove().tile)
+                    .map(|tile| (tile_centre(tile), &art.banana_fruiting, plant)),
             );
-            for (at, mesh) in standing {
+
+            for (at, image, cell) in jungle.chain(village) {
                 let anchor = project(at);
+                let (sprite, pivot) = art.standing(image, cell);
                 root.spawn((
-                    Mesh2d(mesh),
-                    MeshMaterial2d(painted.clone()),
+                    sprite,
+                    pivot,
                     Transform::from_xyz(anchor.x, anchor.y, stand_z(at, 0.0)),
                 ));
             }
@@ -505,6 +447,28 @@ mod tests {
             project(Vec2::splat(METRE)) - origin,
             Vec2::new(0.0, -TILE_HALF.y * 2.0)
         );
+    }
+
+    #[test]
+    fn a_point_on_the_board_names_exactly_one_metre_on_the_ground() {
+        // The property a drag depends on: grab the board anywhere and the metre
+        // under the finger is recoverable, so panning can hold it there.
+        for world in [
+            Vec2::ZERO,
+            Vec2::new(89.0, 61.0),
+            Vec2::new(41.0, 25.0),
+            Vec2::new(-7.5, 133.25),
+        ] {
+            let round_trip = unproject(project(world));
+            assert!(
+                round_trip.distance(world) < 1e-3,
+                "{world:?} came back as {round_trip:?}"
+            );
+        }
+        // And in the other direction, which is the one a pinch uses: a screen
+        // offset names a ground offset.
+        let screen = Vec2::new(96.0, -40.0);
+        assert!(project(unproject(screen)).distance(screen) < 1e-3);
     }
 
     #[test]
@@ -553,6 +517,32 @@ mod tests {
         // Square to the walk, so nobody has to route through the building.
         let outbound = (tile_centre(map.worked_grove().tile) - centre).normalize();
         assert!((stall - centre).normalize().dot(outbound).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_delivery_point_is_visible_ground_rather_than_bare_lawn() {
+        // A new player is asked to drag a banana to the town centre. Before the
+        // depot was trodden in, the town centre drew nothing at all - the same
+        // green as the forty tiles around it - so the drag's target was a word.
+        let map = crate::map::start();
+        let centre = map.town_centre();
+        assert_eq!(ground_colour(map, centre), DEPOT_PAD);
+        assert_ne!(ground_colour(map, centre), terrain_colour(Terrain::Town));
+        // With an edge, so it reads as worn rather than as a painted rectangle.
+        let edge = Tile::new(centre.x + DEPOT_EDGE_REACH, centre.y);
+        assert_eq!(ground_colour(map, edge), DEPOT_EDGE);
+        // And it stops: the town is still the town a few tiles out.
+        let away = Tile::new(centre.x + DEPOT_EDGE_REACH + 1, centre.y);
+        assert_eq!(ground_colour(map, away), terrain_colour(map.terrain(away)));
+        // It never climbs the jungle wall, which is not ground anyone treads.
+        for y in 0..map.height() {
+            for x in 0..map.width() {
+                let tile = Tile::new(x, y);
+                if !map.terrain(tile).passable() {
+                    assert_eq!(ground_colour(map, tile), terrain_colour(map.terrain(tile)));
+                }
+            }
+        }
     }
 
     #[test]

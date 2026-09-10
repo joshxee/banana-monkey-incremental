@@ -127,6 +127,79 @@ fn a_fresh_hire_delivers_at_tick_950_and_eats_at_tick_1000() {
 }
 
 #[test]
+fn the_swarm_never_reaches_the_economy() {
+    // D24 and D27, and it is worth being exact about which half of them.
+    //
+    // `Headless` installs `SimulationPlugin` alone, so no swarm code runs here
+    // at all - and that is the point rather than a gap: what this holds is that
+    // the *size of the crowd* cannot move a tick, which is the shape a leak
+    // would take if any offset ever reached `FixedUpdate`. It would catch the
+    // corridor spread or the along-route scatter, either of which changes how
+    // far a monkey has walked.
+    //
+    // It would **not** catch the wobble, and the docstring said otherwise for a
+    // release. The remap is the identity at both ends, so routing it through
+    // the simulation would still deliver on tick 950; only
+    // `the_hire_index_is_invisible_to_the_economy` below can see that one.
+    // `worker::tests::the_swarm_never_moves_an_arrival` pins the arithmetic.
+    let mut alone = Headless::scenario("one-worker");
+    let start = alone.treasury();
+    let solo = alone.tick_until(2_000, |sim| sim.treasury() != start);
+    assert_eq!(solo, Some(DELIVERY_TICK));
+
+    // Sixty monkeys, every one with a different wobble, spread and scatter,
+    // all setting out together from the stall.
+    let mut crowd = Headless::from_run(run(600.0, 60), Placement::AtStall);
+    let start = crowd.treasury();
+    let together = crowd.tick_until(2_000, |sim| sim.treasury() != start);
+    assert_eq!(
+        together, solo,
+        "a crowd delivers on a different tick from a monkey walking alone"
+    );
+    // And on that tick every one of them arrives, because the swarm changed
+    // where they are drawn and not how far any of them walked.
+    assert_eq!(crowd.treasury(), start + PAYLOAD * 60.0);
+}
+
+#[test]
+fn the_hire_index_is_invisible_to_the_economy() {
+    // The pin that actually bites. Every swarm offset is hashed from the hire
+    // index, so the way any of them could reach the simulation is for the
+    // *index itself* to change an outcome. Start the same run at two different
+    // lane bases and the economy has to be bit-identical: same deliveries, same
+    // ticks, same treasury to the last bit.
+    //
+    // Unlike `the_swarm_never_reaches_the_economy` above, this sees the wobble.
+    // A sine bulge routed into `FixedUpdate` would still deliver on tick 950 -
+    // it vanishes at both ends - but it would not survive being asked the same
+    // question from a different base.
+    let ledger = |base: u32| {
+        let mut sim = Headless::from_run(run(600.0, 40), Placement::AtStall);
+        sim.resource_mut::<crate::worker::NextLane>().set_base(base);
+        let mut settled = Vec::new();
+        for tick in 0..2_400 {
+            sim.tick();
+            for record in sim.settled() {
+                settled.push((tick, record.delivery.kind, record.delivery.amount.to_bits()));
+            }
+        }
+        (settled, sim.treasury().to_bits())
+    };
+
+    let (plain, plain_total) = ledger(0);
+    let (shifted, shifted_total) = ledger(10_007);
+    assert!(
+        !plain.is_empty(),
+        "the run produced no deliveries to compare"
+    );
+    assert_eq!(
+        plain, shifted,
+        "the hire index changed what the economy did"
+    );
+    assert_eq!(plain_total, shifted_total);
+}
+
+#[test]
 fn a_worker_visits_every_segment_in_order_and_only_carries_on_the_way_back() {
     let mut sim = Headless::scenario("one-worker");
     let mut visits: Vec<(Segment, u32)> = Vec::new();

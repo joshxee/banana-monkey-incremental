@@ -248,6 +248,73 @@ pub fn all() -> Vec<Scenario> {
             placement: Placement::Restored { seed: Some(42) },
         },
         Scenario {
+            name: "first-drag",
+            summary: "the opening frame, and nothing else: watch it at 390x844 and at \
+                      844x390. A stranger should be able to point at the banana and at \
+                      where it goes within five seconds, without touching anything",
+            run: Seed::default().run(),
+            placement: Placement::Restored { seed: Some(1) },
+        },
+        Scenario {
+            name: "cohort",
+            summary: "sixty monkeys that all set out together, which is what buying in \
+                      bulk actually creates: by the second lap you should not be able to \
+                      point at a block. One clot orbiting the route with empty road \
+                      either side of it is the fail",
+            run: Seed {
+                bananas: 600.0,
+                workers: 60,
+                chefs: 4,
+                unpackers: 3,
+                technologists: 1,
+                research: 200.0,
+                ..Seed::default()
+            }
+            .run(),
+            // The whole point: every one of them starts at the stall at phase
+            // zero, exactly as a burst of hires does. The `swarm` scenario is
+            // `Restored`, which hands out random phases - the one placement
+            // under which a cohort is invisible.
+            placement: Placement::AtStall,
+        },
+        Scenario {
+            name: "swarm",
+            summary: "sixty monkeys and no carts: watch the depot and you should see two \
+                      streams crossing - gold bananas coming home, empty monkeys heading \
+                      out - with the crowd wide across the town and no two of them in \
+                      step; first arrivals pay nothing",
+            run: Seed {
+                bananas: 600.0,
+                workers: 60,
+                chefs: 4,
+                unpackers: 3,
+                technologists: 1,
+                research: 200.0,
+                ..Seed::default()
+            }
+            .run(),
+            placement: Placement::Restored { seed: Some(61) },
+        },
+        Scenario {
+            name: "survey",
+            summary: "for the camera: monkeys spread down the whole walk. Drag the \
+                      grass - the metre under the cursor should stay under it, and the \
+                      whole crowd should slide with the ground and not jitter against \
+                      it; first arrivals pay nothing",
+            run: Seed {
+                bananas: 400.0,
+                workers: 18,
+                chefs: 3,
+                unpackers: 2,
+                technologists: 1,
+                research: 120.0,
+                carts: 1,
+                crewed: 3,
+            }
+            .run(),
+            placement: Placement::Restored { seed: Some(37) },
+        },
+        Scenario {
             name: "rich",
             summary: "every button affordable and nothing hired: for shop and UI work, and \
                       for browser tests that must not grind",

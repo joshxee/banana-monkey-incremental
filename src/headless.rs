@@ -163,6 +163,14 @@ impl Headless {
         self.app.world_mut().resource_mut::<RestartRequest>().0 = true;
     }
 
+    /// A resource to change before stepping, for the few contracts that need
+    /// to set the world up rather than only read it back.
+    pub(crate) fn resource_mut<R: Resource<Mutability = bevy::ecs::component::Mutable>>(
+        &mut self,
+    ) -> Mut<'_, R> {
+        self.app.world_mut().resource_mut::<R>()
+    }
+
     pub(crate) fn resource<R: Resource + Copy>(&self) -> R {
         *self.app.world().resource::<R>()
     }
