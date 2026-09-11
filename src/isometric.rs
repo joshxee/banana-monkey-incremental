@@ -529,7 +529,14 @@ pub(crate) fn spawn_world(
 /// One set of bins, standing at `at`.
 fn spawn_bins(commands: &mut RelatedSpawnerCommands<ChildOf>, art: &Art, which: Bins, at: Vec2) {
     let anchor = project(at);
-    let (sprite, pivot) = art.standing(&art.banana_bins, art::BANANA_BINS);
+    // The depot's set is painted into the treehouse and keeps its scale; the
+    // carts' set stands on its own and is drawn at the shared one. See
+    // `art::CART_BINS`.
+    let cell = match which {
+        Bins::Harvest => art::BANANA_BINS,
+        Bins::Cart => art::CART_BINS,
+    };
+    let (sprite, pivot) = art.standing(&art.banana_bins, cell);
     commands.spawn((
         which,
         sprite,
@@ -552,8 +559,21 @@ pub(crate) fn sync_cart_bins(
     research: Res<Research>,
     root: Query<Entity, With<WorldRoot>>,
     existing: Query<(Entity, &Bins)>,
+    mut sign: Query<&mut Visibility, With<crate::game::CartYardLabel>>,
 ) {
     let wanted = research.level() >= CART_TECH_REQUIREMENT;
+    // The sign goes with the bins: named the moment there is something there to
+    // name, gone again the moment there is not.
+    for mut visibility in &mut sign {
+        let shown = if wanted {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != shown {
+            *visibility = shown;
+        }
+    }
     let standing = existing.iter().any(|(_, bins)| *bins == Bins::Cart);
     if wanted == standing {
         return;

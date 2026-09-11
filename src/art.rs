@@ -140,13 +140,36 @@ pub(crate) const TOWN_CENTRE_BINS: Vec2 = Vec2::new(375.0, 555.0);
 /// second set can be stood anywhere on the board by the same anchor when the
 /// carts arrive.
 pub(crate) const BANANA_BINS: Cell = Cell::new((672.0, 704.0), (375.0, 555.0)).shrunk(0.5);
-/// How far the bins' art reaches to either side of their anchor, in art pixels.
+/// And the same sprite standing on its own, at the shared scale.
 ///
-/// Measured off the sprite by `the_bins_are_a_sprite_of_their_own`, not guessed:
-/// what parks around the bins is placed against this, so a cart stands clear of
-/// the boxes it is unloading into rather than inside one.
+/// The deviation belongs to the *building*, not to the boxes. The treehouse is
+/// drawn at half the shared scale because a ten-monkey treehouse does not fit a
+/// phone (D30), and the bins inherit that only because they are painted into its
+/// picture: at a quarter of a texel per art pixel the whole three-bin cluster is
+/// 36 texels across, which is narrower than one monkey and barely half the
+/// width of a cart. Standing in a yard of its own, beside vehicles and monkeys
+/// drawn at full scale, that reads as a toy.
+///
+/// So the carts' set is drawn at [`ART_SCALE`] like every other prop on the
+/// board. The two sets are then visibly different sizes, which is the honest
+/// reading rather than an accident: the freight's boxes are the big ones.
+pub(crate) const CART_BINS: Cell = Cell::new((672.0, 704.0), (375.0, 555.0));
+/// How far the bins' art reaches to either side of their anchor, in **world
+/// texels**.
+///
+/// Measured off the sprite by `the_bins_are_a_sprite_of_their_own` rather than
+/// guessed, and converted through the bins' own cell rather than through
+/// [`ART_SCALE`]. That distinction is the whole reason this is stated in texels
+/// and not in art pixels: [`BANANA_BINS`] is `shrunk(0.5)`, so a bin's art pixel
+/// is a *quarter* of a texel, not a half, and multiplying its 75 art pixels by
+/// `ART_SCALE` doubles it. Everything else placed against the house goes
+/// through [`Cell::offset_of`] for the same reason; a bare constant is the one
+/// shape that can get it wrong, so this one arrives pre-converted.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const BINS_HALF_WIDTH: f32 = 75.0;
+pub(crate) const BINS_HALF_WIDTH_TEXELS: f32 = 18.75;
+/// And of the carts' free-standing set, which is drawn at the shared scale.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const CART_BINS_HALF_WIDTH_TEXELS: f32 = 37.5;
 /// The middle of the treehouse's opaque art, which the opening view centres
 /// on: its bounds are (63, 38) to (574, 606).
 pub(crate) const TOWN_CENTRE_MIDDLE: Vec2 = Vec2::new(318.5, 322.0);
@@ -619,6 +642,7 @@ mod tests {
             ("TownCenter/town-center-structure.png", TOWN_CENTRE, 1),
             ("TownCenter/town-center-ground.png", TOWN_CENTRE, 1),
             ("TownCenter/town-center-bins.png", BANANA_BINS, 1),
+            ("TownCenter/town-center-bins.png", CART_BINS, 1),
             (
                 "Monkey/Spider Worker/spider_monkey_walk_sheet.png",
                 WORKER,
@@ -816,10 +840,19 @@ mod tests {
         // are placed against reaches the far edge of them.
         assert!(min.as_vec2().cmple(TOWN_CENTRE_BINS).all());
         assert!(max.as_vec2().cmpge(TOWN_CENTRE_BINS).all());
-        assert_eq!(
-            BINS_HALF_WIDTH,
-            (max.x as f32 - TOWN_CENTRE_BINS.x).max(TOWN_CENTRE_BINS.x - min.x as f32)
-        );
+        let reach = (max.x as f32 - TOWN_CENTRE_BINS.x).max(TOWN_CENTRE_BINS.x - min.x as f32);
+        assert_eq!(reach, 75.0);
+        // And converted through the bins' own cell, not through `ART_SCALE`:
+        // `BANANA_BINS` is drawn at a quarter of a texel per art pixel.
+        assert_eq!(BINS_HALF_WIDTH_TEXELS, reach * BANANA_BINS.texels());
+        assert_eq!(BANANA_BINS.texels(), ART_SCALE * 0.5);
+        // The carts' set is the same picture at the shared scale: twice across,
+        // standing beside full-scale vehicles rather than painted into a
+        // building drawn at a deviation.
+        assert_eq!(CART_BINS_HALF_WIDTH_TEXELS, reach * CART_BINS.texels());
+        assert_eq!(CART_BINS.texels(), ART_SCALE);
+        assert_eq!(CART_BINS.canvas, BANANA_BINS.canvas);
+        assert_eq!(CART_BINS.ground, BANANA_BINS.ground);
 
         // Every opaque pixel is a bin colour: the box's four cool blues, the
         // three yellows of the fruit, or the brown of a bunch's stem.

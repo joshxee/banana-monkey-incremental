@@ -633,9 +633,19 @@ pub(crate) fn sync_support_badges(
         // projected like every other station. Reading it as screen pixels
         // pinned every badge to the same corner of the window whatever the
         // role was doing.
+        //
+        // The Unpacker's hangs over the bins instead, because that is where its
+        // monkeys are. Its station is only a place on a list now (D31), so a
+        // badge there would be an "x9" plate counting nine squirrels over a
+        // patch of empty grass while the nine of them worked at the depot.
+        let over = if badge.0 == SupportRole::Unpacker {
+            layout.town_centre()
+        } else {
+            layout.support_point(badge.0, Vec2::ZERO)
+        };
         transform.translation = layout
             .board_snapped(
-                layout.support_point(badge.0, Vec2::ZERO),
+                over,
                 // Centred over the role's fan and lifted clear of it. Placed
                 // *beside* the group it covered the outermost monkeys - and at
                 // a crowded deposit those were the chefs' hats, which are the
@@ -684,11 +694,15 @@ pub(crate) fn sync_support_badges(
 /// Higher than [`AVATARS_PER_ROLE`], and for a reason that does not apply to the
 /// other two roles: a courier does not stand in a fan, so what caps it is not
 /// how much ground a station has beside it. Six is what the traffic itself
-/// affords - the lane between the unloading ring and the bins is about five
-/// metres of ground, and a seventh squirrel running it adds a sprite rather than
-/// a reading. Past this the count moves to the badge, exactly as it does for a
+/// affords - the lane between the unloading ring and the bins is a few metres
+/// of ground, and a seventh squirrel running it adds a sprite rather than a
+/// reading. Past this the count moves to the badge, exactly as it does for a
 /// chef.
 pub(crate) const COURIER_LIMIT: usize = 6;
+// Two or more, because the waiting arc is divided into `COURIER_LIMIT - 1`
+// steps. Stated here, next to the value, rather than discovered as a NaN
+// bearing and a vanished sprite.
+const _: () = assert!(COURIER_LIMIT >= 2);
 
 /// How long one fetch-and-deliver run takes, in seconds.
 ///
@@ -709,17 +723,24 @@ const SHUTTLE_PAUSE: f32 = 0.14;
 ///
 /// Short of both, and not by accident: a courier that reached 0 would stand
 /// inside the bins it is loading, and one that reached 1 would stand inside the
-/// harvester it is taking from. A tenth of a five-metre lane is half a metre,
-/// which is a body's width of daylight at either end.
+/// harvester it is taking from.
 const SHUTTLE_NEAR: f32 = 0.1;
 const SHUTTLE_FAR: f32 = 0.9;
 
-/// How far out from the delivery point a courier drops its load, in metres:
-/// just inside the ring the harvesters stand on, at the bins themselves.
-const DROP_RADIUS: f32 = 1.9;
+/// How far out from the delivery point a courier waits and drops its load, in
+/// metres.
+///
+/// Just inside the ring the harvesters stand on, at the boxes themselves. Wide
+/// enough that six of them waiting are a line along the front of the bins
+/// rather than a heap on top of them: a squirrel is about 1.9 m of ground
+/// across at this scale, and six over a half-turn of a 2.9 m circle leaves
+/// roughly a body between neighbours.
+const DROP_RADIUS: f32 = 2.9;
 /// And on which side of them: towards the viewer, in ground metres, so the
 /// couriers work across the front of the boxes rather than behind them.
 const DROP_FRONT: f32 = std::f32::consts::FRAC_PI_4;
+/// How much of the circle the waiting places are spread over.
+const DROP_SWEEP: f32 = std::f32::consts::PI;
 
 /// One drawn squirrel monkey.
 #[derive(Component, Debug, Clone, Copy)]
@@ -727,8 +748,8 @@ pub(crate) struct CourierAvatar {
     index: usize,
 }
 
-/// A courier's playhead: which clip, which of the eight bearings, and how far
-/// through the loop.
+/// A courier's playhead: which clip, which of the eight bearings, how far
+/// through the loop, and which harvester it is serving.
 ///
 /// The travelling loops are advanced by distance drawn rather than by the clock,
 /// the way a harvester's walk is (see `art::COURIER_STRIDE_TEXELS`), so the
@@ -742,7 +763,61 @@ pub(crate) struct CourierPlaying {
     elapsed: f32,
     stride: f32,
     last: Option<Vec2>,
+    /// The hire index of the harvester it is helping, held until that monkey
+    /// stops unloading.
+    ///
+    /// The whole reason this is remembered rather than recomputed. Picking a
+    /// target by position in a list of whoever is currently unloading looks
+    /// stable - the list is sorted - but the *list's length* changes every time
+    /// a harvester arrives or leaves, which at the shipped cadence is about
+    /// once a second, and every change re-maps every courier onto a different
+    /// monkey. A squirrel then crosses the whole depot between two frames, with
+    /// a step long enough to snap its bearing and spin its stride as well.
+    serving: Option<u32>,
+    /// Seconds into the current run, so a reassignment starts a fresh one from
+    /// the bins rather than dropping the courier mid-lane.
+    run: f32,
 }
+
+impl CourierPlaying {
+    /// Advance the playhead by one frame, having been drawn `step` texels along
+    /// the board.
+    fn advance(&mut self, step: Vec2, delta: f32) {
+        self.heading = Courier::heading(step, self.heading);
+        match self.clip {
+            Courier::Idle => {
+                // Capped before the loop spends it, exactly as `animate_workers`
+                // caps a walker's: a frame that arrives after a long stall - a
+                // backgrounded tab, a breakpoint - would otherwise be paid out
+                // one animation frame at a time.
+                self.elapsed = (self.elapsed + delta).min(1.0);
+                while self.elapsed >= Courier::idle_hold() {
+                    self.elapsed -= Courier::idle_hold();
+                    self.frame = (self.frame + 1) % Courier::Idle.frames();
+                }
+            }
+            travelling => {
+                self.stride = (self.stride + step.length() / art::COURIER_STRIDE_TEXELS).fract();
+                self.frame =
+                    (self.stride * travelling.frames() as f32) as u32 % travelling.frames();
+            }
+        }
+    }
+
+    /// Stand still, facing the viewer.
+    ///
+    /// Squared up rather than left on whatever bearing the last run ended on.
+    /// The sheets are drawn in eight directions and half of them are a grey back
+    /// on green grass; a rank of couriers waiting at the boxes should be looking
+    /// out of the screen, the way the spawn already sets them.
+    fn wait(&mut self) {
+        self.clip = Courier::Idle;
+        self.heading = COURIER_FACING_VIEWER;
+    }
+}
+
+/// The sheet row that faces the viewer: south, the fourth of N, NE, E, SE, S.
+const COURIER_FACING_VIEWER: u32 = 4;
 
 /// How many monkeys of a role the scene draws before the count moves to a badge.
 pub(crate) fn drawn_for(role: SupportRole, layout: &SceneLayout) -> usize {
@@ -756,32 +831,67 @@ pub(crate) fn drawn_for(role: SupportRole, layout: &SceneLayout) -> usize {
 ///
 /// A triangle with a flat top and a flat bottom: out to the monkey, a pause to
 /// take the banana, back to the bins, a pause to drop it. `carrying` is the
-/// return leg, which is the one the loaded sheet is drawn for.
-fn shuttle(phase: f32) -> (f32, bool) {
+/// return leg, which is the one the loaded sheet is drawn for. `moving` is false
+/// through the two pauses, where the courier is doing the taking and the
+/// dropping and the travelling loops have no distance to advance on.
+fn shuttle(phase: f32) -> (f32, bool, bool) {
     let phase = phase.rem_euclid(1.0);
     let travel = (1.0 - 2.0 * SHUTTLE_PAUSE) * 0.5;
     if phase < travel {
-        (phase / travel, false)
+        (phase / travel, false, true)
     } else if phase < travel + SHUTTLE_PAUSE {
-        (1.0, false)
+        (1.0, false, false)
     } else if phase < 2.0 * travel + SHUTTLE_PAUSE {
-        (1.0 - (phase - travel - SHUTTLE_PAUSE) / travel, true)
+        (1.0 - (phase - travel - SHUTTLE_PAUSE) / travel, true, true)
     } else {
-        (0.0, true)
+        (0.0, true, false)
+    }
+}
+
+/// Where the `index`th courier waits, in metres: its own place along the front
+/// of the bins, so six of them are a line rather than a heap.
+fn waiting_place(layout: &SceneLayout, index: usize) -> Vec2 {
+    let across = DROP_SWEEP * (index as f32 / (COURIER_LIMIT as f32 - 1.0) - 0.5);
+    layout.town_centre() + Vec2::from_angle(DROP_FRONT + across) * DROP_RADIUS
+}
+
+/// Keep one squirrel monkey drawn per Unpacker hired, up to [`COURIER_LIMIT`].
+///
+/// Its own system, ahead of the one that poses them, for the reason the
+/// harvesters' spawn and pose are two systems: a reconcile that also draws has
+/// to carry a "this one is about to go" branch through the drawing, and the
+/// branch is where a stale index gets used.
+pub(crate) fn spawn_missing_couriers(
+    mut commands: Commands,
+    art: Res<Art>,
+    layout: Res<SceneLayout>,
+    staff: Res<Staff>,
+    couriers: Query<(Entity, &CourierAvatar)>,
+) {
+    let wanted = (staff.count(SupportRole::Unpacker) as usize).min(COURIER_LIMIT);
+    let drawn = couriers.iter().count();
+    for index in drawn..wanted {
+        spawn_courier(&mut commands, &art, &layout, index);
+    }
+    // Handed back by index, so the squirrels that stay keep the harvesters they
+    // were helping - a sacking should not reshuffle the survivors.
+    for (entity, avatar) in &couriers {
+        if avatar.index >= wanted {
+            commands.entity(entity).despawn();
+        }
     }
 }
 
 /// Everything `sync_couriers` touches on one squirrel.
 type CourierView<'a> = (
-    Entity,
     &'a CourierAvatar,
     Mut<'a, CourierPlaying>,
     Mut<'a, Transform>,
     Mut<'a, Sprite>,
 );
 
-/// Draw one squirrel monkey per Unpacker, each running between a harvester that
-/// has just arrived to unload and the bins it is unloading into.
+/// Run each squirrel monkey between a harvester that has just arrived to unload
+/// and the bins it is unloading into.
 ///
 /// The Unpacker is the one support role whose job is a *journey* - it shortens
 /// `Segment::Unload`, which is the leg a harvester spends standing at the bins -
@@ -794,96 +904,91 @@ type CourierView<'a> = (
 /// `Update`, after `worker::position_workers` has written them, and why nothing
 /// it computes may reach `FixedUpdate`: a courier is decoration over an unload
 /// the economy has already decided the length of.
+///
+/// An Unpacker with no meal waits instead of working, which is the same thing
+/// `sync_support_avatars` says with a greying disc for the other two roles. It
+/// is not decoration: an unfed Unpacker really is out of `M_unpack`
+/// (`recompute_multipliers`), so the player's unload rate drops, and a drop with
+/// nothing on the board to explain it is the one thing the hunger signal exists
+/// to prevent.
 #[allow(clippy::type_complexity)]
 pub(crate) fn sync_couriers(
-    mut commands: Commands,
     art: Res<Art>,
     time: Res<Time>,
     layout: Res<SceneLayout>,
-    staff: Res<Staff>,
+    units: Query<(&SupportRole, &SupportCycle), With<SupportUnit>>,
     harvesters: Query<(&HarvestCycle, &Lane, &Playing), With<Worker>>,
     mut couriers: Query<CourierView>,
 ) {
-    let wanted = (staff.count(SupportRole::Unpacker) as usize).min(COURIER_LIMIT);
-    let drawn = couriers.iter().count();
-    for index in drawn..wanted {
-        spawn_courier(&mut commands, &art, &layout, index);
-    }
-    // Handed back by index, so the squirrels that stay keep the harvesters they
-    // were helping - a sacking should not reshuffle the survivors.
-    for (entity, avatar, ..) in &couriers {
-        if avatar.index >= wanted {
-            commands.entity(entity).despawn();
-        }
+    if couriers.is_empty() {
+        return;
     }
 
-    // The monkeys standing at the bins with a load to give away, in hire order:
-    // a stable list, so a courier helping one of them two frames running is
-    // helping the same one rather than whichever the query happened to yield.
-    let mut unloading: Vec<(u32, Vec2)> = harvesters
+    // The monkeys standing at the bins with a load to give away, by hire index:
+    // the one stable name a harvester has, so a courier can hold on to one.
+    let unloading: Vec<(u32, Vec2)> = harvesters
         .iter()
         .filter(|(cycle, ..)| cycle.segment() == Segment::Unload)
         .filter_map(|(_, lane, playing)| playing.standing().map(|at| (lane.index(), at)))
         .collect();
-    unloading.sort_by_key(|(index, _)| *index);
+
+    let hungry = units
+        .iter()
+        .filter(|(role, cycle)| **role == SupportRole::Unpacker && cycle.is_hungry())
+        .count();
 
     let scale = layout.world_scale();
-    for (_, avatar, mut playing, mut transform, mut sprite) in &mut couriers {
-        if avatar.index >= wanted {
-            continue;
+    // Who is already being helped, so a courier picking a *new* monkey takes one
+    // nobody is on before it doubles up.
+    let mut taken: Vec<u32> = Vec::new();
+    for (avatar, mut playing, mut transform, mut sprite) in &mut couriers {
+        let waiting = waiting_place(&layout, avatar.index);
+        // Which courier goes hungry is arbitrary and stable enough frame to
+        // frame, exactly as it is for a fan of chefs: the *count* drives it.
+        let fed = avatar.index >= hungry;
+        let served = fed
+            .then(|| pick_harvester(&playing, avatar.index, &unloading, &taken))
+            .flatten();
+        playing.serving = served.map(|(lane, _)| lane);
+        if let Some((lane, _)) = served {
+            taken.push(lane);
         }
-        // Its own place at the bins, so several couriers do not all drop into
-        // the same corner of the same box - spread across the *front* of them,
-        // for the reason the harvesters' ring leaves its back arc open: a
-        // sprite grows upward from its feet, so a courier behind the boxes is a
-        // squirrel standing in one.
-        let across = std::f32::consts::FRAC_PI_2
-            * (avatar.index as f32 / (COURIER_LIMIT as f32 - 1.0) - 0.5);
-        let bins = layout.town_centre() + Vec2::from_angle(DROP_FRONT + across) * DROP_RADIUS;
 
-        let point = match unloading.get(avatar.index % unloading.len().max(1)) {
+        let point = match served {
             Some((_, monkey)) => {
-                // Phased off the index, so six squirrels are not one squirrel
-                // drawn six times.
-                let phase = time.elapsed_secs() / SHUTTLE_SECONDS + avatar.index as f32 * 0.618_034;
-                let (along, carrying) = shuttle(phase);
-                playing.clip = if carrying {
-                    Courier::Carry
-                } else {
-                    Courier::Dart
+                playing.run += time.delta_secs();
+                let (along, carrying, moving) =
+                    shuttle(playing.run / SHUTTLE_SECONDS + avatar.index as f32 * 0.618_034);
+                // Standing still at either end is the take and the drop, and a
+                // distance-driven travel loop has nothing to advance on there -
+                // so it would hold one mid-stride frame for a quarter second.
+                // The artist's idle loop is what those beats are drawn for.
+                playing.clip = match (moving, carrying) {
+                    (false, _) => Courier::Idle,
+                    (true, true) => Courier::Carry,
+                    (true, false) => Courier::Dart,
                 };
-                bins.lerp(*monkey, SHUTTLE_NEAR + along * (SHUTTLE_FAR - SHUTTLE_NEAR))
+                waiting.lerp(monkey, SHUTTLE_NEAR + along * (SHUTTLE_FAR - SHUTTLE_NEAR))
             }
-            // Nobody to help: it waits at the bins, on its own drop bearing,
-            // rather than walking off to a station. A courier belongs at the
-            // boxes - which is inside the ring the harvesters stand on, where
-            // D30 forbids a support *station*, and rightly: two chefs stood
-            // there once and read as monkeys delivering. A squirrel monkey
-            // among spider monkeys cannot be mistaken for one of the queue.
+            // Nobody to help, or nothing to eat: it waits at the bins rather
+            // than walking off to a station. A courier belongs at the boxes -
+            // which is inside the ring the harvesters stand on, where D30
+            // forbids a support *station*, and rightly: two chefs stood there
+            // once and read as monkeys delivering. A squirrel monkey among
+            // spider monkeys cannot be mistaken for one of the queue.
             None => {
-                playing.clip = Courier::Idle;
-                bins
+                playing.run = 0.0;
+                playing.wait();
+                waiting
             }
         };
 
         // The bearing comes from the ground actually covered, projected: the
         // sheets are drawn in screen compass directions, so a ground heading
         // read straight off would face a courier up a diagonal it is not on.
-        let travelled = playing.last.map(|last| isometric::project(point - last));
-        if let Some(step) = travelled {
-            playing.heading = Courier::heading(step, playing.heading);
-            if playing.clip == Courier::Idle {
-                playing.elapsed += time.delta_secs();
-                while playing.elapsed >= Courier::idle_hold() {
-                    playing.elapsed -= Courier::idle_hold();
-                    playing.frame = (playing.frame + 1) % Courier::Idle.frames();
-                }
-            } else {
-                playing.stride =
-                    (playing.stride + step.length() / art::COURIER_STRIDE_TEXELS).fract();
-                playing.frame =
-                    (playing.stride * playing.clip.frames() as f32) as u32 % playing.clip.frames();
-            }
+        if let Some(last) = playing.last {
+            let step = isometric::project(point - last);
+            playing.advance(step, time.delta_secs());
         }
         playing.last = Some(point);
 
@@ -914,24 +1019,62 @@ pub(crate) fn sync_couriers(
     }
 }
 
+/// Which harvester a courier serves this frame, and where it is standing.
+///
+/// It keeps the one it already had for as long as that monkey is still
+/// unloading, which is what stops a squirrel crossing the depot every time the
+/// queue's length changes. Only when its monkey has finished does it take
+/// another - preferring one nobody else is on, and otherwise sharing, because
+/// three squirrels helping one monkey reads perfectly well and an idle one
+/// beside a queue does not.
+fn pick_harvester(
+    playing: &CourierPlaying,
+    index: usize,
+    unloading: &[(u32, Vec2)],
+    taken: &[u32],
+) -> Option<(u32, Vec2)> {
+    if let Some(lane) = playing.serving
+        && let Some(held) = unloading.iter().find(|(at, _)| *at == lane)
+    {
+        return Some(*held);
+    }
+    if unloading.is_empty() {
+        return None;
+    }
+    unloading
+        .iter()
+        .find(|(lane, _)| !taken.contains(lane))
+        .copied()
+        .or_else(|| unloading.get(index % unloading.len()).copied())
+}
+
 fn spawn_courier(commands: &mut Commands, art: &Art, layout: &SceneLayout, index: usize) {
     let scale = layout.world_scale();
+    // Placed where it will wait, not at the origin. A `Transform` left at zero
+    // draws one frame in the middle of the screen before the pose system reaches
+    // it, and six couriers can be hired in one go.
+    let at = waiting_place(layout, index);
     commands
         .spawn((
             CourierAvatar { index },
             CourierPlaying {
                 clip: Courier::Idle,
-                // Facing the viewer, which is south on the sheets: a squirrel
-                // that opens facing away is a grey back on green grass.
-                heading: 4,
+                heading: COURIER_FACING_VIEWER,
                 frame: index as u32 % Courier::Idle.frames(),
                 elapsed: 0.0,
                 stride: (index as f32 * 0.618_034).fract(),
                 last: None,
+                serving: None,
+                run: 0.0,
             },
-            art.courier(Courier::Idle, 4, index as u32),
+            art.courier(Courier::Idle, COURIER_FACING_VIEWER, index as u32),
             art::SQUIRREL.anchor(),
-            Transform::from_scale(Vec3::new(scale, scale, 1.0)),
+            Transform::from_translation(
+                layout
+                    .board_snapped(at, 0.0)
+                    .extend(isometric::stand_z(at, 0.0)),
+            )
+            .with_scale(Vec3::new(scale, scale, 1.0)),
         ))
         .with_child((
             Shadow,
@@ -988,10 +1131,11 @@ mod tests {
         // courier that wanders is a squirrel monkey, not an unpacker.
         let (mut reached_monkey, mut reached_bins) = (false, false);
         let (mut carried_out, mut carried_back) = (false, false);
+        let (mut paused_loaded, mut paused_empty) = (false, false);
         let mut previous = shuttle(0.0).0;
         for step in 0..=2000 {
             let phase = step as f32 / 2000.0;
-            let (along, carrying) = shuttle(phase);
+            let (along, carrying, moving) = shuttle(phase);
             assert!(
                 (0.0..=1.0).contains(&along),
                 "a courier at phase {phase} is {along} of the way along its run"
@@ -1001,6 +1145,16 @@ mod tests {
             previous = along;
             reached_monkey |= along > 0.999;
             reached_bins |= along < 0.001;
+            // The two beats the travelling loops have no distance to play on:
+            // taking the banana at the monkey, dropping it at the bins. Both
+            // must exist, or a courier holds a mid-stride frame instead.
+            if !moving {
+                if carrying {
+                    paused_empty = true;
+                } else {
+                    paused_loaded = true;
+                }
+            }
             // Loaded on the way in, empty on the way out - the two sheets the
             // artist drew for exactly this.
             if along > 0.02 && along < 0.98 {
@@ -1014,6 +1168,10 @@ mod tests {
         assert!(reached_monkey, "a courier never reaches the monkey");
         assert!(reached_bins, "a courier never reaches the bins");
         assert!(carried_out && carried_back, "a courier runs one way only");
+        assert!(
+            paused_loaded && paused_empty,
+            "a courier never stops to take or to drop"
+        );
         // And it is a loop: the last frame of a run hands over to the first.
         assert!((shuttle(0.9999).0 - shuttle(0.0).0).abs() < 0.01);
     }
@@ -1235,19 +1393,24 @@ mod courier_app_tests {
     use bevy::{asset::AssetPlugin, image::TextureAtlasLayout};
 
     use crate::{
-        domain::{CycleSpec, Research},
+        domain::{CycleSpec, Multipliers, Research, cycle_time},
         isometric::{Bins, WorldRoot},
         map,
-        worker::Lane,
+        worker::{self, Lane},
     };
 
-    /// The courier systems on their own, with a real asset server behind them.
+    /// The courier systems on their own, with a real asset server behind them
+    /// and the harvester systems they read in front of them.
     ///
     /// Bevy resolves query conflicts when a schedule is *built*, not when it is
     /// compiled, so a system whose parameters overlap panics the first time the
-    /// game is opened and never in `cargo test`. These two read the harvesters
-    /// while writing the squirrels, which is exactly the shape that conflicts,
-    /// so they are built and run here.
+    /// game is opened and never in `cargo test`. These read the harvesters while
+    /// writing the squirrels, which is exactly the shape that conflicts.
+    ///
+    /// `position_workers` is in the chain rather than stubbed, because it is the
+    /// system that writes the drawn position `sync_couriers` reads: with it here
+    /// the fixture covers the ordering the plugin's chain promises as well as
+    /// the conflict.
     fn couriers() -> App {
         let mut app = App::new();
         app.add_plugins((
@@ -1264,12 +1427,17 @@ mod courier_app_tests {
         });
         app.insert_resource(art)
             .insert_resource(map::Village::start())
+            .insert_resource(map::WorkedRoute::start())
             .init_resource::<SceneLayout>()
             .init_resource::<Staff>()
+            .init_resource::<Multipliers>()
             .init_resource::<Research>()
             .add_systems(
                 Update,
                 (
+                    worker::dress_actors,
+                    worker::position_workers,
+                    spawn_missing_couriers,
                     sync_couriers,
                     pin_courier_shadows,
                     crate::isometric::sync_cart_bins,
@@ -1281,74 +1449,187 @@ mod courier_app_tests {
         app
     }
 
-    fn couriers_drawn(app: &mut App) -> Vec<Vec2> {
+    fn hire(app: &mut App, role: SupportRole, count: u32) {
+        for index in 0..count {
+            app.world_mut().resource_mut::<Staff>().hire(role);
+            let phase = index as f64 * SUPPORT_MEAL_PERIOD * SUPPORT_PHASE_STRIDE;
+            app.world_mut()
+                .spawn((SupportUnit, role, SupportCycle::starting(phase)));
+        }
+    }
+
+    /// A harvester standing at the bins with a load to give away, at `lane`.
+    fn spawn_unloading(app: &mut App, lane: u32) {
+        let multipliers = Multipliers::default();
+        let cycle = (0..4000)
+            .map(|step| {
+                HarvestCycle::from_phase(
+                    cycle_time(CycleSpec::WORKER, multipliers) * f64::from(step) / 4000.0,
+                    CycleSpec::WORKER,
+                    multipliers,
+                )
+            })
+            .find(|cycle| cycle.segment() == Segment::Unload)
+            .expect("a worker cycle passes through Unload");
+        app.world_mut()
+            .spawn((Worker, cycle, CycleSpec::WORKER, Lane::hire(lane)))
+            .with_child((
+                worker::CarriedBanana,
+                Transform::default(),
+                Visibility::Hidden,
+            ));
+    }
+
+    /// Every courier's drawn ground position.
+    fn couriers_on_the_ground(app: &mut App) -> Vec<Vec2> {
+        let layout = *app.world().resource::<SceneLayout>();
         app.world_mut()
             .query::<(&CourierAvatar, &Transform)>()
             .iter(app.world())
-            .map(|(_, at)| at.translation.truncate())
+            .map(|(_, at)| layout.ground(at.translation.truncate()))
             .collect()
+    }
+
+    /// Where the harvester at `lane` is drawn, in metres.
+    fn harvester_at(app: &mut App, lane: u32) -> Vec2 {
+        app.world_mut()
+            .query::<(&Lane, &Playing)>()
+            .iter(app.world())
+            .find(|(at, _)| at.index() == lane)
+            .and_then(|(_, playing)| playing.standing())
+            .expect("the harvester has been drawn")
     }
 
     #[test]
     fn a_courier_appears_for_each_unpacker_and_runs_the_lane_to_the_bins() {
         let mut app = couriers();
         app.update();
-        assert!(couriers_drawn(&mut app).is_empty(), "nobody is hired yet");
+        assert!(
+            couriers_on_the_ground(&mut app).is_empty(),
+            "nobody is hired yet"
+        );
 
-        app.world_mut()
-            .resource_mut::<Staff>()
-            .hire(SupportRole::Unpacker);
-        app.world_mut()
-            .resource_mut::<Staff>()
-            .hire(SupportRole::Unpacker);
+        hire(&mut app, SupportRole::Unpacker, 2);
         app.update();
         assert_eq!(
-            couriers_drawn(&mut app).len(),
+            couriers_on_the_ground(&mut app).len(),
             2,
             "one squirrel per unpacker"
         );
 
-        // A harvester standing at the bins with a load to give away, drawn at a
-        // known spot: the couriers must end up between it and the delivery
-        // point, never out at their idle station.
-        let layout = *app.world().resource::<SceneLayout>();
-        let bins = layout.town_centre();
-        let monkey = bins + Vec2::new(4.0, 1.0);
-        let playing = Playing::at(Clip::Idle, 0, monkey);
-        let cycle = (0..2000)
-            .map(|step| {
-                HarvestCycle::from_phase(
-                    step as f64 * 0.025,
-                    CycleSpec::WORKER,
-                    crate::domain::Multipliers::default(),
-                )
-            })
-            .find(|cycle| cycle.segment() == Segment::Unload)
-            .expect("a worker cycle passes through Unload");
-        app.world_mut()
-            .spawn((Worker, cycle, CycleSpec::WORKER, Lane::hire(0), playing));
+        // A harvester standing at the bins with a load to give away. The
+        // couriers must end up between it and the delivery point, never out at
+        // a station of their own.
+        spawn_unloading(&mut app, 0);
+        app.update();
+        let bins = app.world().resource::<SceneLayout>().town_centre();
+        let monkey = harvester_at(&mut app, 0);
 
-        // Several frames, so the shuttle is sampled at more than one phase.
         let mut seen: Vec<Vec2> = Vec::new();
-        for _ in 0..30 {
+        for _ in 0..40 {
             app.update();
-            for screen in couriers_drawn(&mut app) {
-                seen.push(app.world().resource::<SceneLayout>().ground(screen));
-            }
+            seen.extend(couriers_on_the_ground(&mut app));
         }
         assert!(!seen.is_empty());
+        let lane = monkey - bins;
         for at in seen {
-            // On the line between the two, within the width of the bins: the
-            // drop bearing spreads couriers round the boxes, and that is the
-            // only slack there is.
-            let lane = monkey - bins;
             let along = ((at - bins).dot(lane) / lane.length_squared()).clamp(0.0, 1.0);
             let off = at.distance(bins + lane * along);
             assert!(
-                off < 2.5,
+                off < DROP_RADIUS + 1.0,
                 "a courier stands {off} m off the lane between the monkey and the bins"
             );
         }
+    }
+
+    #[test]
+    fn a_courier_keeps_its_monkey_while_the_queue_changes_around_it() {
+        // The defect a sorted list does not fix. Picking a target by *position*
+        // in the set of whoever is unloading re-maps every courier the moment
+        // that set changes size - about once a second at the shipped cadence -
+        // and a squirrel then crosses the depot between two frames.
+        let mut app = couriers();
+        hire(&mut app, SupportRole::Unpacker, 1);
+        spawn_unloading(&mut app, 0);
+        spawn_unloading(&mut app, 7);
+        for _ in 0..4 {
+            app.update();
+        }
+        let held = app
+            .world_mut()
+            .query::<&CourierPlaying>()
+            .iter(app.world())
+            .next()
+            .and_then(|playing| playing.serving)
+            .expect("the courier took a monkey");
+
+        // Take away the *other* monkey. The courier's own is untouched, so it
+        // must not move to the one that is left.
+        let other = if held == 0 { 7 } else { 0 };
+        let stray = app
+            .world_mut()
+            .query::<(Entity, &Lane)>()
+            .iter(app.world())
+            .find(|(_, lane)| lane.index() == other)
+            .map(|(entity, _)| entity)
+            .expect("both harvesters are there");
+        app.world_mut().entity_mut(stray).despawn();
+
+        let before = couriers_on_the_ground(&mut app)[0];
+        app.update();
+        let after = couriers_on_the_ground(&mut app)[0];
+        assert_eq!(
+            app.world_mut()
+                .query::<&CourierPlaying>()
+                .iter(app.world())
+                .next()
+                .and_then(|playing| playing.serving),
+            Some(held),
+            "the courier swapped monkeys when the queue changed length"
+        );
+        assert!(
+            before.distance(after) < 0.5,
+            "the courier jumped {} m when the queue changed length",
+            before.distance(after)
+        );
+    }
+
+    #[test]
+    fn an_unfed_unpacker_stops_working_where_the_player_can_see_it() {
+        // The signal `sync_support_avatars` gives the other two roles with a
+        // greying disc. An unfed Unpacker is really out of `M_unpack`, so the
+        // unload rate drops; without this the drop has nothing on the board to
+        // explain it.
+        let mut app = couriers();
+        hire(&mut app, SupportRole::Unpacker, 2);
+        spawn_unloading(&mut app, 0);
+        for _ in 0..3 {
+            app.update();
+        }
+        let working = |app: &mut App| {
+            app.world_mut()
+                .query::<&CourierPlaying>()
+                .iter(app.world())
+                .filter(|playing| playing.serving.is_some())
+                .count()
+        };
+        assert_eq!(working(&mut app), 2, "both couriers are fed and working");
+
+        // Starve one of them, the way the simulation does: a shift falls due
+        // against an empty larder, so the monkey goes unpaid and idle.
+        let unit = app
+            .world_mut()
+            .query_filtered::<Entity, With<SupportUnit>>()
+            .iter(app.world())
+            .next()
+            .expect("an unpacker exists");
+        let mut starved = SupportCycle::starting(0.0);
+        let mut larder = 0.0;
+        starved.advance(SUPPORT_MEAL_PERIOD, 1.0, &mut larder);
+        assert!(starved.is_hungry());
+        app.world_mut().entity_mut(unit).insert(starved);
+        app.update();
+        assert_eq!(working(&mut app), 1, "a hungry unpacker kept working");
     }
 
     #[test]

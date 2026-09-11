@@ -244,6 +244,7 @@ impl Plugin for PresentationPlugin {
                         // courier runs between a monkey's *drawn* position and
                         // the bins, and reading last frame's leaves it a frame
                         // behind the queue it is serving.
+                        support::spawn_missing_couriers,
                         support::sync_couriers,
                         support::pin_courier_shadows,
                     )
@@ -316,6 +317,10 @@ struct HarvestLabel;
 #[derive(Component)]
 struct DepositLabel;
 
+/// The sign over the carts' bins. Hidden until they go up.
+#[derive(Component)]
+pub(crate) struct CartYardLabel;
+
 /// The banana the *player* drags. Several systems reach for it through
 /// `Single`, which silently skips the whole system when the query does not
 /// match exactly one entity, so nothing else may ever carry this marker.
@@ -349,6 +354,7 @@ enum LayoutElement {
     BananaShadow,
     HarvestLabel,
     DepositLabel,
+    CartYardLabel,
 }
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -667,26 +673,52 @@ const DRAG_VIEW_MARGIN: f32 = 22.0;
 
 /// Where the carts' bins stand, in metres from the delivery point. See
 /// [`SceneLayout::cart_bins`].
-const CART_BINS_OFFSET: Vec2 = Vec2::new(8.5, 1.0);
+const CART_BINS_OFFSET: Vec2 = Vec2::new(-4.0, 12.0);
 /// How far in front of those bins a cart parks, in metres.
 ///
-/// Far enough in front that the *boxes still show over the rank*. A cart is 37
-/// texels of box with a rider's head and tail above it, and the bins stand 38
-/// texels tall: park the rank a body's length away and four carts simply erase
-/// the thing they are unloading into. Measured up the screen, this standoff is
-/// 37 texels of lift, which clears them.
+/// Far enough in front that the *boxes still show over the rank*. A cart's box
+/// is 18.75 texels tall and its riders sit above that, so a rank parked a
+/// body's length away simply erases the thing it is unloading into; the bins
+/// reach 19 texels above their own ground line. Measured up the screen this
+/// standoff is 31 texels of lift, and
+/// `the_cart_rank_never_hides_the_bins_it_unloads_into` is what holds the
+/// margin that leaves.
 const CART_PARK_STANDOFF: f32 = 5.5;
 /// And how far apart two bays are, in metres along the ground's x axis.
 ///
-/// Along a ground axis rather than across the screen, which is the whole point:
+/// Along a ground axis rather than across the screen, which is half the point:
 /// a rank laid out across the screen puts every cart on one line of screen y,
-/// and four brown boxes wider than the gap between them then read as one long
-/// brown bar. A ground axis steps each bay both sideways *and* a little nearer
-/// the viewer, so they overlap the way a rank of parked vehicles seen from
-/// above overlaps - and the depth rule sorts them front to back for free.
-const CART_BAY_STEP: f32 = 2.2;
-/// How many bays before they repeat.
-pub(crate) const CART_BAYS: u32 = 4;
+/// and brown boxes wider than the gap between them read as one long brown bar.
+/// A ground axis steps each bay both sideways *and* nearer the viewer, so they
+/// overlap the way a rank of parked vehicles seen from above overlaps, and the
+/// depth rule sorts them front to back for free.
+///
+/// The other half is the size of the step, which was 2.2 m: 17.6 texels across
+/// the screen against a cart 65 texels wide, so four bays spanned less screen
+/// than *one* cart and each rear box showed a 27% sliver. Four metres is a
+/// whole cart's width of separation, which is what lets the yellow load band -
+/// the only readout of how full a hundred-banana box is - be visible on more
+/// than the front cart.
+const CART_BAY_STEP: f32 = 4.0;
+/// How many bays there are across the front of the yard, and how many rows
+/// deep it goes.
+///
+/// Six all told, rather than four, because four is below the fleet the game's
+/// own economy settles at: the whitepaper's reference run owns six carts by
+/// twenty-four minutes, so a four-bay yard is permanently double-parked past
+/// ten minutes - and because a later bay is drawn nearer the viewer, each new
+/// cart would hide an older one, so buying a cart made the yard look emptier.
+///
+/// Three across and two deep rather than six across, because six bays a cart's
+/// width apart is twenty metres of rank: the outer bays swing past the bins
+/// they are meant to be parked at, and on a landscape phone they leave the
+/// board entirely. A second row costs depth, which the isometric view has to
+/// spare, and reads as a yard filling up rather than a queue sprawling.
+const CART_BAY_COLUMNS: u32 = 3;
+const CART_BAY_ROWS: u32 = 2;
+pub(crate) const CART_BAYS: u32 = CART_BAY_COLUMNS * CART_BAY_ROWS;
+/// How far behind the front row the second one stands, in metres.
+const CART_ROW_STEP: f32 = 3.5;
 
 /// How far past the ground they work the player may pan, in metres.
 ///
@@ -1074,14 +1106,20 @@ impl SceneLayout {
     /// Giving the freight its own bins makes the depot two places doing two
     /// jobs, and it is the visible reward for the research that unlocked them.
     ///
-    /// Down and to the right of the delivery point, which is the one quarter of
-    /// the village with nothing in it: the treehouse rises up and to the left,
-    /// the walk to the grove leaves up and to the left of that, and the three
-    /// support stations hold the left, the front-left and the front-right. Far
-    /// enough out that the whole park stands clear of the unloading ring, near
-    /// enough that it is on the same board as the depot it serves;
-    /// `the_cart_park_stands_clear_of_the_village` and
-    /// `the_cart_bins_open_on_screen` hold both.
+    /// Out in front of the village, past the kitchen, on the near side of the
+    /// walk home - and that side is the whole reason it is there rather than in
+    /// the empty quarter to the right of the depot, which is where it went
+    /// first. The road comes in from the up-left. With the yard on the right the
+    /// delivery point sits *between* the road and the bay, so a cart driving to
+    /// its bay crosses the ground the harvesters unload on; on the near side it
+    /// never does. See `worker::drive_into_bay`, and
+    /// `a_cart_drives_round_the_unloading_crowd_rather_than_through_it`, which
+    /// is what holds it.
+    ///
+    /// Far enough out that the whole yard stands clear of the unloading ring and
+    /// of every support monkey - `the_cart_park_stands_clear_of_the_village` -
+    /// and near enough that it is a short pan from where the board opens, which
+    /// is `the_carts_corner_is_a_short_pan_from_the_opening_view`.
     pub(crate) fn cart_bins(self) -> Vec2 {
         self.town_centre + CART_BINS_OFFSET
     }
@@ -1106,8 +1144,14 @@ impl SceneLayout {
             std::f32::consts::FRAC_1_SQRT_2,
             std::f32::consts::FRAC_1_SQRT_2,
         );
-        let bay = (index % CART_BAYS) as f32 - (CART_BAYS as f32 - 1.0) * 0.5;
-        self.cart_bins() + FRONT * CART_PARK_STANDOFF + Vec2::X * bay * CART_BAY_STEP
+        let bay = index % CART_BAYS;
+        // The near row fills first, so the first cart bought is the one in
+        // front: a yard fills towards the viewer rather than away from them.
+        let row = (CART_BAY_ROWS - 1 - bay / CART_BAY_COLUMNS) as f32;
+        let column = (bay % CART_BAY_COLUMNS) as f32 - (CART_BAY_COLUMNS as f32 - 1.0) * 0.5;
+        self.cart_bins()
+            + FRONT * (CART_PARK_STANDOFF + row * CART_ROW_STEP)
+            + Vec2::X * column * CART_BAY_STEP
     }
 
     /// Where each support role stands, in metres, relative to the town centre.
@@ -1580,6 +1624,21 @@ fn setup(
         "DEPOT",
         (DepositLabel, LayoutElement::DepositLabel),
     );
+    // And the freight's own yard, which the Cart's research puts up (D31). The
+    // board already names the two places a banana can be, and an unlabelled
+    // second set of blue bins appearing on the grass is a duplicate rather than
+    // a reward: this is what says the new one is the carts'. Spawned with the
+    // rest and hidden until the bins are there, like every other reconciled
+    // piece of the scene.
+    spawn_place_label(
+        &mut commands,
+        "CART YARD",
+        (
+            CartYardLabel,
+            LayoutElement::CartYardLabel,
+            Visibility::Hidden,
+        ),
+    );
 
     // The stage view is the board and its actors with nothing in front of
     // them: a playtest of "one monkey walks to the grove" does not need the
@@ -1595,6 +1654,14 @@ fn setup(
 /// how high: towards the viewer's right of the bins, at their lip.
 const DEPOT_SIGN_OFFSET: Vec2 = Vec2::new(1.2, -1.2);
 const DEPOT_SIGN_RAISE: f32 = 2.4;
+
+/// And where the CART YARD sign stands over the carts' own bins. Its own pair
+/// because that set is drawn at the shared scale rather than the treehouse's
+/// (see `art::CART_BINS`), so it is twice as tall and twice as wide as the
+/// depot's: the same sign placed by the same numbers would sit on the boxes
+/// rather than over them.
+const CART_SIGN_OFFSET: Vec2 = Vec2::new(2.4, -2.4);
+const CART_SIGN_RAISE: f32 = 5.0;
 
 /// Where delivery floaters rise from, relative to the delivery point, in
 /// metres: beside the bins, to the right, rather than through the sign.
@@ -1721,6 +1788,15 @@ fn apply_layout(
             LayoutElement::HarvestLabel => {
                 transform.translation = layout
                     .board_raised(layout.grove(), 6.0)
+                    .extend(PLACE_LABEL_Z);
+                transform.scale = Vec3::splat(layout.world_scale().clamp(0.8, 1.35));
+            }
+            LayoutElement::CartYardLabel => {
+                // Over its own bins, at the same height above them the DEPOT
+                // sign sits above the delivery point's, so the two read as the
+                // same kind of sign rather than as two different things.
+                transform.translation = layout
+                    .board_raised(layout.cart_bins() + CART_SIGN_OFFSET, CART_SIGN_RAISE)
                     .extend(PLACE_LABEL_Z);
                 transform.scale = Vec3::splat(layout.world_scale().clamp(0.8, 1.35));
             }
@@ -4000,16 +4076,17 @@ mod tests {
         // other thing standing in the village.
         assert!(bins.distance(layout.home_tree()) > 6.0);
 
-        // Clear of the support monkeys on screen, measured in the texels a
+        // Clear of every support monkey on screen, measured in the texels a
         // sprite's width is measured in: the bins are a wide object, so what has
-        // to fit is half of them plus half a monkey.
-        //
-        // The Unpacker is not one of them. Nothing of its stands at its station
-        // since D31 - its couriers are either running the lane or waiting at the
-        // bins - so what is left there is a badge, which is drawn over the board
-        // rather than in it.
-        let clearance = (art::BINS_HALF_WIDTH + support::BODY_HALF_ART_PIXELS) * art::ART_SCALE;
-        for role in [SupportRole::Chef, SupportRole::Technologist] {
+        // to fit is half of them plus half a monkey. The bins' half-width
+        // arrives already in texels - it is drawn at a quarter of a texel per
+        // art pixel, not a half, and the first cut of this test converted it
+        // with `ART_SCALE` and so demanded 49 texels where 30 was the honest
+        // figure. That doubled bar was the only thing the Unpacker failed, and
+        // excluding it was the wrong repair.
+        let clearance =
+            art::CART_BINS_HALF_WIDTH_TEXELS + support::BODY_HALF_ART_PIXELS * art::ART_SCALE;
+        for role in SupportRole::ALL {
             for slot in 0..support::AVATARS_PER_ROLE {
                 let at = layout.support_point(role, support::slot_offset(slot));
                 let gap = isometric::project(at - bins).length();
@@ -4019,6 +4096,32 @@ mod tests {
                      inside the {clearance} they need"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_cart_rank_never_hides_the_bins_it_unloads_into() {
+        // The reason `CART_PARK_STANDOFF` has the value it has, asserted rather
+        // than asserted-in-a-comment. A cart is a box with a rider's head and
+        // tail above it; park the rank a body's length in front of the boxes and
+        // six of them erase the thing the yard is *for*, which is also the only
+        // thing that says this corner is a place and not a car park.
+        let layout = SceneLayout::for_viewport(Vec2::new(1280.0, 720.0));
+        let bins = layout.board(layout.cart_bins());
+        // The top of the bins' art, above their own ground line.
+        let crown = art::CART_BINS.height_above(479.0) * layout.world_scale();
+        for index in 0..CART_BAYS {
+            let park = layout.board(layout.cart_park(index));
+            // The tallest drawn pixel of a parked cart: the box's lid, plus the
+            // rider sitting in it, measured through the art the way every other
+            // prop on a monkey is.
+            let rider = worker::cart_crown() * layout.world_scale();
+            assert!(
+                park.y + rider < bins.y + crown,
+                "bay {index} reaches {} px up the board against the bins' {}",
+                park.y + rider,
+                bins.y + crown
+            );
         }
     }
 
@@ -4033,13 +4136,13 @@ mod tests {
         // front of the depot by construction, since a rank of carts has to
         // stand between the viewer and the boxes it is unloading into.
         //
-        // So the bar is half a screenful: the same short pan D30 already spends
-        // on the home tree on a landscape phone.
-        for viewport in [
-            Vec2::new(390.0, 844.0),
-            Vec2::new(844.0, 390.0),
-            Vec2::new(1280.0, 720.0),
-        ] {
+        // So the bar is half a screenful, held on the two boards D30 holds the
+        // support crew on. The 844 x 390 landscape phone is the exception there
+        // too: its board is 286 pixels, the treehouse is 284 of them, and the
+        // home tree already opens eleven pixels inside its edge - a yard in
+        // front of the depot is simply past it, and the owner's call in D30 was
+        // the landmark centred over the village framed on that board.
+        for viewport in [Vec2::new(390.0, 844.0), Vec2::new(1280.0, 720.0)] {
             let layout = SceneLayout::for_viewport(viewport);
             let pan = layout.safe_area().size().min_element() * 0.5;
             let reach = layout.safe_area().inflate(pan);

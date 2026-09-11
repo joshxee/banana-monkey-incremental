@@ -1147,74 +1147,126 @@ now composites three sprites — bins over structure over shade — and still ha
 be the master, pixel for pixel; `the_bins_are_a_sprite_of_their_own` holds that
 nothing of the house came across, by colour.
 
+*Every actor picks its spot before it sets out.* A harvester's standing place was
+always a function of its hire index alone (`Lane::spot`); what changed is when it
+is used. The walk closes on that spot over its last `APPROACH_METRES`, and peels
+off the spot behind it over the first. `Pick`, `Unload` and `Snack` are then
+spent standing perfectly still, where they used to open with a sidestep. Nothing
+reserves a spot: two monkeys can pick the same one, which is the owner's call —
+a claim would need releasing when a monkey boards a cart or the run restarts,
+for a crowd the player reads as a crowd either way.
+
+**The spot is added as an offset that fades in, not lerped to as a position**,
+and that distinction is the whole of whether this works. Lerping between the
+walking point and a fixed spot mixes two things moving at different speeds: the
+route point keeps advancing while the weight is still short of one, so a monkey
+*overshoots its spot and is pulled back onto it*. Measured on the shipped route,
+the first cut of this decision dragged a third of the crowd backwards, as much
+as 2.5 m, in the along axis — a slide, at exactly the moment the change was
+supposed to remove one. Added as an offset, with the swarm's own scatter and
+spread tapering out over the same ramp, there is nothing to overshoot: the route
+advances, the offsets close, the spot opens, and every term is monotone.
+`a_monkey_never_walks_backwards_on_its_way_in_or_out` holds that there is no
+reverse at all, on any lane, on either leg.
+
+Sixteen metres, not ten, and measured rather than chosen: ten left the backwards
+drag above, because the scatter throws a monkey up to seven metres past the end
+of the walk while a spot reaches only 4.8 m from it. At sixteen the worst lane
+also spends 0.44 m across the route per metre along it over its approach, under
+the half a metre `the_approach_is_walked_rather_than_sidestepped` holds — and
+that test now integrates over *the approach* rather than over half the leg,
+which is what let the first version read 0.22 against a 0.5 bar while a fifth of
+the crowd was over it. The per-frame continuity bar moved with them: it is now
+two nominal walking steps rather than 0.30 m, because metres per frame scale
+with `M_speed` and the old figure was calibrated against the very sidestep this
+removed.
+
 *The carts get bins of their own, when the research lands.* A cart is a hundred
 bananas a trip against a harvester's five, and it used to give them up from a
 dwell point *on the walk*: a box the length of three monkeys parked across the
-arriving queue for the hundred seconds an unload takes. A second set of bins goes
-up the moment the Technologist's first level lands and the Cart row unlocks
-(`CART_TECH_REQUIREMENT`), on the open grass in front of the depot and to its
-right — the one quarter of the village with nothing in it, the house and the walk
-holding the upper left and the kitchen and the research desk the left. Carts now
-leave the route over the last stretch of the way home and draw up in a rank
-across the front of those bins. The unlock therefore has something to *show* for
-itself, which D22's counter never did.
+arriving queue for the hundred seconds an unload takes. A second set of bins
+goes up the moment the Technologist's first level lands and the Cart row unlocks
+(`CART_TECH_REQUIREMENT`), with a CART YARD sign over it — the board already
+names the two places a banana can be, and an unlabelled second set of blue bins
+appearing on the grass is a duplicate rather than a reward. Carts leave the road
+over the last `CART_APPROACH_METRES` and draw up in a rank across the front of
+the boxes.
 
-The rank is a line along the ground's x axis rather than across the screen, and
-that is not arbitrary: laid out across the screen every cart sits on one line of
-screen y, and four boxes wider than the gap between them read as one long brown
-bar. Stepping along a ground axis moves each bay sideways *and* a little nearer
-the viewer, so the depth rule sorts them front to back and they read as a rank.
-The standoff in front of the bins is set by the one thing that would otherwise go
-wrong — a rank parked a body's length away simply erases the boxes it is
-unloading into.
+**The yard is out in front of the village, not in the empty quarter to the right
+of the depot**, and that is a correctness constraint rather than a taste. The
+road comes in from the up-left. With the yard on the right the delivery point
+sits *between* the road and the bay, so the straight drive from one to the other
+cuts the chord: the first cut of this decision drove a hundred-banana box 0.70 m
+from the delivery point, through the middle of the unloading ring and over the
+bins, twice a cycle, at three times road speed. Taking the freight off the
+queue's ground and then driving it across that ground twice a trip is not the
+trade this decision set out to make. On the near side of the walk home the same
+straight line never crosses it — 7.8 m clear at its nearest, against a ring of
+4.8 — and no curve, gate or clamp is needed to arrange it.
+`a_cart_drives_round_the_unloading_crowd_rather_than_through_it` samples the
+whole drive, both directions, every bay, and bounds its speed as well as its
+clearance.
 
-*Every actor picks its spot before it sets out.* A harvester's standing place was
-always a function of its hire index alone (`Lane::spot`); what changed is when it
-is used. The walk now closes on that spot over its last ten metres —
-`APPROACH_METRES`, twice the ring's outer radius, so the sideways part of the
-approach is at most half the forward part and it still reads as walking — and
-peels off the spot behind it over the first ten. `Pick`, `Unload` and `Snack` are
-then spent standing perfectly still, where they used to open with a sidestep.
-Carts do the same thing into their bays. Nothing reserves a spot or a bay: two
-monkeys can pick the same one and two carts can share a bay, which is the owner's
-call — a claim would need releasing when a monkey boards a cart or the run
-restarts, for a crowd the player reads as a crowd either way.
+The rank is three bays across and two deep. Along a ground axis rather than
+across the screen, so each bay steps sideways *and* nearer the viewer and the
+depth rule sorts them front to back; four metres apart, which is a whole cart's
+width, because at 2.2 m four bays spanned less screen than one cart and the
+yellow load band — the only readout of how full a hundred-banana box is — was
+hidden on every cart but the front one. Six bays rather than four because the
+whitepaper's reference run owns six carts by twenty-four minutes, and two rows
+rather than six across because six bays a cart apart is twenty metres of rank.
+The near row fills first, so a yard fills *towards* the viewer.
+`the_cart_rank_never_hides_the_bins_it_unloads_into` is what fixes the standoff.
 
 *The Unpacker is a squirrel monkey courier.* `assets/Monkey/Squirrel Unpacker` is
 a smaller animal drawn in eight screen bearings with an empty dart, a loaded
 carry and an idle, against the same 64 × 64 cell and ground line as the spider
 worker. One is drawn per Unpacker hired, and each is placed **on the line between
-a harvester that is unloading and the bins**, running out empty and back loaded.
-Nothing about it reaches the economy: `M_unpack` shortens `Segment::Unload`
-exactly as it did, and the shuttle is decoration over an unload whose length the
-simulation has already decided. It reads the harvesters' *drawn* positions, so it
-runs in `Update` after `position_workers` — and a courier deliberately works
-**inside** the unloading ring, which D30 forbids a support station, because a
-squirrel monkey among spider monkeys cannot be mistaken for one of the queue.
-Couriers are capped at `COURIER_LIMIT` rather than `AVATARS_PER_ROLE`: what
-bounds them is the lane they run, not the ground beside a station.
+a harvester that is unloading and the bins**, running out empty and back loaded,
+standing still through the take and the drop. Nothing about it reaches the
+economy: `M_unpack` shortens `Segment::Unload` exactly as it did, and the shuttle
+is decoration over an unload whose length the simulation has already decided. It
+reads the harvesters' *drawn* positions, so it runs in `Update` after
+`position_workers` — and a courier deliberately works **inside** the unloading
+ring, which D30 forbids a support station, because a squirrel monkey among
+spider monkeys cannot be mistaken for one of the queue. Couriers are capped at
+`COURIER_LIMIT` rather than `AVATARS_PER_ROLE`: what bounds them is the lane
+they run, not the ground beside a station, and past it the count moves to a
+badge — hung over the bins, where its monkeys are, rather than over the station
+nothing stands at any more.
+
+**A courier holds its monkey.** Picking a target by position in the list of
+whoever is currently unloading looks stable if the list is sorted, and is not:
+the list's *length* changes every time a harvester arrives or leaves, about once
+a second at the shipped cadence, and every change re-maps every courier onto a
+different monkey — a squirrel crossing the whole depot between two frames, with
+a step long enough to snap its bearing and spin its stride as well. The served
+hire index is remembered and held until that monkey stops unloading, and a
+reassignment starts a fresh run from the bins rather than dropping the courier
+mid-lane.
+
+**An unfed Unpacker stops working.** `sync_support_avatars` shows hunger with a
+greying role disc, and skipping the Unpacker there removed that channel for the
+one role whose monkeys had left the fan — while `recompute_multipliers` still
+drops an unfed Unpacker out of `M_unpack`, so the player's unload rate fell with
+nothing on the board to explain it. A hungry courier now waits at the bins
+instead of running, which says it better than a tint would.
 
 Limits, again measured. **The carts' corner is not in the opening frame.** The
 opening view is centred on the treehouse (D30), which leaves about ninety pixels
 of board below the delivery point on a desktop and none at all on a phone — and
-the rank is in front of the depot by construction, since carts have to stand
-between the viewer and the boxes they are unloading into. So what is held is that
-it is a *short pan*: half a screenful, the same pan D30 already spends on the
-home tree on a landscape phone (`the_carts_corner_is_a_short_pan_from_the_opening_view`).
-The alternative was the ground level with the depot on its right, which is inside
-the canopy of the jungle plant at the village's east edge — the bins would have
-been drawn behind a tree. `the_cart_park_stands_clear_of_the_village` holds the
-clearances that keep the pan short and the corner clear of the crowd, the walk,
-the home tree and the two support roles that still stand at stations.
-
-The Unpacker's station did not move, but **nothing of the Unpacker's stands
-there** any more: it is now only where the `xN` badge hangs, which is why it is
-the one station the carts' bins are allowed to stand near. A courier with no
-harvester to help waits at the bins rather than inventing work, so at low worker
-counts the squirrels are still most of the time. And the fallen bunch beside the
+the yard is in front of the village by construction, since carts have to stand
+between the viewer and the boxes they unload into. So what is held is that it is
+a *short pan*: half a screenful, on the two boards D30 holds the support crew on.
+The 844 × 390 landscape phone is the exception there too, for the same reason it
+is D30's: its board is 286 pixels and the treehouse is 284 of them. A courier
+with no harvester to help waits rather than inventing work, so at low worker
+counts the squirrels are still most of the time. The fallen bunch beside the
 third bin came across with the bins rather than staying with the house: it
 overlaps a bin's front corner, and left behind it bit a notch out of the box the
-moment the two were drawn apart.
+moment the two were drawn apart. And the cart's own box is still the placeholder
+rectangle D23 left: at a whole cart's spacing the rank reads, but a flat brown
+slab with no rim is why it needed that much spacing to read at all.
 
 ---
 
