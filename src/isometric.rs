@@ -70,6 +70,8 @@ pub(crate) const OVERLAY_Z: f32 = 500.0;
 pub(crate) const MARK_Z: f32 = -0.5;
 /// And the deposit glow, under the shadows of the crowd standing in it.
 pub(crate) const GLOW_Z: f32 = -0.75;
+/// And the treehouse's own ground paint, under the glow: see D30.
+const TREEHOUSE_GROUND_Z: f32 = -0.9;
 
 /// Every contact shadow: the green of the art's own baked shadows, a third
 /// opaque, so a crowd's shadows pool into a darker patch rather than stacking
@@ -145,10 +147,8 @@ const CLEARING: Color = Color::srgb(0.60, 0.71, 0.43);
 /// The town centre used to draw *nothing*. Every delivery in the game lands on
 /// it, the hand-harvest drag ends on it, and a new player opening the game was
 /// shown a flat green lawn with the word VILLAGE floating over it and asked to
-/// drag a banana onto the label. The stall stands eight metres aside so it does
-/// not swallow the arriving queue (D25), and eight metres is off the side of a
-/// phone at the camera's opening zoom - so the one thing that could have named
-/// the spot was the one thing not on screen.
+/// drag a banana onto the label. The treehouse's bins stand on it now (D30), but
+/// its ground is still what the drop target is measured from, edge to edge.
 ///
 /// Painted into the ground mesh rather than built as a prop, which is what
 /// makes it free: it is the tile colour of nine tiles, so it costs no draw
@@ -368,26 +368,28 @@ fn wall_tiles(map: &Map) -> Vec<Tile> {
     tiles
 }
 
-/// Where the stall stands, in metres: beside the delivery point, never on it.
+/// Where the treehouse's ground anchor stands, in metres: wherever puts its
+/// banana bins on the delivery point (D30).
 ///
-/// The town centre tile *is* where a worker unloads, and the queue spreads a few
-/// metres around it. A four-metre hut centred there swallows half the arriving
-/// crowd at the one moment in the cycle the player is watching — the counter
-/// ticks, the floater fires, and the monkey that earned it is inside a building.
-/// So the stall steps aside: square to the walk, so nobody has to route through
-/// it, and to whichever side is *further* from the viewer, so the queue forms in
-/// front of it rather than behind.
-fn stall_stand(map: &Map) -> Vec2 {
-    const ASIDE: f32 = 8.0;
-    let centre = tile_centre(map.town_centre());
-    let outbound = (tile_centre(map.worked_grove().tile) - centre).normalize_or_zero();
-    let across = Vec2::new(outbound.y, -outbound.x);
-    let aside = if depth(across) <= 0.0 {
-        across
-    } else {
-        -across
-    };
-    centre + aside * ASIDE
+/// The building *is* the depot. Every delivery lands at the town centre, and
+/// the artist drew three banana bins at the treehouse's bottom right, so the
+/// house is placed by its bins rather than by its middle: the crowd unloads
+/// into the bins it can see, and the house rises behind them, on the side the
+/// standing crowd leaves open (D27). The walk out to the grove leaves from
+/// under the deck, which is where every monkey appears from.
+///
+/// It used to stand eight metres aside from the delivery point, because a hut
+/// centred on it swallowed the arriving queue (D25). That was a hut with no
+/// counter; a building whose counter is at its front corner puts the queue in
+/// front of it instead.
+pub(crate) fn stall_stand(map: &Map) -> Vec2 {
+    tile_centre(map.town_centre()) - unproject(art::TOWN_CENTRE.offset_of(art::TOWN_CENTRE_BINS))
+}
+
+/// The ground under the middle of the drawn treehouse, in metres: where the
+/// opening view is aimed, so the village's landmark opens centred.
+pub(crate) fn town_centre_view(map: &Map) -> Vec2 {
+    stall_stand(map) + unproject(art::TOWN_CENTRE.offset_of(art::TOWN_CENTRE_MIDDLE))
 }
 
 /// Which jungle plant stands on a tile, if any.
@@ -437,7 +439,7 @@ pub(crate) fn spawn_world(
             // stands on. That is the whole discipline, and it is why the art
             // slots in where the meshes were without touching the layering: a
             // sprite anchored at its feet sorts by `stand_z` exactly as a prism
-            // built from its footprint did. The hut covers a monkey behind it
+            // built from its footprint did. The house covers a monkey behind it
             // and not one in front, without any per-frame sorting.
             //
             // A multi-tile footprint can only carry one depth, so each takes its
@@ -484,6 +486,20 @@ pub(crate) fn spawn_world(
                     Transform::from_xyz(anchor.x, anchor.y, stand_z(at, 0.0)),
                 ));
             }
+
+            // The treehouse's cast shade lies on the ground, so it is drawn
+            // there: over the terrain,
+            // under the depot glow and the crowd's shadows. Drawn with the
+            // house it sorted at the house's depth, far above both, and hid
+            // half the drop target and a third of the shadows at the bins.
+            let stall = stall_stand(map);
+            let anchor = project(stall);
+            let (sprite, pivot) = art.standing(&art.town_centre_ground, art::TOWN_CENTRE);
+            root.spawn((
+                sprite,
+                pivot,
+                Transform::from_xyz(anchor.x, anchor.y, TREEHOUSE_GROUND_Z),
+            ));
         });
 }
 
@@ -563,19 +579,22 @@ mod tests {
     }
 
     #[test]
-    fn the_stall_stands_beside_the_delivery_point_and_behind_the_queue() {
+    fn the_treehouse_stands_with_its_bins_on_the_delivery_point() {
         // A hut centred on the town centre swallows half the unloading queue at
         // the one moment in the cycle the player is watching it.
         let map = crate::map::start();
         let centre = tile_centre(map.town_centre());
         let stall = stall_stand(map);
-        // Clear of the queue, which spreads a few metres around the centre.
-        assert!(stall.distance(centre) > 6.0, "the stall is on the queue");
-        // And further from the viewer, so the queue forms in front of it.
+        // Its bins are on the delivery point, to the pixel: that is where the
+        // crowd unloads, so it is where they must be drawn.
+        let bins = project(stall) + art::TOWN_CENTRE.offset_of(art::TOWN_CENTRE_BINS);
+        assert!(
+            bins.distance(project(centre)) < 1e-3,
+            "the bins draw at {bins}, the delivery point at {}",
+            project(centre)
+        );
+        // And the house rises behind them, so the queue forms in front of it.
         assert!(stand_z(stall, 0.0) < stand_z(centre, 0.0));
-        // Square to the walk, so nobody has to route through the building.
-        let outbound = (tile_centre(map.worked_grove().tile) - centre).normalize();
-        assert!((stall - centre).normalize().dot(outbound).abs() < 1e-3);
     }
 
     #[test]

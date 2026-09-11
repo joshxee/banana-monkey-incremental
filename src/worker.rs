@@ -65,7 +65,7 @@ const SWARM_HALF_MAX: f64 = 4.0;
 /// plus its scuffed ring is 5 m from the centre), so the pad contains the crowd
 /// that stands on it instead of the crowd spilling onto plain grass around it.
 const RING_INNER: f32 = 2.2;
-const RING_OUTER: f32 = 4.8;
+pub(crate) const RING_OUTER: f32 = 4.8;
 
 /// How much of the ring is left open at the back, as a fraction of the circle.
 ///
@@ -349,9 +349,33 @@ pub(crate) struct Shadow;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct JustHired {
     remaining: f32,
+    /// Seconds since the hire, for the walk out of the bins (see [`emerge`]).
+    age: f32,
 }
 
 const HIRE_HIGHLIGHT_SECONDS: f32 = 0.6;
+
+/// How fast a fresh hire walks out of the bins at its quickest, in metres a
+/// second: a harvester's own pace.
+const EMERGE_SPEED: f32 = 3.0;
+
+/// Where a fresh hire is drawn, `age` seconds after it was hired, on its way
+/// from the bins at `from` to the place in the crowd it is headed for at `to` -
+/// and whether it has got there.
+///
+/// Every monkey comes out of the treehouse (D30). The walk is timed by the
+/// distance, not by the hire flash: a smoothstep peaks at one and a half times
+/// its average speed, so a duration of `1.5 d / EMERGE_SPEED` holds the peak
+/// to a walking pace. Spent over the 0.6 s flash instead, a monkey bound for
+/// the outer ring left the bins at twelve metres a second.
+fn emerge(from: Vec2, to: Vec2, age: f32) -> (Vec2, bool) {
+    let duration = 1.5 * from.distance(to) / EMERGE_SPEED;
+    if duration <= 0.0 || age >= duration {
+        return (to, true);
+    }
+    let t = age / duration;
+    (from.lerp(to, t * t * (3.0 - 2.0 * t)), false)
+}
 
 /// Which loop a monkey is playing, and where it has got to.
 ///
@@ -499,6 +523,7 @@ pub fn spawn_missing_workers(
         } else {
             worker.insert(JustHired {
                 remaining: HIRE_HIGHLIGHT_SECONDS,
+                age: 0.0,
             });
         }
         // The banana it carries home. Spawned bare, like the monkey: it is a
@@ -722,9 +747,23 @@ pub fn position_workers(
 
         // Walking and standing are two different shapes, blended rather than
         // switched between. See `stand_point`.
-        let (point, along) = stand_point(&village, &route.0, fraction, *lane, ring_weight);
+        let (mut point, along) = stand_point(&village, &route.0, fraction, *lane, ring_weight);
         let travel = if outbound { along } else { -along };
-        let facing_right = isometric::project(travel).x >= 0.0;
+        let mut facing_right = isometric::project(travel).x >= 0.0;
+        // A fresh hire walks out of the bins - the treehouse, which is where
+        // every monkey appears from (D30) - to its place in the crowd, facing
+        // the way it is going rather than the way the route will take it.
+        let mut emerged = true;
+        if let Some(hired) = hired.as_ref() {
+            let bins = isometric::tile_centre(village.town_centre());
+            let target = point;
+            let (drawn, arrived) = emerge(bins, target, hired.age);
+            if !arrived {
+                point = drawn;
+                facing_right = isometric::project(target - bins).x >= 0.0;
+            }
+            emerged = arrived;
+        }
 
         // Depth cue, taken from where the monkey is actually drawn rather than
         // from `across`, which describes only the walking shape: a monkey on
@@ -771,9 +810,10 @@ pub fn position_workers(
         // `HarvestCycle::earmarked`.
         if let Some(mut hired) = hired {
             hired.remaining -= time.delta_secs();
-            if hired.remaining <= 0.0 {
+            hired.age += time.delta_secs();
+            if hired.remaining <= 0.0 && emerged {
                 commands.entity(entity).remove::<JustHired>();
-            } else {
+            } else if hired.remaining > 0.0 {
                 let strength = (hired.remaining / HIRE_HIGHLIGHT_SECONDS).clamp(0.0, 1.0);
                 // Toward gold, and brightening, so the new hire reads against
                 // both the ground and the other workers.
@@ -1253,6 +1293,31 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_hire_walks_out_of_the_bins_at_a_walking_pace() {
+        // Held to the same continuity bar as the rest of the cycle: at sixty
+        // frames a second no step of the walk out is more than a tenth of a
+        // metre, even to the far edge of the standing ring - and it arrives,
+        // exactly where it was going, rather than snapping there at the end.
+        const FRAME: f32 = 1.0 / 60.0;
+        let from = Vec2::ZERO;
+        for bearing in 0..12 {
+            let to = Vec2::from_angle(bearing as f32 * std::f32::consts::TAU / 12.0) * RING_OUTER;
+            let (mut last, mut age, mut arrived) = (from, 0.0, false);
+            let mut worst: f32 = 0.0;
+            while !arrived {
+                age += FRAME;
+                let (at, done) = emerge(from, to, age);
+                worst = worst.max(at.distance(last));
+                last = at;
+                arrived = done;
+                assert!(age < 10.0, "the walk out never arrives");
+            }
+            assert!(worst < 0.10, "a hire steps {worst} m in one frame");
+            assert_eq!(last, to);
+        }
+    }
+
+    #[test]
     fn a_walking_crowd_has_a_dense_spine_and_a_ragged_edge() {
         // The property `across` exists for, measured on the crowd rather than
         // read off its formula. A triangle on -1..1 has mean |x| of 1/3 and
@@ -1608,7 +1673,7 @@ pub struct CartSeat {
 /// The box, in source texels. Wide enough to seat three monkeys shoulder to
 /// shoulder, low enough that their heads clear the top - the whole read is
 /// "three monkeys in a box", so the box must not swallow them.
-const CART_BOX_TEXELS: Vec2 = Vec2::new(52.0, 15.0);
+const CART_BOX_TEXELS: Vec2 = Vec2::new(130.0 * art::ART_SCALE, 37.5 * art::ART_SCALE);
 const CART_BOX: Color = Color::srgb(0.55, 0.33, 0.14);
 /// The bananas piled in the box. Banana-yellow, and the only large yellow mass
 /// in the scene, so a loaded cart is distinguishable from the Unpacker's crate
@@ -1616,9 +1681,9 @@ const CART_BOX: Color = Color::srgb(0.55, 0.33, 0.14);
 const CART_LOAD: Color = Color::srgb(0.98, 0.82, 0.20);
 /// The load, at full payload, in source texels. Inset so the box's own walls
 /// still read as walls.
-const CART_LOAD_TEXELS: Vec2 = Vec2::new(46.0, 9.0);
+const CART_LOAD_TEXELS: Vec2 = Vec2::new(115.0 * art::ART_SCALE, 22.5 * art::ART_SCALE);
 /// Seat spacing inside the box.
-const SEAT_STEP_TEXELS: f32 = 15.0;
+const SEAT_STEP_TEXELS: f32 = 37.5 * art::ART_SCALE;
 
 /// Where a rider's feet go, in the box's local texels: low enough that its
 /// hips are level with the top of the front wall, so the legs are inside the

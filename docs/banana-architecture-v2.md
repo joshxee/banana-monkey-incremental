@@ -1036,9 +1036,94 @@ landscape phone the depot can be off screen with the banana in hand; releasing
 there cancels, and HOME is visible. And a second finger landing mid-drag pans
 the board (only the harvesting finger is claimed), so the ground — and the
 drop point the shadow marks — can slide under a finger that has not moved;
-that predates this increment, and the shadow at least shows it happening. `tests/e2e/visual.spec.ts-snapshots/` were
+that predates this increment, and the shadow at least shows it happening.
+`tests/e2e/visual.spec.ts-snapshots/` were
 already stale after D28 and are more so now; they cannot be regenerated without
 `trunk` and the wasm target, and CI does not run them.
+
+**D30 — The treehouse is the depot, and every monkey comes out of it.**
+*(Owner's call, after D29.)*
+
+The treehouse stood eight metres aside from the delivery point and the opening
+view was aimed between the home tree and the depot, so the village's landmark
+was never on screen whole: cut by the right edge in portrait, under the shop in
+landscape. The artist drew three banana bins at its bottom right, and the depot
+the player was asked to drag to was an empty pad beside a building full of
+bananas.
+
+*The building is placed by its bins.* `stall_stand` puts the treehouse's ground
+anchor wherever lands `TOWN_CENTRE_BINS` — an art pixel, pinned to an opaque bin
+pixel by a test — exactly on the delivery tile. Nothing economic moved: the
+delivery point is the map's `@` as it was, so `GROVE_DISTANCE` and every
+contract stand. The house rises behind the bins, on the side D27's horseshoe
+already leaves open, so the unloading crowd stands in front of its counter; the
+walk to the grove leaves from under the deck. D25's reason for standing aside —
+a hut centred on the delivery point swallowed the queue — was true of a hut
+with no counter. A building whose counter is its front corner puts the queue in
+front of it.
+
+*The opening view is centred on it.* The focus is the ground under the middle
+of the treehouse's opaque art. On portrait phones the hand-harvest drag, which
+lies across the house's front, is in view whole. On an 844 × 390 landscape phone
+the house fills the 286-pixel board and the home tree opens eleven pixels inside
+its left edge — nearer than HOME's half-thumb margin, so HOME is shown from the
+first frame there and a short pan brings the drag fully into view. That
+was the owner's trade: the landmark centred, over the drag framed on the
+tightest phone.
+
+*Every monkey appears from the bins.* A fresh harvester already began its
+cycle at the delivery point; it now eases out of the bins into its place in the
+crowd over its hire flash. A new support monkey walks from the bins to its
+station on the walk loop, feet gripping the ground as a harvester's do, and
+then stands.
+
+*And the art scale is one half.* At zoom 2 that is one art pixel to one
+logical pixel, where 0.4 dropped a fifth of the artist's rows and columns on a
+standard-density screen. The monkey is 29 texels, 58 pixels at the floor,
+against 23 before. Every texel constant placed against the monkey — props,
+discs, the fan, shadows, the cart — is now written as art pixels times
+`ART_SCALE`, so it moves with it. The treehouse keeps its drawn size at a
+deviation of one half: half a logical pixel per art pixel at the floor, so on a
+standard-density screen it shows every other row of its art — exact on a 2×
+screen — and it is what fits the landscape board, to half a pixel. The
+objection to 0.4 holds against the treehouse too; the alternative was a
+building wider than the board.
+
+*Its cast shade lies on the ground.* The artist painted the house's shade on
+the ground into the same picture as the house, fully opaque, and drawn as one
+sprite all of it sorted at the house's depth — so it covered half the drop
+target's glow and a third of the contact shadows of the crowd at the bins. The
+master keeps it as its own bottom layer (`01 Quiet ground and cast shade`), so
+the house is exported as two sprites from its own layers: the shade flat
+between the terrain and the glow, everything else at the house's depth. The
+fallen-leaves layer stays with the house: the artist painted some of it over
+the structure, and splitting it off changed 54 pixels of the picture. A test
+holds that the two sprites, drawn one over the other, are the artist's picture
+to the pixel.
+
+Limits, measured rather than guessed. The house is one depth at its anchor
+(D25), and it is by far the largest footprint that limit applies to: a monkey
+passing under the front of the deck draws over it. It stands on the walk out to
+the grove, so a walker is mostly behind its art for about a quarter of each leg
+— and it vanishes in a single frame about five metres out, where it crosses
+the house's one depth, rather than walking in under the deck: D25's promise
+that order changes smoothly does not hold for a building this size. The swarm
+reads thinner there than it did with the house aside, and the only
+fix that keeps the house where the owner put it is a route that turns before
+the house, which moves `GROVE_DISTANCE` (D24) and is the owner's call. It also
+covers about a quarter of the home plant's crown, which stands behind it. The
+loose banana stays clear, but a third of the harvest square and a little of the
+trunk column are drawn under the house, so a press on the stairs or the left of
+the deck starts a harvest. The support stations stand clear of the unloading
+ring by half a body, every monkey of every fan, and a test holds it. A support monkey restored
+with a save appears standing — only a hire walks out. The bins are drawn in the house, so a monkey standing on the
+delivery point stands over the bins rather than among them. And on the two
+smallest boards — the 320 × 568 phone and the 844 × 390 landscape one — the
+board is little more than the house, and part of every role's fan opens past
+an edge of it, a short pan away. The unpacker moved
+from behind where the house now stands to beside the bins, and the
+technologist a step away from the home tree, so that every other viewport still
+opens with the whole crew in view.
 
 ---
 

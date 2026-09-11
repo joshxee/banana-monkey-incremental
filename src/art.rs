@@ -25,18 +25,19 @@ use bevy::{
 /// factor for everything, or the trees stop agreeing with the monkeys standing
 /// under them.
 ///
-/// Pinned by the worker. The frames the game plays stand 58 art pixels from
-/// tail tip to toe — [`WORKER_TOP_ROW`] to the bottom of the cell's opaque
-/// rows — which is 23.2 texels here, so a monkey at the camera's zoom floor is
-/// 46 logical pixels tall. That is the size the board, the zoom floor and the
-/// support fan were tuned against (to within the texel the tail adds), and
-/// everything else in the art inherits its proportion to the monkey from the
-/// artist rather than from a number chosen here.
+/// One half, so that at the camera's zoom floor of 2 **one art pixel is one
+/// logical pixel**. That is the whole argument for it: every other ratio drops
+/// or doubles rows of the art under nearest-neighbour sampling, and at 0.4 a
+/// fifth of the artist's rows and columns simply never reached the screen on a
+/// standard-density display. The frames the game plays stand 58 art pixels
+/// from tail tip to toe, so a monkey is 29 texels and 58 logical pixels at the
+/// floor. Texel constants placed against the monkey are written as art pixels
+/// times this, so they move with it.
 ///
 /// The first statement of this constant pinned it to a 55-pixel *standing*
 /// study the game never loads (`docs/references/spider-worker.png`), and its
 /// test multiplied two literals together. The test now measures the sheet.
-pub(crate) const ART_SCALE: f32 = 0.4;
+pub(crate) const ART_SCALE: f32 = 0.5;
 
 /// A sprite's size and ground anchor, in its own art pixels.
 ///
@@ -115,15 +116,21 @@ pub(crate) const PLANT: Cell = Cell::new((320.0, 352.0), (160.0, 316.0));
 ///
 /// The one asset drawn smaller than its own art direction asks. It is a
 /// treehouse the artist scaled against the worker at about ten monkeys tall,
-/// which is a fine building and a poor *landmark*: at the shared scale its
-/// opaque art is 205 texels across and 410 logical pixels at the zoom floor,
-/// against a landscape phone's 286-pixel safe area, so it covers the depot pad
-/// it stands beside, the crowd unloading there and both ends of the opening
-/// drag. At 0.62 it is 254 x 282 pixels at the zoom floor: the largest thing
-/// on the board by far, and exactly what still fits the tightest safe area —
-/// `the_treehouse_fits_the_tightest_safe_area` holds that, and is what to read
-/// before moving this number.
-pub(crate) const TOWN_CENTRE: Cell = Cell::new((672.0, 704.0), (330.0, 440.0)).shrunk(0.62);
+/// which is a fine building and too big a one for a phone: at the shared scale
+/// its opaque art is 256 texels across and 512 logical pixels at the zoom
+/// floor, against a landscape phone's 286-pixel safe area. Half is a quarter of
+/// a texel per art pixel - a whole-number ratio, so it samples cleanly - and
+/// 256 x 284 pixels at the floor, which is exactly what still fits the
+/// tightest safe area. `the_treehouse_fits_the_tightest_safe_area` holds that,
+/// and is what to read before moving this number.
+pub(crate) const TOWN_CENTRE: Cell = Cell::new((672.0, 704.0), (330.0, 440.0)).shrunk(0.5);
+/// Where the treehouse's banana bins stand, in its art pixels: the middle of
+/// the three at its bottom right, on the ground. Monkeys unload *here*, so
+/// this is the point the building is placed by (D30).
+pub(crate) const TOWN_CENTRE_BINS: Vec2 = Vec2::new(375.0, 555.0);
+/// The middle of the treehouse's opaque art, which the opening view centres
+/// on: its bounds are (63, 38) to (574, 606).
+pub(crate) const TOWN_CENTRE_MIDDLE: Vec2 = Vec2::new(318.5, 322.0);
 /// One frame of the spider worker (see `assets/Monkey/Spider Worker`).
 pub(crate) const WORKER: Cell = Cell::new((64.0, 64.0), (32.0, 56.0));
 
@@ -169,7 +176,7 @@ pub(crate) const BANANA_REST_FRAME: u32 = 8;
 
 /// A contact shadow, in world texels: a little wider than a monkey's feet and
 /// a third as deep as it is wide, which is the 2:1 ground seen from above.
-pub(crate) const SHADOW_TEXELS: Vec2 = Vec2::new(14.0, 5.0);
+pub(crate) const SHADOW_TEXELS: Vec2 = Vec2::new(35.0 * ART_SCALE, 12.5 * ART_SCALE);
 
 /// Frames in the walk loop, and in the idle loop.
 const WALK_FRAMES: u32 = 12;
@@ -190,13 +197,13 @@ const IDLE_TIMING: [f32; 4] = [0.300, 0.250, 0.300, 0.250];
 /// along the ground.
 ///
 /// Measured off the sheet: the planted foot slides about twenty art pixels
-/// down the 2:1 diagonal over the twelve frames, which is eight texels. The
+/// down the 2:1 diagonal over the twelve frames, twenty art pixels of stride, at whatever scale the art is drawn. The
 /// first version played the loop against the clock in 0.72 s, which is 11
 /// texels a second of stepping against 27 of walking: every monkey on the board
 /// skated at two and a half times its own stride, and faster again with every
 /// Chef. The playhead is now driven by how far the monkey is *drawn* moving, so
 /// the feet grip the ground at any speed, any Chef bonus and any swarm remap.
-pub(crate) const WALK_STRIDE_TEXELS: f32 = 8.0;
+pub(crate) const WALK_STRIDE_TEXELS: f32 = 20.0 * ART_SCALE;
 
 /// Which loop a monkey is playing.
 ///
@@ -246,7 +253,11 @@ impl Clip {
 /// seventy-odd jungle plants on the board share three textures between them.
 #[derive(Resource, Debug, Clone)]
 pub(crate) struct Art {
+    /// The treehouse as it stands: house, deck, stair, tree and bins.
     pub(crate) town_centre: Handle<Image>,
+    /// And the shade it casts on the ground, which is drawn flat, under the
+    /// depot glow and the crowd's shadows, rather than with the house (D30).
+    pub(crate) town_centre_ground: Handle<Image>,
     /// The three jungle plants, in the order a scatter picks between them.
     pub(crate) jungle: [Handle<Image>; 3],
     /// The banana plant with its bunch still on: the node workers walk to.
@@ -275,7 +286,8 @@ impl Art {
         };
         let worker_cell = WORKER.canvas.as_uvec2();
         Self {
-            town_centre: assets.load("TownCenter/town-center.png"),
+            town_centre: assets.load("TownCenter/town-center-structure.png"),
+            town_centre_ground: assets.load("TownCenter/town-center-ground.png"),
             jungle: [
                 assets.load("Jungle/jungle-broad.png"),
                 assets.load("Jungle/jungle-leaning.png"),
@@ -447,6 +459,8 @@ mod tests {
             ("Jungle/jungle-leaning.png", PLANT, 1),
             ("Jungle/jungle-fern.png", PLANT, 1),
             ("TownCenter/town-center.png", TOWN_CENTRE, 1),
+            ("TownCenter/town-center-structure.png", TOWN_CENTRE, 1),
+            ("TownCenter/town-center-ground.png", TOWN_CENTRE, 1),
             (
                 "Monkey/Spider Worker/spider_monkey_walk_sheet.png",
                 WORKER,
@@ -486,7 +500,7 @@ mod tests {
                 let (top, bottom) = opaque_rows(sheet, frame, cell);
                 let drawn = (bottom + 1 - top) as f32 * ART_SCALE;
                 assert!(
-                    (21.0..=24.0).contains(&drawn),
+                    (26.0..=30.0).contains(&drawn),
                     "frame {frame} draws {drawn} texels tall"
                 );
                 assert!(
@@ -565,6 +579,54 @@ mod tests {
     }
 
     #[test]
+    fn the_treehouse_split_draws_exactly_the_artists_picture() {
+        // The house is drawn as two sprites - its ground paint flat under the
+        // glow and the shadows, the structure at the house's depth - exported
+        // from the master's own layers. Drawn one over the other they must be
+        // the artist's picture, pixel for pixel: nothing lost at the seam, and
+        // no ground-layer pixel that the artist painted *over* the house now
+        // drawn under it.
+        let whole = png("TownCenter/town-center.png");
+        let ground = png("TownCenter/town-center-ground.png");
+        let structure = png("TownCenter/town-center-structure.png");
+        let mut wrong = 0;
+        for at in (0..whole.2.len()).step_by(4) {
+            let pixel = |image: &(u32, u32, Vec<u8>)| -> [u8; 4] {
+                [
+                    image.2[at],
+                    image.2[at + 1],
+                    image.2[at + 2],
+                    image.2[at + 3],
+                ]
+            };
+            let drawn = if pixel(&structure)[3] > 0 {
+                pixel(&structure)
+            } else {
+                pixel(&ground)
+            };
+            let expected = pixel(&whole);
+            if (expected[3] > 0 || drawn[3] > 0) && drawn != expected {
+                wrong += 1;
+            }
+        }
+        assert_eq!(
+            wrong, 0,
+            "{wrong} pixels of the treehouse change when it is split"
+        );
+        // And the ground layer really is on the ground: none of it reaches up
+        // past the top of the bins, which are the highest thing standing on
+        // the ground in front of the house.
+        let (width, height, data) = &ground;
+        let top = (0..*height)
+            .find(|&y| (0..*width).any(|x| data[((y * width + x) * 4 + 3) as usize] > 0))
+            .unwrap();
+        assert!(
+            top as f32 > TOWN_CENTRE_MIDDLE.y,
+            "ground paint reaches art row {top}, up the house"
+        );
+    }
+
+    #[test]
     fn the_treehouse_fits_the_tightest_safe_area() {
         // The deviation from the shared scale exists for one reason, so hold
         // it to that reason: its opaque art, at the zoom floor, fits the
@@ -580,6 +642,23 @@ mod tests {
                 }
             }
         }
+        // The middle the opening view centres on is the middle of these.
+        assert_eq!((min, max), (UVec2::new(63, 38), UVec2::new(574, 606)));
+        assert_eq!(
+            TOWN_CENTRE_MIDDLE,
+            (min.as_vec2() + max.as_vec2()) * 0.5,
+            "the opening view is centred on a middle the art does not have"
+        );
+        // And the bins are where the constant says: an opaque, cool, dark bin
+        // pixel, not grass or the house's shadow - so a redraw that moves them
+        // fails here rather than leaving the crowd unloading into the lawn.
+        let at = (TOWN_CENTRE_BINS.y as u32 * width + TOWN_CENTRE_BINS.x as u32) as usize * 4;
+        let [r, g, b, alpha] = [data[at], data[at + 1], data[at + 2], data[at + 3]];
+        assert_eq!(alpha, 255, "the bins point is transparent");
+        assert!(
+            b > r && b > g && r < 140,
+            "the bins point is ({r}, {g}, {b}), not the inside of a bin"
+        );
         const MIN_ZOOM: f32 = 2.0;
         const TIGHTEST_SAFE_AREA: f32 = 286.0;
         let drawn = (max - min + UVec2::ONE).as_vec2() * TOWN_CENTRE.texels() * MIN_ZOOM;

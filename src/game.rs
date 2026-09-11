@@ -426,7 +426,7 @@ impl BoardCamera {
     /// The furthest the board goes, bounded by **how big a monkey is**, never
     /// by how much of the map fits.
     ///
-    /// A monkey is 22 texels tall, so this renders one 44 logical pixels — about
+    /// A monkey is 29 texels tall, so this renders one 58 logical pixels — about
     /// a thumbnail, and the point below which the cast stops reading as animals
     /// and starts reading as confetti. Clamping to "fit the 69x69 map" instead
     /// would put a phone near zoom 0.3 and a monkey at six pixels: the whole
@@ -446,6 +446,10 @@ impl BoardCamera {
     /// phone — the tightest safe area the game supports, 286 px square — the
     /// second of those fails at any zoom past this one.
     ///
+    /// Since D30 the opening view is centred on the treehouse instead, and on
+    /// that phone the home tree and part of the crew open just off the board;
+    /// a higher zoom would lose the depot as well.
+    ///
     /// So this sits on `MIN_ZOOM` rather than above it, and pinching outwards
     /// from a fresh board does nothing. That is a real cost, and it is the
     /// cheaper one: the alternative is opening below the zoom at which a monkey
@@ -460,15 +464,14 @@ impl BoardCamera {
     /// quarter of the board at the low end - so it eases instead.
     const SETTLE_RATE: f32 = 14.0;
 
-    /// The view a new player opens on: the opening drag, centred.
+    /// The view a new player opens on: centred on the treehouse, the village's
+    /// landmark and its depot (D30). The hand-harvest drag lies across its
+    /// front, so on a portrait phone both ends of it are in view; on a
+    /// landscape one the home tree opens nearer the edge than a thumb, and HOME
+    /// says so.
     fn opening(map: &Map) -> Self {
-        let town_centre = isometric::tile_centre(map.town_centre());
-        let home_tree = map
-            .home_trees()
-            .first()
-            .map_or(town_centre, |&tile| isometric::tile_centre(tile));
         Self {
-            focus: town_centre.midpoint(home_tree),
+            focus: isometric::town_centre_view(map),
             zoom: Self::DEFAULT_ZOOM,
             resting_zoom: Self::DEFAULT_ZOOM,
         }
@@ -1039,14 +1042,19 @@ impl SceneLayout {
     /// the eleven-metre station is off the side of a phone, so a chef the
     /// player paid for is drawing wages somewhere they cannot see.
     ///
-    /// All three now sit 8.2 metres out at bearings chosen for *projected*
-    /// separation, which the isometric fold makes a different question from
-    /// ground separation. The closest two are 85 px apart at unit zoom against
-    /// a fan half-width of 21 — nearly a fifth further than the line they
-    /// replace — while every avatar of every fan is inside the safe area at the
-    /// opening camera on every viewport, and stands at least 2.8 m clear of the
-    /// walk, 9 m clear of the stall and 5.9 m clear of the home tree. That last
-    /// one is a real constraint, not a courtesy: the home tree carries the
+    /// Since the treehouse became the depot (D30) the three stand round its
+    /// bins rather than on an 8.2 m ring, and every monkey of every fan clear
+    /// of the ring the unloading crowd stands on (4.8 m) by half a body, so no
+    /// role is mistaken for the queue: the unpacker to the right of the bins it
+    /// empties, where the old ring put it behind the house; the chef in front
+    /// and to the left, towards the stairs; the technologist further left,
+    /// clear of the home tree. `support_never_stands_in_the_unloading_crowd`
+    /// holds the first of those. The closest two are still more than a full fan apart
+    /// on screen, every avatar of every fan is inside the safe area at the
+    /// opening camera on every viewport but the two smallest boards - the
+    /// 320 x 568 phone and the 844 x 390 landscape one (D30) - and all
+    /// three stand clear of the walk, of the house and of the home tree. That
+    /// last one is a real constraint, not a courtesy: the home tree carries the
     /// hand-harvest drag target, so a station under its crown puts a monkey
     /// inside the thing the player is trying to grab.
     /// `every_support_avatar_is_on_screen_when_the_game_opens`,
@@ -1056,21 +1064,20 @@ impl SceneLayout {
     /// that leaves the screen first.
     pub(crate) fn support_stand(self, role: SupportRole) -> Vec2 {
         let offset = match role {
-            // Towards the grove, so it meets the arriving queue where the queue
-            // actually arrives from - and the furthest of the three from the
-            // viewer, which puts it behind the crowd it is clearing rather than
-            // in front of it.
-            SupportRole::Unpacker => Vec2::new(-4.47, -6.88),
+            // Beside the bins it empties, level with them on screen and to
+            // their right: clear of the house behind the depot, where the old
+            // ring stood it, and of the walk out to the grove on the left.
+            SupportRole::Unpacker => Vec2::new(4.0, -4.6),
             // Nearest the viewer, at the front of the village: being fed is the
             // most-watched thing that happens at the stall, and what the player
             // is looking for when the banner reads HUNGRY.
-            SupportRole::Chef => Vec2::new(4.1, 7.1),
+            SupportRole::Chef => Vec2::new(1.0, 7.0),
             // Off to one side, clear of the ground between the depot and the
             // kitchen: research is the one job with no traffic of its own. Its
             // bearing is also the one the home tree constrains - swung further
             // round, the research desk stands underneath the tree the player
             // hand-harvests from, inside the drag target.
-            SupportRole::Technologist => Vec2::new(-6.63, 4.82),
+            SupportRole::Technologist => Vec2::new(-6.2, 5.0),
         };
         self.town_centre + offset
     }
@@ -1502,6 +1509,15 @@ fn setup(
     }
 }
 
+/// Where the DEPOT sign stands relative to the delivery point, in metres, and
+/// how high: towards the viewer's right of the bins, at their lip.
+const DEPOT_SIGN_OFFSET: Vec2 = Vec2::new(1.2, -1.2);
+const DEPOT_SIGN_RAISE: f32 = 2.4;
+
+/// Where delivery floaters rise from, relative to the delivery point, in
+/// metres: beside the bins, to the right, rather than through the sign.
+const FLOATER_ORIGIN: Vec2 = Vec2::new(2.0, -2.0);
+
 /// The type size a place label is drawn at.
 const PLACE_LABEL_FONT: f32 = 16.0;
 
@@ -1632,8 +1648,11 @@ fn apply_layout(
                 // metres it hung a hundred pixels above the pad it names, which
                 // is what let it sit over bare grass for so long without
                 // anyone noticing there was nothing under it.
+                // On the bins it names, just above their lip, and off the
+                // porch and door above them - the drawing's best detail, which
+                // a sign centred on the delivery point covered.
                 transform.translation = layout
-                    .board_raised(layout.town_centre(), 3.5)
+                    .board_raised(layout.town_centre() + DEPOT_SIGN_OFFSET, DEPOT_SIGN_RAISE)
                     .extend(PLACE_LABEL_Z);
                 transform.scale = Vec3::splat(layout.world_scale().clamp(0.8, 1.35));
             }
@@ -2117,7 +2136,8 @@ fn spawn_floater(commands: &mut Commands, layout: &SceneLayout, delivery: Delive
         ((mixed >> 40) as u32) as f32 / 16_777_216.0
     };
     let angle = spin * std::f32::consts::TAU;
-    let anchor = layout.town_centre() + Vec2::from_angle(angle) * FLOATER_SPREAD_METRES;
+    let anchor =
+        layout.town_centre() + FLOATER_ORIGIN + Vec2::from_angle(angle) * FLOATER_SPREAD_METRES;
     let (label, size, colour) = match delivery.kind {
         DeliveryKind::Worker => (format!("+{:.0}", delivery.amount), 34.0, GOLD),
         // Bigger, because it is forty times the size and lands once every three
@@ -4080,9 +4100,15 @@ mod tests {
         ] {
             let opening = BoardCamera::opening(map);
             let home = SceneLayout::for_map(viewport, View::Full, map, opening);
-            assert!(
+            // Portrait phones and desktops open with the whole drag in view.
+            // The short landscape phone opens centred on the treehouse, which
+            // fills its board, with the home tree nearer the edge than a thumb
+            // - so there HOME shows from the first frame (D30).
+            let landscape = home.short_landscape();
+            assert_eq!(
                 home.drag_in_view(),
-                "{viewport:?}: HOME shows on a fresh board"
+                !landscape,
+                "{viewport:?}: HOME is wrong on a fresh board"
             );
 
             let wandered = BoardCamera {
@@ -4121,11 +4147,20 @@ mod tests {
         // rather than the framing quietly getting worse.
         for viewport in VIEWPORTS {
             let layout = SceneLayout::for_viewport(viewport);
-            let safe = layout.safe_area();
+            // Half a thumb inside the edge, as HOME measures it, so the two
+            // tests cannot disagree about whether the drag is in view.
+            let safe = layout.safe_area().inflate(-DRAG_VIEW_MARGIN);
             for (name, at) in [
                 ("the home tree", layout.home_tree()),
                 ("the town centre", layout.town_centre()),
             ] {
+                // D30: centred on the treehouse, the landscape phone opens with
+                // the home tree nearer its edge than a thumb, and HOME showing
+                // - see `the_way_home_shows_exactly_when_the_drag_leaves_the_screen`.
+                // The depot is still held, which is what pins `DEFAULT_ZOOM`.
+                if name == "the home tree" && layout.short_landscape() {
+                    continue;
+                }
                 let on_screen = layout.board(at);
                 assert!(
                     contains_inclusive(safe, on_screen),
@@ -4284,9 +4319,9 @@ mod tests {
 
     #[test]
     fn the_zoom_is_bounded_by_how_big_a_monkey_is() {
-        // Not by how much of the map fits. A monkey is 22 texels tall, and the
-        // floor keeps it a readable 44 logical pixels.
-        const MONKEY_TEXELS: f32 = 22.0;
+        // Not by how much of the map fits. A monkey is 58 art pixels tall,
+        // and the floor keeps it a readable 44 logical pixels or more.
+        const MONKEY_TEXELS: f32 = 58.0 * art::ART_SCALE;
         const { assert!(MONKEY_TEXELS * BoardCamera::MIN_ZOOM >= 44.0) };
         // The counter-case, stated so nobody "fixes" the floor by fitting the
         // map: the whole 69-tile board on a phone needs a zoom that renders a
