@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Squirrel Unpacker · asset review</title>
+<style>
+:root{color-scheme:dark;font:15px/1.5 system-ui,sans-serif;background:#20262c;color:#eee7d5}
+body{max-width:1120px;margin:32px auto;padding:0 24px 40px}h1{font-size:30px;margin:0}h2{font-size:19px;margin:24px 0 10px}p{color:#bdc5bd;margin:8px 0 16px}
+.demo{display:block;width:880px;max-width:100%;image-rendering:pixelated;border-radius:6px}.controls{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin:20px 0}
+button,select{font:inherit;background:#343c40;color:inherit;border:1px solid #64716a;border-radius:5px;padding:6px 9px}input{accent-color:#fdd179;vertical-align:middle}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.cell{border:1px solid #46504b;border-radius:6px;overflow:hidden}.cell h3{margin:6px 12px;font-size:14px;font-weight:500}
+.well{display:flex;align-items:center;justify-content:center;min-height:160px;background:#a4c5af}.well canvas{image-rendering:pixelated;width:128px;height:128px}.native canvas{width:64px;height:64px}.large canvas{width:256px;height:256px}.large{grid-template-columns:repeat(2,1fr)}
+output{font-variant-numeric:tabular-nums}.error{color:#ffb0a0}@media(max-width:650px){.grid{grid-template-columns:repeat(2,1fr)}.large{grid-template-columns:1fr}}
+</style>
+<h1>Squirrel Unpacker</h1>
+<p>A small, quick courier with a pale face mask, olive-gray back, golden limbs, and a long balancing tail.</p>
+<h2>Spider worker → banana boxes</h2>
+<p>Watch the empty sprint, handoff, loaded return, and drop into the existing collection boxes. This is an art demonstration; delivery timing is illustrative.</p>
+<img class="demo" src="squirrel-monkey-delivery.gif" alt="Squirrel monkey collecting a banana from a Spider Worker and delivering it to the town-center boxes">
+<h2>Inspect the motion</h2>
+<div class="controls">
+<button id="play" type="button">Pause</button>
+<label>Action <select id="state"><option value="dart">Dart empty</option><option value="carry">Dart carrying</option><option value="idle">Idle</option><option value="take">Take banana</option><option value="drop">Drop banana</option></select></label>
+<label>Speed <select id="speed"><option value="1">1×</option><option value="0.5">½×</option><option value="0.25">¼×</option></select></label>
+<label>Scale <select id="scale"><option value="">2×</option><option value="native">Native</option><option value="large">4×</option></select></label>
+<label>Ground <select id="ground"><option value="#a4c5af">Jungle light</option><option value="#d4c692">Sand</option><option value="#546756">Jungle shade</option></select></label>
+<label>Frame <input id="phase" type="range" min="0" max="7" value="0" step="1"> <output id="readout">1 / 8</output></label>
+</div>
+<div class="grid" id="grid"></div>
+<p id="status">Loading sprites…</p>
+<p>Watch for 15 seconds, then pause at native scale and scrub the final → first dart frame. Pass: readable directions and fruit, quick alternating strides, no clipped pixels, and a visible handoff followed by a drop into the box. Take and drop repeat here for inspection; play them once in game.</p>
+<script src="squirrel-monkey-data.js"></script>
+<script>
+const meta=window.SQUIRREL_MONKEY,grid=document.getElementById('grid'),state=document.getElementById('state'),phase=document.getElementById('phase'),readout=document.getElementById('readout'),status=document.getElementById('status'),play=document.getElementById('play');
+const images={},contexts=[],clips=Object.fromEntries(meta.clips.map(c=>[c.name,c]));let running=true,time=0,last=0;
+for(const dir of meta.directions){const card=document.createElement('article');card.className='cell';const title=document.createElement('h3');title.textContent=dir;const well=document.createElement('div');well.className='well';const canvas=document.createElement('canvas');canvas.width=canvas.height=64;well.append(canvas);card.append(title,well);grid.append(card);contexts.push([dir,canvas.getContext('2d')]);}
+function draw(){const index=Number(phase.value);for(const[dir,ctx]of contexts){const c=clips[state.value+'_'+dir],r=c.frames[index];ctx.clearRect(0,0,64,64);ctx.imageSmoothingEnabled=false;ctx.drawImage(images[c.sheet],r.x,r.y,64,64,0,0,64,64);}readout.value=`${index+1} / ${Number(phase.max)+1}`;}
+play.onclick=()=>{running=!running;play.textContent=running?'Pause':'Play';};
+phase.oninput=()=>{running=false;play.textContent='Play';time=Number(phase.value)*clips[state.value+'_N'].frames[0].durationMs;draw();};
+state.onchange=()=>{time=0;phase.value=0;phase.max=clips[state.value+'_N'].frames.length-1;draw();};
+document.getElementById('scale').onchange=e=>grid.className='grid '+e.target.value;
+document.getElementById('ground').onchange=e=>document.querySelectorAll('.well').forEach(w=>w.style.background=e.target.value);
+function tick(now){if(last&&running){time+=(now-last)*Number(document.getElementById('speed').value);const c=clips[state.value+'_N'];phase.value=Math.floor((time%c.durationMs)/c.frames[0].durationMs);}last=now;draw();requestAnimationFrame(tick);}
+Promise.all([...new Set(meta.clips.map(c=>c.sheet))].map(src=>new Promise((resolve,reject)=>{const im=new Image();im.onload=()=>{images[src]=im;resolve();};im.onerror=()=>reject(new Error('Could not load '+src));im.src=src;}))).then(()=>{status.textContent='40 clips · 256 frames · transparent 64 × 64 cells · shared ground anchor (32, 56).';requestAnimationFrame(tick);}).catch(e=>{status.className='error';status.textContent=e.message;});
+</script>
+</html>
