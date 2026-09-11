@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Banana cart · animation study</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#20362f;color:#eef3de;font:16px/1.5 system-ui,sans-serif}main{max-width:1160px;margin:auto;padding:32px}h1{font-size:32px;letter-spacing:-1px;margin:0}p{color:#bfd0bd;margin:8px 0 24px}.controls{display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin-bottom:20px}label{display:grid;gap:5px;font-size:13px;color:#bfd0bd}button,select{border:1px solid #607969;border-radius:7px;background:#304a3e;color:#fff3cb;padding:9px 14px;font:inherit;cursor:pointer}button:hover,select:hover{background:#3d5a4b}.stage{background:#a4c5af;border-radius:12px;overflow:auto;text-align:center}canvas{image-rendering:pixelated;display:block;margin:auto}input[type=range]{width:min(500px,70vw);accent-color:#fdd179}.timeline{display:flex;align-items:center;gap:18px;margin:18px 0}.small{font-size:13px}a{color:#fdd179}.views{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:30px}.view{padding:8px;background:#a4c5af;border-radius:8px;color:#20362f;text-align:center}.view canvas{max-width:100%;height:auto}.view strong{display:block;font-size:12px}@media(max-width:740px){main{padding:16px}.views{grid-template-columns:repeat(2,1fr)}}
+</style>
+<main>
+<h1>Three monkeys. One banana cart.</h1>
+<p>A wooden pedal cart, with one driver and two pedallers. Eight views and a complete cargo cycle.</p>
+<div class="controls">
+<label>Direction<select id="direction"></select></label>
+<label>Animation<select id="state"><option value="cycle">Complete cycle</option><option value="travel_empty">Travel · empty</option><option value="fill">Fill</option><option value="travel_full">Travel · full</option><option value="offload">Offload</option></select></label>
+<label>Pixel scale<select id="zoom"><option value="1">1× native</option><option value="2" selected>2×</option><option value="3">3×</option></select></label>
+<button id="play">Pause</button><button id="restart">Restart</button>
+</div>
+<div class="stage"><canvas id="stage" width="640" height="400" aria-label="Animated banana cart beside the canonical worker for scale"></canvas></div>
+<div class="timeline"><input id="scrub" type="range" min="0" value="0" aria-label="Animation frame"><output id="readout"></output></div>
+<p class="small">Filling and offloading play once and hold. The complete cycle repeats. Scrub to inspect the pedals, loading arcs, and opening tailgate. The worker at left is shown at its native scale.</p>
+<div id="views" class="views"></div>
+<p class="small" style="margin-top:24px"><a href="banana-cart.aseprite">Editable Aseprite master</a> · <a href="banana-cart.json">Timing and anchors</a> · <a href="banana-cart-contact.png">All states contact sheet</a></p>
+</main>
+<script>
+const directions=['N','NE','E','SE','S','SW','W','NW'];
+const states={travel_empty:{count:12,ms:80,label:'Travel · empty'},fill:{count:24,ms:100,label:'Fill'},travel_full:{count:12,ms:80,label:'Travel · full'},offload:{count:24,ms:100,label:'Offload'}};
+const $=id=>document.getElementById(id), direction=$('direction'),state=$('state'),stage=$('stage'),ctx=stage.getContext('2d');
+direction.innerHTML=directions.map(d=>`<option ${d==='SE'?'selected':''}>${d}</option>`).join('');
+const images={},worker=new Image();worker.src='../../docs/references/spider-worker.png';
+const views=directions.map(d=>{const card=document.createElement('div');card.className='view';card.innerHTML=`<strong>${d}</strong><canvas width="208" height="176" aria-label="${d} cart animation"></canvas>`;$('views').append(card);return card.querySelector('canvas')});
+let timeline=[],index=0,playing=true,last=0,elapsed=0;
+function build(){timeline=[];const order=state.value==='cycle'?['travel_empty','travel_empty','fill','travel_full','travel_full','offload']:[state.value];for(const name of order)for(let f=0;f<states[name].count;f++)timeline.push({name,f,ms:states[name].ms});index=0;elapsed=0;$('scrub').max=timeline.length-1;render()}
+function drawFrame(context,d,item,x,y){context.imageSmoothingEnabled=false;context.drawImage(images[item.name],item.f*208,directions.indexOf(d)*176,208,176,x,y,208,176)}
+function render(){if(!timeline.length||!images.offload?.complete)return;const item=timeline[index];const z=Number($('zoom').value);stage.width=320*z;stage.height=200*z;ctx.scale(z,z);ctx.imageSmoothingEnabled=false;ctx.clearRect(0,0,320,200);if(worker.complete)ctx.drawImage(worker,10,109);drawFrame(ctx,direction.value,item,85,34);views.forEach((c,i)=>{const cx=c.getContext('2d');cx.clearRect(0,0,208,176);drawFrame(cx,directions[i],item,0,0)});$('scrub').value=index;$('readout').textContent=`${states[item.name].label} · ${item.f+1}/${states[item.name].count}`;$('play').textContent=playing?'Pause':'Play'}
+function tick(now){if(!last)last=now;const delta=Math.min(now-last,100);last=now;if(playing&&timeline.length){elapsed+=delta;while(elapsed>=timeline[index].ms){elapsed-=timeline[index].ms;if(index<timeline.length-1)index++;else if(state.value==='cycle'||state.value.startsWith('travel'))index=0;else{playing=false;elapsed=0;break}}render()}requestAnimationFrame(tick)}
+$('play').onclick=()=>{playing=!playing;render()};$('restart').onclick=()=>{index=0;elapsed=0;playing=true;render()};state.onchange=()=>{playing=true;build()};direction.onchange=render;$('zoom').onchange=render;$('scrub').oninput=()=>{playing=false;index=Number($('scrub').value);elapsed=0;render()};
+Promise.all(Object.keys(states).map(name=>new Promise((resolve,reject)=>{const im=new Image();images[name]=im;im.onload=resolve;im.onerror=reject;im.src=`banana-cart-${name}.png`}))).then(()=>{build();requestAnimationFrame(tick)}).catch(()=>{$('readout').textContent='An animation sheet could not be loaded.'});
+</script>
+</html>
