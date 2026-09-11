@@ -277,11 +277,38 @@ impl Lane {
         (angle, radius)
     }
 
+    /// The spot this monkey stands on, in metres from whatever it is gathered
+    /// around.
+    ///
+    /// Picked once, from the hire index, and therefore *known before the monkey
+    /// sets out* - which is the whole of what D31 needs. Nothing reserves it,
+    /// so two monkeys can share one; the alternative is a claim that has to be
+    /// released when a monkey boards a cart or the game restarts, for a crowd
+    /// the player reads as a crowd either way.
+    fn spot(self) -> Vec2 {
+        let (angle, radius) = self.ring();
+        Vec2::from_angle(angle) * radius
+    }
+
     /// A stable, bounded separation for two actors that would otherwise sort
     /// identically. Bounded because an epsilon that grows with the hire index
     /// eventually exceeds a real depth difference, and a crowd starts flickering.
     fn nudge(self) -> f32 {
         (self.0 % 8) as f32 * isometric::NUDGE_STEP
+    }
+
+    /// The hire index itself. Only for ordering one monkey against another -
+    /// a courier has to pick the same harvester to help two frames running, and
+    /// the hire index is the one stable name a harvester has.
+    pub(crate) fn index(self) -> u32 {
+        self.0
+    }
+
+    /// A lane with a given hire index, for a test that has to stand a named
+    /// harvester somewhere.
+    #[cfg(test)]
+    pub(crate) fn hire(index: u32) -> Self {
+        Self(index)
     }
 }
 
@@ -406,6 +433,17 @@ pub(crate) struct Playing {
 }
 
 impl Playing {
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// A playhead as `dress_actors` makes one. Public to the crate only for the
+    /// tests that stand a harvester up somewhere and ask what is drawn beside
+    /// it; nothing outside this module builds one in earnest.
+    #[cfg(test)]
+    pub(crate) fn at(clip: Clip, index: u32, standing: Vec2) -> Self {
+        let mut playing = Self::starting(clip, index);
+        playing.walk_to(standing);
+        playing
+    }
+
     fn starting(clip: Clip, index: u32) -> Self {
         // The golden ratio walks the unit interval without ever repeating a
         // pattern a crowd could line up on, which `index % frames` does every
@@ -423,6 +461,18 @@ impl Playing {
             travelled: 0.0,
             last: None,
         }
+    }
+
+    /// Where the monkey was last drawn standing, in metres, once it has been
+    /// drawn at all.
+    ///
+    /// The one way anything outside this module learns where a harvester
+    /// actually *is*: its `Transform` is a screen position at the board's zoom,
+    /// and a courier that has to run between a monkey and the bins needs the
+    /// ground under it. Nothing in `FixedUpdate` may read this - it is a drawn
+    /// position, and the economy is not allowed to depend on one.
+    pub(crate) fn standing(&self) -> Option<Vec2> {
+        self.last
     }
 
     /// Record where the monkey is drawn this frame.
@@ -581,51 +631,93 @@ fn walk_point(map: &Map, route: &Route, fraction: f64, lane: Lane) -> (Vec2, Vec
     )
 }
 
-/// How much of a segment a monkey spends moving between the walk and the ring.
+/// How far out from an endpoint a monkey is already walking to its own spot,
+/// in metres.
 ///
-/// The blend has to cover the gap between the walking offset and the ring -
-/// nearly six metres on average, ten at worst - so it is spent as a *sidestep*,
-/// and the fraction is the balance between how fast that step looks and how
-/// much of the segment is left for standing still. A third of `Pick` is over a
-/// second at the shipped multipliers.
-const SETTLE_FRACTION: f32 = 0.35;
+/// The whole of D31's pathing change is this number. A monkey used to walk the
+/// route to its end and *then* step aside onto the standing ring - up to ten
+/// metres of sidestep, spent in the first third of `Pick` or `Unload`, at the
+/// one moment in the cycle the player is watching. It now picks its spot before
+/// it sets out and closes on it over the last stretch of the walk, so it
+/// *arrives* at the spot instead of arriving beside it and sliding in.
+///
+/// Ten metres, twice the ring's outer radius: the sideways part of the approach
+/// is then at most half the forward part, so a monkey closing on the far side
+/// of the ring still reads as walking a curve rather than as drifting sideways.
+const APPROACH_METRES: f64 = 10.0;
 
 /// Where a monkey is drawn, blended between the walk and the standing ring.
 ///
 /// An endpoint is where a crowd *gathers*, and gathering is a different shape
 /// from walking: the offsets that read as a swarm in motion read as a stock
 /// list standing still, so a standing monkey takes a bearing and a radius and
-/// the group becomes a ring around what it is queueing at.
+/// the group becomes a ring around the bins it is queueing at.
 ///
 /// The two shapes share no term, which is exactly why this blends rather than
 /// switches. Switching cost a **six metre jump**, four times per fifty-second
 /// cycle, on every monkey - three tiles of teleport at the very moment the
 /// player is watching a delivery land, and thirty times the jump the walking
-/// path is held to. `ring_weight` is 0 on the walk and 1 on the ring, and every
-/// segment boundary hands over at a matching weight.
+/// path is held to. `ring_weight` is 0 out on the walk and 1 on the spot, and
+/// every segment boundary hands over at a matching weight.
+///
+/// `ring_end` is which end of the route that spot is measured at, 0 for the
+/// bins and 1 for the grove, rather than wherever the monkey has got to. That
+/// is what makes the spot a *destination*: measured at the sampled point, the
+/// target would still be sliding up the route while the monkey closed on it,
+/// which is the slide D31 set out to remove.
 fn stand_point(
     map: &Map,
     route: &Route,
     fraction: f64,
     lane: Lane,
     ring_weight: f32,
+    ring_end: f64,
 ) -> (Vec2, Vec2) {
     let (walking, along) = walk_point(map, route, fraction, lane);
     if ring_weight <= 0.0 {
         return (walking, along);
     }
-    let step = route.sample(fraction);
+    let step = route.sample(ring_end);
     let anchor = Vec2::new(step.at.x as f32, step.at.y as f32);
-    let (angle, radius) = lane.ring();
-    let ring = anchor + Vec2::from_angle(angle) * radius;
-    (walking.lerp(ring, ring_weight), along)
+    (walking.lerp(anchor + lane.spot(), ring_weight), along)
 }
 
-/// Smoothstep, so the step aside starts and ends at rest rather than snapping
+/// Smoothstep, so an approach starts and ends at rest rather than snapping
 /// into motion.
-fn settle_weight(progress: f32) -> f32 {
-    let eased = (progress / SETTLE_FRACTION).clamp(0.0, 1.0);
+fn ease(progress: f32) -> f32 {
+    let eased = progress.clamp(0.0, 1.0);
     eased * eased * (3.0 - 2.0 * eased)
+}
+
+/// How much of one leg of `route` the approach to a spot takes up.
+///
+/// Capped at half the leg, so the peel-off and the closing-in never overlap
+/// however short a map's walk is - at exactly half, a monkey leaves one spot
+/// and crosses straight to the next with no corridor in between. And held off
+/// zero at the other end: `travel_ring` divides by this, and a leg long enough
+/// to round it to nothing would hand the ramps a 0/0 rather than a weight.
+fn approach_fraction(route: &Route) -> f64 {
+    (APPROACH_METRES / route.length().max(f64::EPSILON)).clamp(1e-3, 0.5)
+}
+
+/// How much of its standing spot a monkey has taken up `progress` of the way
+/// along a travelling segment, and which end of the route that spot is at.
+///
+/// One function for both ends, because a leg has two: the monkey peels off the
+/// spot it left over the first `approach`, walks the middle on the corridor
+/// offsets, and closes on the spot it is bound for over the last `approach`.
+/// Whichever weight is higher is the one that names a spot, so the two can
+/// never pull against each other: on a leg shorter than two approaches they
+/// hand straight over at the middle, and a monkey crosses from one spot to the
+/// next with no corridor in between.
+fn travel_ring(progress: f64, approach: f64) -> (f32, f64) {
+    let leaving = 1.0 - ease((progress / approach) as f32);
+    let arriving = ease(((progress - (1.0 - approach)) / approach) as f32);
+    if arriving >= leaving {
+        (arriving, 1.0)
+    } else {
+        (leaving, 0.0)
+    }
 }
 
 /// Where a monkey is drawn, given only where its cycle has it.
@@ -639,35 +731,50 @@ struct Phase {
     fraction: f64,
     /// Which way it is facing.
     outbound: bool,
-    /// How far between the walking offsets and the standing ring.
+    /// How far between the walking offsets and the standing spot.
     ring_weight: f32,
+    /// Which end of the route that spot is measured at: 0 for the bins, 1 for
+    /// the grove.
+    ring_end: f64,
 }
 
 impl Phase {
-    fn of(segment: Segment, progress: f64) -> Self {
+    /// `approach` is how much of this leg the walk spends closing on a spot, as
+    /// a fraction of it: see [`APPROACH_METRES`].
+    fn of(segment: Segment, progress: f64, approach: f64) -> Self {
         // The economy decides the progress and the map decides where that is: a
         // monkey advances by the shared, dimensionless segment fraction, so its
         // offsets change how fast it *appears* to move and never how long its
         // cycle takes.
         //
-        // Arriving segments ease onto the ring, departing segments ease off it,
-        // and the segment that only ever stands sits on it - so every boundary
-        // hands over at the weight the next segment starts from, which is what
-        // `a_whole_cycle_is_drawn_without_a_single_jump` walks end to end.
-        let settling = settle_weight(progress as f32);
-        let (fraction, outbound, ring_weight) = match segment {
-            Segment::ToGrove => (progress, true, 1.0 - settling),
-            Segment::Pick => (1.0, true, settling),
-            Segment::ToDepot => (1.0 - progress, false, 1.0 - settling),
-            // Unloading and then eating both happen at the stall, so the monkey
-            // stays put and keeps facing it.
-            Segment::Unload => (0.0, false, settling),
-            Segment::Snack => (0.0, false, 1.0),
+        // A travelling segment leaves one spot and closes on the next; the
+        // three standing segments are *on* a spot throughout. So every boundary
+        // hands over at weight 1, which is what
+        // `a_whole_cycle_is_drawn_without_a_single_jump` walks end to end - and
+        // a monkey standing still now never moves at all, where it used to
+        // spend the first third of `Pick` and `Unload` sidestepping.
+        let (fraction, outbound, ring_weight, ring_end) = match segment {
+            Segment::ToGrove => {
+                let (weight, end) = travel_ring(progress, approach);
+                (progress, true, weight, end)
+            }
+            Segment::Pick => (1.0, true, 1.0, 1.0),
+            // The walk home runs from 1 back to 0, so its far end is the grove
+            // and the end it closes on is the bins.
+            Segment::ToDepot => {
+                let (weight, end) = travel_ring(progress, approach);
+                (1.0 - progress, false, weight, 1.0 - end)
+            }
+            // Unloading and then eating both happen at the bins, so the monkey
+            // stays put and keeps facing them.
+            Segment::Unload => (0.0, false, 1.0, 0.0),
+            Segment::Snack => (0.0, false, 1.0, 0.0),
         };
         Self {
             fraction,
             outbound,
             ring_weight,
+            ring_end,
         }
     }
 }
@@ -737,17 +844,21 @@ pub fn position_workers(
     multipliers: Res<Multipliers>,
     mut workers: Query<WorkerView, With<Worker>>,
 ) {
+    let approach = approach_fraction(&route.0);
     for (entity, cycle, lane, hired, mut transform, mut sprite, mut playing) in &mut workers {
         let progress = cycle.segment_fraction(CycleSpec::WORKER, *multipliers);
         let Phase {
             fraction,
             outbound,
             ring_weight,
-        } = Phase::of(cycle.segment(), progress);
+            ring_end,
+        } = Phase::of(cycle.segment(), progress, approach);
 
         // Walking and standing are two different shapes, blended rather than
-        // switched between. See `stand_point`.
-        let (mut point, along) = stand_point(&village, &route.0, fraction, *lane, ring_weight);
+        // switched between, and the blend is spent *walking in* rather than on
+        // arrival. See `stand_point`.
+        let (mut point, along) =
+            stand_point(&village, &route.0, fraction, *lane, ring_weight, ring_end);
         let travel = if outbound { along } else { -along };
         let mut facing_right = isometric::project(travel).x >= 0.0;
         // A fresh hire walks out of the bins - the treehouse, which is where
@@ -1207,6 +1318,136 @@ mod tests {
         );
     }
 
+    /// Where a monkey is drawn, from segment and progress alone.
+    fn drawn_at(route: &Route, lane: Lane, segment: Segment, progress: f64) -> Vec2 {
+        let phase = Phase::of(segment, progress, approach_fraction(route));
+        stand_point(
+            village(),
+            route,
+            phase.fraction,
+            lane,
+            phase.ring_weight,
+            phase.ring_end,
+        )
+        .0
+    }
+
+    #[test]
+    fn a_monkey_arrives_on_its_spot_rather_than_sliding_onto_it() {
+        // D31's whole point. A monkey used to reach the end of the route and
+        // *then* step aside onto the ring, spending the first third of `Pick`
+        // and of `Unload` walking sideways - at the two moments in the cycle
+        // the player is actually watching. It now picks the spot before it
+        // leaves and closes on it while it walks, so the three standing
+        // segments are standing still.
+        let route = WorkedRoute::start().0;
+        let depot = Vec2::new(route.sample(0.0).at.x as f32, route.sample(0.0).at.y as f32);
+        let grove = Vec2::new(route.sample(1.0).at.x as f32, route.sample(1.0).at.y as f32);
+        for index in 0..40u32 {
+            let lane = Lane(index);
+            // The spot is a bearing and a radius the hire index alone decides,
+            // so it is known before the monkey sets out.
+            let at_bins = depot + lane.spot();
+            let at_grove = grove + lane.spot();
+
+            // Every standing segment is spent on that spot, from its first
+            // frame to its last, without moving a millimetre.
+            for (segment, spot) in [
+                (Segment::Unload, at_bins),
+                (Segment::Snack, at_bins),
+                (Segment::Pick, at_grove),
+            ] {
+                for step in 0..=20 {
+                    let at = drawn_at(&route, lane, segment, f64::from(step) / 20.0);
+                    assert!(
+                        at.distance(spot) < 1e-3,
+                        "worker {index} is {} m off its spot {step}/20 through {segment:?}",
+                        at.distance(spot)
+                    );
+                }
+            }
+
+            // And the walks hand over onto it exactly, at both ends and in both
+            // directions: no jump at a boundary, and no step aside after one.
+            assert!(drawn_at(&route, lane, Segment::ToGrove, 0.0).distance(at_bins) < 1e-3);
+            assert!(drawn_at(&route, lane, Segment::ToGrove, 1.0).distance(at_grove) < 1e-3);
+            assert!(drawn_at(&route, lane, Segment::ToDepot, 0.0).distance(at_grove) < 1e-3);
+            assert!(drawn_at(&route, lane, Segment::ToDepot, 1.0).distance(at_bins) < 1e-3);
+        }
+    }
+
+    #[test]
+    fn the_approach_is_walked_rather_than_sidestepped() {
+        // The spot is up to `RING_OUTER` off the route, and that has to be
+        // covered *while walking forward*, not as a lateral step. Measured as
+        // the share of each frame's movement that is across the route rather
+        // than along it: at the very end of the approach a monkey is settling
+        // onto a point, so what is asserted is the whole approach's budget.
+        let route = WorkedRoute::start().0;
+        let end = Vec2::new(route.sample(0.0).at.x as f32, route.sample(0.0).at.y as f32);
+        let towards = Vec2::new(route.sample(1.0).at.x as f32, route.sample(1.0).at.y as f32) - end;
+        let along = towards.normalize();
+        let across = Vec2::new(-along.y, along.x);
+        for index in 0..40u32 {
+            let lane = Lane(index);
+            let (mut forward, mut sideways) = (0.0f32, 0.0f32);
+            let mut previous = drawn_at(&route, lane, Segment::ToDepot, 0.5);
+            for step in 51..=100 {
+                let at = drawn_at(&route, lane, Segment::ToDepot, f64::from(step) / 100.0);
+                let step = at - previous;
+                forward += step.dot(-along);
+                sideways += step.dot(across).abs();
+                previous = at;
+            }
+            assert!(
+                sideways < forward * 0.5,
+                "worker {index} covers {sideways} m across the route against {forward} m \
+                 along it on its way in: it is sliding, not walking"
+            );
+            assert!(forward > 0.0, "worker {index} walks backwards to the bins");
+        }
+    }
+
+    #[test]
+    fn an_approach_can_never_outrun_the_leg_it_is_spent_on() {
+        // Leaving one spot and closing on the next are the same ramp at either
+        // end of a leg, and on a short enough walk they would overlap and fight
+        // - the weight would fall towards the spot behind while rising towards
+        // the spot ahead, and the monkey would be drawn somewhere neither.
+        const STEPS: u32 = 10_000;
+        for approach in [0.05, 0.2, 0.5] {
+            let mut previous = travel_ring(0.0, approach);
+            let mut lowest = previous.0;
+            assert_eq!(previous.0, 1.0, "a leg starts on the spot it is leaving");
+            for step in 1..=STEPS {
+                let now = travel_ring(f64::from(step) / f64::from(STEPS), approach);
+                // The two ramps never overlap: at any point one of them is the
+                // whole weight and the other is nothing, so the weight names
+                // exactly one spot and reaches it without ever being pulled
+                // towards the other.
+                let (leaving, arriving) = (
+                    1.0 - ease((f64::from(step) / f64::from(STEPS) / approach) as f32),
+                    ease(
+                        ((f64::from(step) / f64::from(STEPS) - (1.0 - approach)) / approach) as f32,
+                    ),
+                );
+                assert!(leaving <= 1e-6 || arriving <= 1e-6, "the two ramps overlap");
+                // And it is continuous as it hands over: a jump here is a jump
+                // on the board, on every monkey, at the same moment.
+                assert!(
+                    (now.0 - previous.0).abs() < 0.01,
+                    "the weight jumps from {} to {} at {step}",
+                    previous.0,
+                    now.0
+                );
+                lowest = lowest.min(now.0);
+                previous = now;
+            }
+            assert_eq!(previous.0, 1.0, "a leg ends on the spot it closed on");
+            assert_eq!(lowest, 0.0, "the middle of the leg is walked, not drifted");
+        }
+    }
+
     #[test]
     fn a_whole_cycle_is_drawn_without_a_single_jump() {
         // The continuity bar used to stop at the edge of the walking segments,
@@ -1240,9 +1481,21 @@ mod tests {
             for (segment, seconds) in cycle {
                 let steps = (FRAMES as f64 * seconds / CYCLE_SECONDS) as u32;
                 for step in 0..steps {
-                    let phase = Phase::of(segment, f64::from(step) / f64::from(steps));
+                    let phase = Phase::of(
+                        segment,
+                        f64::from(step) / f64::from(steps),
+                        approach_fraction(&route),
+                    );
                     drawn.push(
-                        stand_point(village(), &route, phase.fraction, lane, phase.ring_weight).0,
+                        stand_point(
+                            village(),
+                            &route,
+                            phase.fraction,
+                            lane,
+                            phase.ring_weight,
+                            phase.ring_end,
+                        )
+                        .0,
                     );
                 }
             }
@@ -1359,7 +1612,7 @@ mod tests {
 
         let mut used = [false; 8];
         for index in 0..60u32 {
-            let (at, _) = stand_point(village(), &route, 0.0, Lane(index), 1.0);
+            let (at, _) = stand_point(village(), &route, 0.0, Lane(index), 1.0, 0.0);
             let offset = at - depot;
             let out = offset.length();
             assert!(
@@ -1393,7 +1646,7 @@ mod tests {
         // the gap is where it is.
         let leaning: f32 = (0..60)
             .map(|index| {
-                let (at, _) = stand_point(village(), &route, 0.0, Lane(index), 1.0);
+                let (at, _) = stand_point(village(), &route, 0.0, Lane(index), 1.0, 0.0);
                 isometric::depth(at - depot)
             })
             .sum();
@@ -1425,6 +1678,56 @@ mod tests {
             near_side(&WorkedRoute::start().0) * near_side(&bent_route()),
             -1.0
         );
+    }
+
+    #[test]
+    fn a_cart_leaves_the_route_for_its_bay_rather_than_unloading_on_it() {
+        // A cart carries a hundred bananas and spends a hundred seconds giving
+        // them up, and it used to do that from a dwell point on the walk - a
+        // box the length of three monkeys parked across the queue for twice as
+        // long as a harvester's whole trip. Since D31 the freight has its own
+        // bins to park around (see `SceneLayout::cart_park`), so the two ends of
+        // the cycle are two places.
+        let route = WorkedRoute::start().0;
+        let approach = approach_fraction(&route);
+        let bay = (0.1, 0.9);
+        // Parked for the whole of both standing segments, and for the wait
+        // before it is crewed: the box fills, empties and boards in its bay.
+        for segment in [Segment::Unload, Segment::Snack] {
+            for step in 0..=10 {
+                let (_, parked) = cart_phase(segment, f64::from(step) / 10.0, false, bay, approach);
+                assert_eq!(parked, 1.0, "{segment:?} is spent off the bay");
+            }
+        }
+        assert_eq!(
+            cart_phase(Segment::ToGrove, 0.0, true, bay, approach).1,
+            1.0
+        );
+        // And clear of it for the whole of the picking at the far end, which is
+        // the one dwell that still happens on the route.
+        assert_eq!(cart_phase(Segment::Pick, 0.5, false, bay, approach).1, 0.0);
+        // The two legs hand over at the bay exactly, in both directions, so
+        // there is no jump at a boundary.
+        assert_eq!(
+            cart_phase(Segment::ToDepot, 1.0, false, bay, approach).1,
+            1.0
+        );
+        assert_eq!(
+            cart_phase(Segment::ToGrove, 0.0, false, bay, approach).1,
+            1.0
+        );
+        assert_eq!(
+            cart_phase(Segment::ToDepot, 0.0, false, bay, approach).1,
+            0.0
+        );
+        assert_eq!(
+            cart_phase(Segment::ToGrove, 1.0, false, bay, approach).1,
+            0.0
+        );
+        // And the route fraction still runs bay to bay, so the drive itself is
+        // unchanged: it is only the last stretch of it that peels off.
+        assert!((cart_phase(Segment::ToDepot, 1.0, false, bay, approach).0 - 0.1).abs() < 1e-12);
+        assert!((cart_phase(Segment::ToGrove, 1.0, false, bay, approach).0 - 0.9).abs() < 1e-12);
     }
 
     #[test]
@@ -1757,6 +2060,45 @@ pub fn launch_crewed_carts(
     }
 }
 
+/// Where a cart is along the route, and how far into its bay at the cart bins.
+///
+/// The bay is a *place*, not an offset along the walk. A cart used to unload
+/// from a dwell point on the route itself, which put a vehicle the length of
+/// three monkeys across the arriving queue for the hundred seconds an unload
+/// takes; since D31 it leaves the route over the last stretch of the way home
+/// and parks around the carts' own bins, the same way a harvester closes on its
+/// own spot.
+fn cart_phase(
+    segment: Segment,
+    progress: f64,
+    boarding: bool,
+    (stall, grove): (f64, f64),
+    approach: f64,
+) -> (f64, f32) {
+    if boarding {
+        // An unlaunched cart waits in its bay, visibly filling up: it is being
+        // crewed for a trip it has not left on.
+        return (stall, 1.0);
+    }
+    match segment {
+        Segment::ToGrove => {
+            let (weight, end) = travel_ring(progress, approach);
+            // `travel_ring` names the end of the *leg*; on the way out the bay
+            // is the end it is leaving, on the way home the end it closes on.
+            (
+                stall + (grove - stall) * progress,
+                weight * (1.0 - end) as f32,
+            )
+        }
+        Segment::Pick => (grove, 0.0),
+        Segment::ToDepot => {
+            let (weight, end) = travel_ring(progress, approach);
+            (grove + (stall - grove) * progress, weight * end as f32)
+        }
+        Segment::Unload | Segment::Snack => (stall, 1.0),
+    }
+}
+
 /// Every cart on the route, and whether it has launched.
 type CartAvatarQuery<'w, 's> = Query<
     'w,
@@ -1765,6 +2107,7 @@ type CartAvatarQuery<'w, 's> = Query<
         Entity,
         &'static HarvestCycle,
         Option<&'static Boarding>,
+        &'static CartIndex,
         &'static mut Transform,
     ),
     (With<Cart>, Without<CartLoad>),
@@ -1792,29 +2135,33 @@ pub fn position_carts(
 
     let mut carried: Vec<(Entity, f32)> = Vec::new();
 
-    for (entity, cycle, boarding, mut transform) in &mut carts {
+    let approach = approach_fraction(&route.0);
+    for (entity, cycle, boarding, index, mut transform) in &mut carts {
         let progress = cycle.segment_fraction(CycleSpec::CART, *multipliers);
-        // Its own bay at each end, on the *inside* of the route, so the cart
-        // never parks on the unloading queue and never reverses into the palm.
+        // Its own bay at the grove, on the *inside* of the route, so the cart
+        // never reverses into the palm the harvesters are working.
         let dwell = f64::from(layout.cart_offset()) / route.0.length();
         let (grove, stall) = (1.0 - dwell, dwell);
-        let fraction = if boarding.is_some() {
-            // An unlaunched cart waits at the depot, visibly filling up.
-            stall
-        } else {
-            match cycle.segment() {
-                Segment::ToGrove => stall + (grove - stall) * progress,
-                Segment::Pick => grove,
-                Segment::ToDepot => grove + (stall - grove) * progress,
-                Segment::Unload | Segment::Snack => stall,
-            }
-        };
+        let (fraction, parked) = cart_phase(
+            cycle.segment(),
+            progress,
+            boarding.is_some(),
+            (stall, grove),
+            approach,
+        );
 
         // A vehicle draws in *front* of the walkers rather than beside them:
         // workers pass behind it instead of through it. That is one lane's
         // worth of ground towards the viewer, which the depth rule then
         // handles on its own.
-        let (point, _) = cart_point(&village, &route.0, fraction);
+        //
+        // Except at the depot end, where it leaves the route altogether for its
+        // bay at the cart bins (D31), closing on it over the same last stretch
+        // of the walk a harvester closes on its own spot. A cart used to run
+        // the route to a dwell offset and unload from there, parked across the
+        // queue for the hundred seconds an unload takes.
+        let (on_route, _) = cart_point(&village, &route.0, fraction);
+        let point = on_route.lerp(layout.cart_park(index.0), parked);
         transform.translation = layout
             .board_snapped(point, CART_BOX_TEXELS.y * 0.5 * scale)
             .extend(isometric::stand_z(point, isometric::NUDGE_STEP));

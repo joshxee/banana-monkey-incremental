@@ -1125,6 +1125,97 @@ from behind where the house now stands to beside the bins, and the
 technologist a step away from the home tree, so that every other viewport still
 opens with the whole crew in view.
 
+**D31 — Offloading is a place, and the monkeys who do it go to it.**
+*(Owner's call, after D30.)*
+
+D30 put the bins on the delivery point and left three things wrong with what
+happens there. The bins were *inside the house's sprite*, so they sorted at the
+house's depth and a monkey that had walked round to the front of them was drawn
+behind them. Every monkey walked the route to its end and then **stepped aside**
+into the crowd, six metres of sidestep spent in the first third of `Pick` and
+`Unload` — at the two moments in the cycle the player is watching. And the
+Unpacker, the one support role whose job is the offloading itself, stood still
+beside a station while it happened.
+
+*The bins are their own sprite.* `town-center-bins.png` carries the three
+collection boxes, the fruit in them and the bunch fallen against them, on the
+house's own canvas and the house's own ground anchor, so drawn on the delivery
+point they land where the artist put them to the pixel. What it buys is that the
+bins are a **place**: they sort at the ground they stand on, so the queue in
+front of them is in front of them. `the_treehouse_split_draws_exactly_the_artists_picture`
+now composites three sprites — bins over structure over shade — and still has to
+be the master, pixel for pixel; `the_bins_are_a_sprite_of_their_own` holds that
+nothing of the house came across, by colour.
+
+*The carts get bins of their own, when the research lands.* A cart is a hundred
+bananas a trip against a harvester's five, and it used to give them up from a
+dwell point *on the walk*: a box the length of three monkeys parked across the
+arriving queue for the hundred seconds an unload takes. A second set of bins goes
+up the moment the Technologist's first level lands and the Cart row unlocks
+(`CART_TECH_REQUIREMENT`), on the open grass in front of the depot and to its
+right — the one quarter of the village with nothing in it, the house and the walk
+holding the upper left and the kitchen and the research desk the left. Carts now
+leave the route over the last stretch of the way home and draw up in a rank
+across the front of those bins. The unlock therefore has something to *show* for
+itself, which D22's counter never did.
+
+The rank is a line along the ground's x axis rather than across the screen, and
+that is not arbitrary: laid out across the screen every cart sits on one line of
+screen y, and four boxes wider than the gap between them read as one long brown
+bar. Stepping along a ground axis moves each bay sideways *and* a little nearer
+the viewer, so the depth rule sorts them front to back and they read as a rank.
+The standoff in front of the bins is set by the one thing that would otherwise go
+wrong — a rank parked a body's length away simply erases the boxes it is
+unloading into.
+
+*Every actor picks its spot before it sets out.* A harvester's standing place was
+always a function of its hire index alone (`Lane::spot`); what changed is when it
+is used. The walk now closes on that spot over its last ten metres —
+`APPROACH_METRES`, twice the ring's outer radius, so the sideways part of the
+approach is at most half the forward part and it still reads as walking — and
+peels off the spot behind it over the first ten. `Pick`, `Unload` and `Snack` are
+then spent standing perfectly still, where they used to open with a sidestep.
+Carts do the same thing into their bays. Nothing reserves a spot or a bay: two
+monkeys can pick the same one and two carts can share a bay, which is the owner's
+call — a claim would need releasing when a monkey boards a cart or the run
+restarts, for a crowd the player reads as a crowd either way.
+
+*The Unpacker is a squirrel monkey courier.* `assets/Monkey/Squirrel Unpacker` is
+a smaller animal drawn in eight screen bearings with an empty dart, a loaded
+carry and an idle, against the same 64 × 64 cell and ground line as the spider
+worker. One is drawn per Unpacker hired, and each is placed **on the line between
+a harvester that is unloading and the bins**, running out empty and back loaded.
+Nothing about it reaches the economy: `M_unpack` shortens `Segment::Unload`
+exactly as it did, and the shuttle is decoration over an unload whose length the
+simulation has already decided. It reads the harvesters' *drawn* positions, so it
+runs in `Update` after `position_workers` — and a courier deliberately works
+**inside** the unloading ring, which D30 forbids a support station, because a
+squirrel monkey among spider monkeys cannot be mistaken for one of the queue.
+Couriers are capped at `COURIER_LIMIT` rather than `AVATARS_PER_ROLE`: what
+bounds them is the lane they run, not the ground beside a station.
+
+Limits, again measured. **The carts' corner is not in the opening frame.** The
+opening view is centred on the treehouse (D30), which leaves about ninety pixels
+of board below the delivery point on a desktop and none at all on a phone — and
+the rank is in front of the depot by construction, since carts have to stand
+between the viewer and the boxes they are unloading into. So what is held is that
+it is a *short pan*: half a screenful, the same pan D30 already spends on the
+home tree on a landscape phone (`the_carts_corner_is_a_short_pan_from_the_opening_view`).
+The alternative was the ground level with the depot on its right, which is inside
+the canopy of the jungle plant at the village's east edge — the bins would have
+been drawn behind a tree. `the_cart_park_stands_clear_of_the_village` holds the
+clearances that keep the pan short and the corner clear of the crowd, the walk,
+the home tree and the two support roles that still stand at stations.
+
+The Unpacker's station did not move, but **nothing of the Unpacker's stands
+there** any more: it is now only where the `xN` badge hangs, which is why it is
+the one station the carts' bins are allowed to stand near. A courier with no
+harvester to help waits at the bins rather than inventing work, so at low worker
+counts the squirrels are still most of the time. And the fallen bunch beside the
+third bin came across with the bins rather than staying with the house: it
+overlaps a bin's front corner, and left behind it bit a notch out of the box the
+moment the two were drawn apart.
+
 ---
 
 ## 4. Data Model

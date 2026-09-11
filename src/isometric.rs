@@ -15,12 +15,15 @@
 
 use bevy::{
     asset::RenderAssetUsages,
+    ecs::relationship::RelatedSpawnerCommands,
     mesh::{Indices, PrimitiveTopology},
     prelude::*,
 };
 
 use crate::{
     art::{self, Art},
+    domain::{CART_TECH_REQUIREMENT, Research},
+    game::SceneLayout,
     map::{Map, TILE_METRES, Terrain, Tile},
 };
 
@@ -170,6 +173,19 @@ pub(crate) const DEPOT_REACH_METRES: f32 = (DEPOT_EDGE_REACH as f32 + 0.5) * MET
 
 #[derive(Component)]
 pub(crate) struct WorldRoot;
+
+/// A set of banana bins standing on the ground.
+///
+/// Two of them exist at most: the harvesters' set, which is the delivery point
+/// and is up from the first frame, and the carts' set, which goes up when the
+/// research that unlocks the Cart lands (D31). The marker carries which, so
+/// `sync_cart_bins` can put the second set up and take it down again without
+/// touching the first.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Bins {
+    Harvest,
+    Cart,
+}
 
 /// Project a ground position, in metres, onto the isometric plane.
 ///
@@ -487,6 +503,13 @@ pub(crate) fn spawn_world(
                 ));
             }
 
+            // The harvesters' bins, which are the delivery point itself. Drawn
+            // apart from the house they came out of (D31) for one reason: they
+            // sort at the ground *they* stand on rather than at the house's
+            // depth, so a monkey that has walked round to the front of them is
+            // drawn in front of them.
+            spawn_bins(root, art, Bins::Harvest, tile_centre(map.town_centre()));
+
             // The treehouse's cast shade lies on the ground, so it is drawn
             // there: over the terrain,
             // under the depot glow and the crowd's shadows. Drawn with the
@@ -501,6 +524,55 @@ pub(crate) fn spawn_world(
                 Transform::from_xyz(anchor.x, anchor.y, TREEHOUSE_GROUND_Z),
             ));
         });
+}
+
+/// One set of bins, standing at `at`.
+fn spawn_bins(commands: &mut RelatedSpawnerCommands<ChildOf>, art: &Art, which: Bins, at: Vec2) {
+    let anchor = project(at);
+    let (sprite, pivot) = art.standing(&art.banana_bins, art::BANANA_BINS);
+    commands.spawn((
+        which,
+        sprite,
+        pivot,
+        Transform::from_xyz(anchor.x, anchor.y, stand_z(at, 0.0)),
+    ));
+}
+
+/// Put the carts' bins up when the Cart's research lands, and take them down
+/// again if a restart rolls the research back.
+///
+/// A reconcile rather than a one-shot on the purchase, for the reason every
+/// other spawner here is one: a save loaded past the unlock has to open with the
+/// bins already standing, and `Restarted` has to be able to remove them without
+/// a second code path.
+pub(crate) fn sync_cart_bins(
+    mut commands: Commands,
+    art: Res<Art>,
+    layout: Res<SceneLayout>,
+    research: Res<Research>,
+    root: Query<Entity, With<WorldRoot>>,
+    existing: Query<(Entity, &Bins)>,
+) {
+    let wanted = research.level() >= CART_TECH_REQUIREMENT;
+    let standing = existing.iter().any(|(_, bins)| *bins == Bins::Cart);
+    if wanted == standing {
+        return;
+    }
+    if !wanted {
+        for (entity, bins) in &existing {
+            if *bins == Bins::Cart {
+                commands.entity(entity).despawn();
+            }
+        }
+        return;
+    }
+    let Ok(root) = root.single() else {
+        return;
+    };
+    let at = layout.cart_bins();
+    commands
+        .entity(root)
+        .with_children(|root| spawn_bins(root, &art, Bins::Cart, at));
 }
 
 #[cfg(test)]

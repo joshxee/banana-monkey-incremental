@@ -69,8 +69,24 @@ When `bananaFlipX` is true (NW/W/SW), mirror the transfer image horizontally
 and use its mirrored origin (13, 10), keeping the supplied socket unchanged.
 The verifier checks exact standalone-fruit registration in every loaded frame.
 
-These are asset exports and a review demonstration. Runtime movement,
-unpacker assignment, economy events and box occlusion are not integrated.
+## In the game
+
+The game draws one of these per Unpacker hired, up to `support::COURIER_LIMIT`,
+and places it on the line between a harvester that is unloading and the town
+centre's banana bins: out empty on `dart_`, back loaded on `carry_`, and `idle_`
+when there is nobody at the bins to help. The row is picked from the direction
+it is actually drawn moving, projected to the screen, so the compass bearings
+here are the bearings the player sees. `dart_` and `carry_` are advanced by the
+distance drawn rather than by the clock, at the manifest's own 60 native pixels
+per loop, so the feet grip the ground at any speed the board is zoomed to.
+
+`take_` and `drop_` are not played: they are one-shot clips with their own
+planted feet, and playing them needs per-courier playback state and a rule for
+interrupting them. The banana in the courier's hands is what says which leg of
+the run it is on. See D31 in `docs/banana-architecture-v2.md`.
+
+The sheets themselves are asset exports and a review demonstration; economy
+events and box occlusion are not integrated.
 
 ## Regeneration and verification
 

@@ -315,6 +315,27 @@ pub fn all() -> Vec<Scenario> {
             placement: Placement::Restored { seed: Some(37) },
         },
         Scenario {
+            name: "offload",
+            summary: "the depot doing its job (D31): watch twelve monkeys arrive over a \
+                      minute. Each should walk *into* its place in the ring and stop \
+                      dead - any sidestep after it arrives is the fail - while six \
+                      squirrel monkeys run between whoever is unloading and the bins, \
+                      and three carts stand in a rank at their own bins to the front \
+                      right. First arrivals pay nothing",
+            run: Seed {
+                bananas: 900.0,
+                workers: 18,
+                chefs: 2,
+                unpackers: 6,
+                technologists: 1,
+                research: 200.0,
+                carts: 3,
+                crewed: 9,
+            }
+            .run(),
+            placement: Placement::Restored { seed: Some(53) },
+        },
+        Scenario {
             name: "rich",
             summary: "every button affordable and nothing hired: for shop and UI work, and \
                       for browser tests that must not grind",

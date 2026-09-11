@@ -128,11 +128,38 @@ pub(crate) const TOWN_CENTRE: Cell = Cell::new((672.0, 704.0), (330.0, 440.0)).s
 /// the three at its bottom right, on the ground. Monkeys unload *here*, so
 /// this is the point the building is placed by (D30).
 pub(crate) const TOWN_CENTRE_BINS: Vec2 = Vec2::new(375.0, 555.0);
+/// The bins themselves, lifted out of the treehouse into a sprite of their own
+/// (D31).
+///
+/// The same canvas as the house and the same ground anchor, which is what makes
+/// the lift free: drawn on the delivery point the bins land exactly where the
+/// artist put them, to the pixel, and
+/// `the_treehouse_split_draws_exactly_the_artists_picture` holds that. What it
+/// buys is that the bins are now a *place* rather than part of a picture - they
+/// sort at the ground they stand on rather than at the house's depth, and a
+/// second set can be stood anywhere on the board by the same anchor when the
+/// carts arrive.
+pub(crate) const BANANA_BINS: Cell = Cell::new((672.0, 704.0), (375.0, 555.0)).shrunk(0.5);
+/// How far the bins' art reaches to either side of their anchor, in art pixels.
+///
+/// Measured off the sprite by `the_bins_are_a_sprite_of_their_own`, not guessed:
+/// what parks around the bins is placed against this, so a cart stands clear of
+/// the boxes it is unloading into rather than inside one.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const BINS_HALF_WIDTH: f32 = 75.0;
 /// The middle of the treehouse's opaque art, which the opening view centres
 /// on: its bounds are (63, 38) to (574, 606).
 pub(crate) const TOWN_CENTRE_MIDDLE: Vec2 = Vec2::new(318.5, 322.0);
 /// One frame of the spider worker (see `assets/Monkey/Spider Worker`).
 pub(crate) const WORKER: Cell = Cell::new((64.0, 64.0), (32.0, 56.0));
+/// And of the squirrel monkey courier (see `assets/Monkey/Squirrel Unpacker`).
+///
+/// The same 64 x 64 cell and the same ground anchor as the spider worker, which
+/// is the artist's doing rather than a coincidence: the two were drawn against
+/// each other, and the squirrel is smaller *within* the cell - a 30-pixel body
+/// against the worker's 44 - so it needs no scale of its own to read as the
+/// smaller animal.
+pub(crate) const SQUIRREL: Cell = Cell::new((64.0, 64.0), (32.0, 56.0));
 
 /// The top row of the banana plant's crown, in both of its states: how far up
 /// the plant a press still means the plant. Measured off the art by
@@ -247,6 +274,68 @@ impl Clip {
     }
 }
 
+/// What a squirrel monkey courier is doing.
+///
+/// Three of the artist's five clips. `take` and `drop` are one-shot
+/// interactions with their own feet planted, and playing them needs per-courier
+/// playback state and a rule for interrupting them; the three loops carry the
+/// reading the game needs - waiting, fetching, delivering - on their own, and
+/// the banana in its hands is what says which leg it is on.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Courier {
+    Idle,
+    Dart,
+    Carry,
+}
+
+/// Directions each courier sheet is drawn in: N, NE, E, SE, S, SW, W, NW, down
+/// the rows, in screen compass bearings.
+pub(crate) const COURIER_HEADINGS: u32 = 8;
+/// Frames across an idle row, and across a travelling one.
+const COURIER_IDLE_FRAMES: u32 = 4;
+const COURIER_TRAVEL_FRAMES: u32 = 8;
+/// How long each idle frame is held, in seconds (the manifest's 300 ms).
+const COURIER_IDLE_HOLD: f32 = 0.300;
+
+/// How far one loop of the courier's dart carries it, in world texels along the
+/// ground.
+///
+/// The manifest's own travel: eight frames of 50 ms at about 150 native pixels
+/// a second is 60 art pixels of ground per loop. Driven by distance drawn, like
+/// the worker's walk, so the squirrel's feet grip the ground whatever speed the
+/// shuttle is running at - and the shuttle's speed is set by how fast the
+/// harvester it is helping unloads, which every Chef and Unpacker changes.
+pub(crate) const COURIER_STRIDE_TEXELS: f32 = 60.0 * ART_SCALE;
+
+impl Courier {
+    pub(crate) fn frames(self) -> u32 {
+        match self {
+            Self::Idle => COURIER_IDLE_FRAMES,
+            Self::Dart | Self::Carry => COURIER_TRAVEL_FRAMES,
+        }
+    }
+
+    /// How long an idle frame is held, in seconds.
+    pub(crate) fn idle_hold() -> f32 {
+        COURIER_IDLE_HOLD
+    }
+
+    /// Which row of the sheet a screen-space heading is drawn on.
+    ///
+    /// The rows run N, NE, E, SE, S, SW, W, NW, so this is a bearing clockwise
+    /// from up-screen in eighths of a turn. A heading of nothing keeps the row
+    /// it was given, which is what stops a courier spinning through all eight
+    /// rows in the frame it turns around.
+    pub(crate) fn heading(travel: Vec2, previous: u32) -> u32 {
+        if travel.length_squared() <= f32::EPSILON {
+            return previous % COURIER_HEADINGS;
+        }
+        let clockwise = std::f32::consts::FRAC_PI_2 - travel.y.atan2(travel.x);
+        let eighth = clockwise / (std::f32::consts::TAU / COURIER_HEADINGS as f32);
+        (eighth.round().rem_euclid(COURIER_HEADINGS as f32)) as u32
+    }
+}
+
 /// Every drawn asset, loaded once.
 ///
 /// Handles rather than images: `AssetServer::load` is cached by path, so the
@@ -258,6 +347,9 @@ pub(crate) struct Art {
     /// And the shade it casts on the ground, which is drawn flat, under the
     /// depot glow and the crowd's shadows, rather than with the house (D30).
     pub(crate) town_centre_ground: Handle<Image>,
+    /// And the three collection bins, which stand on the ground in front of it
+    /// and sort there rather than at the house's depth (D31).
+    pub(crate) banana_bins: Handle<Image>,
     /// The three jungle plants, in the order a scatter picks between them.
     pub(crate) jungle: [Handle<Image>; 3],
     /// The banana plant with its bunch still on: the node workers walk to.
@@ -271,6 +363,11 @@ pub(crate) struct Art {
     idle_layout: Handle<TextureAtlasLayout>,
     banana: Handle<Image>,
     banana_layout: Handle<TextureAtlasLayout>,
+    squirrel_idle: Handle<Image>,
+    squirrel_dart: Handle<Image>,
+    squirrel_carry: Handle<Image>,
+    squirrel_idle_layout: Handle<TextureAtlasLayout>,
+    squirrel_travel_layout: Handle<TextureAtlasLayout>,
     /// A flat ellipse, generated rather than drawn: see [`Art::shadow`].
     shadow: Handle<Image>,
 }
@@ -281,13 +378,17 @@ impl Art {
         layouts: &mut Assets<TextureAtlasLayout>,
         images: &mut Assets<Image>,
     ) -> Self {
-        let mut strip = |cell: UVec2, frames: u32| {
-            layouts.add(TextureAtlasLayout::from_grid(cell, frames, 1, None, None))
+        let mut grid = |cell: UVec2, columns: u32, rows: u32| {
+            layouts.add(TextureAtlasLayout::from_grid(
+                cell, columns, rows, None, None,
+            ))
         };
         let worker_cell = WORKER.canvas.as_uvec2();
+        let squirrel_cell = SQUIRREL.canvas.as_uvec2();
         Self {
             town_centre: assets.load("TownCenter/town-center-structure.png"),
             town_centre_ground: assets.load("TownCenter/town-center-ground.png"),
+            banana_bins: assets.load("TownCenter/town-center-bins.png"),
             jungle: [
                 assets.load("Jungle/jungle-broad.png"),
                 assets.load("Jungle/jungle-leaning.png"),
@@ -297,10 +398,15 @@ impl Art {
             banana_harvested: assets.load("Jungle/banana-harvested.png"),
             worker_walk: assets.load("Monkey/Spider Worker/spider_monkey_walk_sheet.png"),
             worker_idle: assets.load("Monkey/Spider Worker/spider_monkey_idle_sheet.png"),
-            walk_layout: strip(worker_cell, WALK_FRAMES),
-            idle_layout: strip(worker_cell, IDLE_FRAMES),
+            walk_layout: grid(worker_cell, WALK_FRAMES, 1),
+            idle_layout: grid(worker_cell, IDLE_FRAMES, 1),
             banana: assets.load("Banana/Banana.png"),
-            banana_layout: strip(UVec2::splat(BANANA_TEXELS as u32), BANANA_FRAMES),
+            banana_layout: grid(UVec2::splat(BANANA_TEXELS as u32), BANANA_FRAMES, 1),
+            squirrel_idle: assets.load("Monkey/Squirrel Unpacker/squirrel-monkey-idle.png"),
+            squirrel_dart: assets.load("Monkey/Squirrel Unpacker/squirrel-monkey-dart.png"),
+            squirrel_carry: assets.load("Monkey/Squirrel Unpacker/squirrel-monkey-carry.png"),
+            squirrel_idle_layout: grid(squirrel_cell, COURIER_IDLE_FRAMES, COURIER_HEADINGS),
+            squirrel_travel_layout: grid(squirrel_cell, COURIER_TRAVEL_FRAMES, COURIER_HEADINGS),
             shadow: images.add(shadow_image()),
         }
     }
@@ -341,6 +447,57 @@ impl Art {
                     // Frozen, and on a different frame per seat, so three
                     // riders are not one monkey drawn three times.
                     index: (seat % Clip::Idle.frames()) as usize,
+                },
+            )
+        }
+    }
+
+    /// The sheet and atlas a courier clip plays out of.
+    pub(crate) fn courier_clip(
+        &self,
+        clip: Courier,
+    ) -> (Handle<Image>, Handle<TextureAtlasLayout>) {
+        match clip {
+            Courier::Idle => (
+                self.squirrel_idle.clone(),
+                self.squirrel_idle_layout.clone(),
+            ),
+            Courier::Dart => (
+                self.squirrel_dart.clone(),
+                self.squirrel_travel_layout.clone(),
+            ),
+            Courier::Carry => (
+                self.squirrel_carry.clone(),
+                self.squirrel_travel_layout.clone(),
+            ),
+        }
+    }
+
+    /// Which cell of a courier sheet a heading and a frame name.
+    ///
+    /// The sheets are a grid rather than a strip - one row per screen bearing -
+    /// so an index is a row times a row length, never a bare frame. Reading one
+    /// as a strip draws a courier heading north-east while it walks south.
+    pub(crate) fn courier_cell(clip: Courier, heading: u32, frame: u32) -> usize {
+        let row = heading % COURIER_HEADINGS;
+        (row * clip.frames() + frame % clip.frames()) as usize
+    }
+
+    /// A squirrel monkey courier, on one frame of one clip, facing one of the
+    /// eight bearings its sheets are drawn in.
+    ///
+    /// No `flip_x`: the artist drew all eight, and the west three already *are*
+    /// the mirrored east three with the anchor kept. Mirroring on top of that
+    /// would face a courier the wrong way on half the board.
+    pub(crate) fn courier(&self, clip: Courier, heading: u32, frame: u32) -> Sprite {
+        let (image, layout) = self.courier_clip(clip);
+        Sprite {
+            custom_size: Some(SQUIRREL.size()),
+            ..Sprite::from_atlas_image(
+                image,
+                TextureAtlas {
+                    layout,
+                    index: Self::courier_cell(clip, heading, frame),
                 },
             )
         }
@@ -461,6 +618,7 @@ mod tests {
             ("TownCenter/town-center.png", TOWN_CENTRE, 1),
             ("TownCenter/town-center-structure.png", TOWN_CENTRE, 1),
             ("TownCenter/town-center-ground.png", TOWN_CENTRE, 1),
+            ("TownCenter/town-center-bins.png", BANANA_BINS, 1),
             (
                 "Monkey/Spider Worker/spider_monkey_walk_sheet.png",
                 WORKER,
@@ -589,6 +747,7 @@ mod tests {
         let whole = png("TownCenter/town-center.png");
         let ground = png("TownCenter/town-center-ground.png");
         let structure = png("TownCenter/town-center-structure.png");
+        let bins = png("TownCenter/town-center-bins.png");
         let mut wrong = 0;
         for at in (0..whole.2.len()).step_by(4) {
             let pixel = |image: &(u32, u32, Vec<u8>)| -> [u8; 4] {
@@ -599,11 +758,14 @@ mod tests {
                     image.2[at + 3],
                 ]
             };
-            let drawn = if pixel(&structure)[3] > 0 {
-                pixel(&structure)
-            } else {
-                pixel(&ground)
-            };
+            // Nearest first: the bins stand in front of the house, the house in
+            // front of its own shade. That is the order the three are drawn in,
+            // and it is the artist's own layer order.
+            let drawn = [&bins, &structure, &ground]
+                .into_iter()
+                .map(pixel)
+                .find(|layer| layer[3] > 0)
+                .unwrap_or([0, 0, 0, 0]);
             let expected = pixel(&whole);
             if (expected[3] > 0 || drawn[3] > 0) && drawn != expected {
                 wrong += 1;
@@ -626,22 +788,142 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_treehouse_fits_the_tightest_safe_area() {
-        // The deviation from the shared scale exists for one reason, so hold
-        // it to that reason: its opaque art, at the zoom floor, fits the
-        // 286-pixel square an 844x390 phone leaves. Raise the scale and this
-        // is what says by how much it now covers the village.
-        let (width, height, data) = png("TownCenter/town-center.png");
+    /// The opaque bounds of a whole PNG: top-left and bottom-right inclusive.
+    fn opaque_bounds((width, height, data): &(u32, u32, Vec<u8>)) -> (UVec2, UVec2) {
         let (mut min, mut max) = (UVec2::MAX, UVec2::ZERO);
-        for y in 0..height {
-            for x in 0..width {
+        for y in 0..*height {
+            for x in 0..*width {
                 if data[((y * width + x) * 4 + 3) as usize] > 0 {
                     min = min.min(UVec2::new(x, y));
                     max = max.max(UVec2::new(x, y));
                 }
             }
         }
+        (min, max)
+    }
+
+    #[test]
+    fn the_bins_are_a_sprite_of_their_own() {
+        // What the lift has to be: the three bins, their fruit and the bunch
+        // fallen against them, and nothing of the house. The house is timber
+        // and foliage - warm, or green - and the bins are cool blue boxes with
+        // gold in them, so a stray beam or root that came across with them
+        // shows up as a colour that has no business in a bin.
+        let bins = png("TownCenter/town-center-bins.png");
+        let (min, max) = opaque_bounds(&bins);
+        assert_eq!((min, max), (UVec2::new(307, 479), UVec2::new(450, 606)));
+        // The anchor is inside those bounds, and the half-width other things
+        // are placed against reaches the far edge of them.
+        assert!(min.as_vec2().cmple(TOWN_CENTRE_BINS).all());
+        assert!(max.as_vec2().cmpge(TOWN_CENTRE_BINS).all());
+        assert_eq!(
+            BINS_HALF_WIDTH,
+            (max.x as f32 - TOWN_CENTRE_BINS.x).max(TOWN_CENTRE_BINS.x - min.x as f32)
+        );
+
+        // Every opaque pixel is a bin colour: the box's four cool blues, the
+        // three yellows of the fruit, or the brown of a bunch's stem.
+        const BIN_COLOURS: [[u8; 3]; 8] = [
+            [0x40, 0x52, 0x73],
+            [0x6c, 0x81, 0xa1],
+            [0x96, 0xa9, 0xc1],
+            [0x30, 0x38, 0x43],
+            [0xde, 0x9f, 0x47],
+            [0xfd, 0xd1, 0x79],
+            [0xfe, 0xe1, 0xb8],
+            [0x73, 0x4c, 0x44],
+        ];
+        let (width, height, data) = &bins;
+        for y in 0..*height {
+            for x in 0..*width {
+                let at = ((y * width + x) * 4) as usize;
+                if data[at + 3] == 0 {
+                    continue;
+                }
+                let rgb = [data[at], data[at + 1], data[at + 2]];
+                assert!(
+                    BIN_COLOURS.contains(&rgb),
+                    "({x}, {y}) is {rgb:?}, which is no part of a bin"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_courier_sheet_is_eight_bearings_of_the_squirrel_monkey() {
+        // The sheets are grids, not strips: one row per screen bearing. A cell
+        // size or a row count that disagrees with the file does not fail, it
+        // draws a courier facing north-east while it walks south.
+        for (path, frames) in [
+            ("Monkey/Squirrel Unpacker/squirrel-monkey-idle.png", 4),
+            ("Monkey/Squirrel Unpacker/squirrel-monkey-dart.png", 8),
+            ("Monkey/Squirrel Unpacker/squirrel-monkey-carry.png", 8),
+        ] {
+            let (width, height, _) = png(path);
+            assert_eq!(width as f32, SQUIRREL.canvas.x * frames as f32, "{path}");
+            assert_eq!(
+                height as f32,
+                SQUIRREL.canvas.y * COURIER_HEADINGS as f32,
+                "{path}"
+            );
+        }
+        // And the courier is the smaller animal at the shared scale: both cells
+        // are 64 x 64 with their ground anchor on the same row, so what says
+        // "smaller" is how much less of the cell the squirrel fills. Its first
+        // cell only - the sheets are grids, and a whole-sheet scan would
+        // measure all eight bearings stacked.
+        let squirrel = png("Monkey/Squirrel Unpacker/squirrel-monkey-idle.png");
+        let top = (0..SQUIRREL.canvas.y as u32)
+            .find(|&y| {
+                (0..SQUIRREL.canvas.x as u32)
+                    .any(|x| squirrel.2[((y * squirrel.0 + x) * 4 + 3) as usize] > 0)
+            })
+            .expect("the courier's first cell is drawn");
+        assert!(
+            top as f32 > WORKER_TOP_ROW,
+            "the courier tops out at row {top}, no lower than the worker's {WORKER_TOP_ROW}"
+        );
+        assert_eq!(
+            SQUIRREL.ground, WORKER.ground,
+            "the two share a ground line"
+        );
+    }
+
+    #[test]
+    fn a_courier_bearing_is_read_clockwise_from_up_the_screen() {
+        // The sheets run N, NE, E, SE, S, SW, W, NW down the rows. Getting this
+        // backwards is invisible in a still and unmistakable in motion.
+        let named = [
+            (Vec2::new(0.0, 1.0), 0),
+            (Vec2::new(1.0, 1.0), 1),
+            (Vec2::new(1.0, 0.0), 2),
+            (Vec2::new(1.0, -1.0), 3),
+            (Vec2::new(0.0, -1.0), 4),
+            (Vec2::new(-1.0, -1.0), 5),
+            (Vec2::new(-1.0, 0.0), 6),
+            (Vec2::new(-1.0, 1.0), 7),
+        ];
+        for (travel, row) in named {
+            assert_eq!(Courier::heading(travel, 3), row, "{travel:?}");
+        }
+        // A courier that has stopped keeps the row it was facing rather than
+        // snapping north.
+        assert_eq!(Courier::heading(Vec2::ZERO, 5), 5);
+        // And a cell is a row of the grid, never a bare frame index.
+        assert_eq!(Art::courier_cell(Courier::Carry, 3, 2), 3 * 8 + 2);
+        assert_eq!(Art::courier_cell(Courier::Idle, 2, 1), 2 * 4 + 1);
+    }
+
+    #[test]
+    fn the_treehouse_fits_the_tightest_safe_area() {
+        // The deviation from the shared scale exists for one reason, so hold
+        // it to that reason: its opaque art, at the zoom floor, fits the
+        // 286-pixel square an 844x390 phone leaves. Raise the scale and this
+        // is what says by how much it now covers the village.
+        let whole = png("TownCenter/town-center.png");
+        let (width, _, data) = &whole;
+        let (width, data) = (*width, data.clone());
+        let (min, max) = opaque_bounds(&whole);
         // The middle the opening view centres on is the middle of these.
         assert_eq!((min, max), (UVec2::new(63, 38), UVec2::new(574, 606)));
         assert_eq!(

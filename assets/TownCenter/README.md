@@ -18,6 +18,10 @@ The original dark monkeys are unchanged. Muted light timber and ground give thei
 
 - `town-center.aseprite`: editable **672 × 704** master, 11 named layers.
 - `town-center.png`: native transparent game export.
+- `town-center-structure.png`, `town-center-ground.png`, `town-center-bins.png`:
+  the three sprites the game actually draws, split out of the master. Same
+  canvas, same coordinates; drawn bins over structure over ground they are
+  `town-center.png`, pixel for pixel, and `art.rs` holds that at test time.
 - `town-center-preview.png`: 2× nearest-neighbor inspection export.
 - `town-center-scale-preview.png` / `.aseprite`: native-scale context with three unchanged Spider Workers: on the porch, beside the stairs, and by the collection bins. Backdrop and workers are separate preview layers and absent from the game export.
 
@@ -28,6 +32,28 @@ Ground axes use **2:1 pixel isometric projection**, with vertical edges remainin
 The reference worker has a **64 × 64 canvas**, a roughly 44-pixel standing body, and a **38 × 55** visible silhouette including its curled tail. It is the original standing study `assets/Monkey/Spider Worker/spider_monkey_idle.png`, found in the `codex/spider-monkey-gait` worktree. `docs/references/spider-worker.png` is a byte-identical snapshot for reproducible comparison. SHA-256: `42b604ab1f2fce72636c0f970bd804758d4b287ff4c95bac14a0034fb76496ef`.
 
 Use the same nearest-neighbor display scale for the building and workers. The projected ground origin is **(330, 440)**. The stair approach is around **(88, 513)**. The twelve 8-pixel risers descend from the 96-pixel deck to ground level. Collision and occlusion require footprint-aware integration; these coordinates are placement guides. The asset is not connected to the runtime scene.
+
+## The runtime split
+
+The game draws this building as three sprites rather than one, because the three
+sort at three different depths and a single sprite can only carry one:
+
+| Sprite | Layers | Drawn |
+| --- | --- | --- |
+| `town-center-ground.png` | `01 Quiet ground and cast shade` | flat on the ground, under the depot glow and the crowd's shadows |
+| `town-center-structure.png` | the house, tree, deck and everything above them | at the house's own depth |
+| `town-center-bins.png` | `10 Collection bins and golden bananas` | at the ground the *bins* stand on, so the queue in front of them draws in front of them |
+
+The bins are the delivery point, and the game stands a second set of them
+elsewhere in the village once the carts are unlocked, so they have to be a sprite
+of their own. They keep the master's canvas and the master's ground origin, so
+nothing about their placement is re-derived: dropped on the delivery point they
+land exactly where they are drawn here.
+
+`python3 tools/art/split-bins.py`, from the repository root, re-cuts the bins out
+of the structure after the master is regenerated. It needs Pillow, not Aseprite,
+and running it twice writes nothing the second time. The ground split is not
+scripted; it was exported from the master's own bottom layer.
 
 ## Verification and regeneration
 
