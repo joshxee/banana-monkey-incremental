@@ -4,8 +4,9 @@
 //! avatar is a pure function of simulation state: it survives a resize, and it
 //! cannot drift out of step with the economy.
 //!
-//! For the isometric lo-fi pass every monkey is a light rectangle with a brown
-//! outline. Final art can replace this presentation without changing cycles.
+//! The simulation spawns a worker with no art on it; [`dress_actors`] gives it
+//! a sprite, a playhead, a shadow and a banana to carry, and the presentation
+//! systems pose all four from the cycle every frame.
 
 use bevy::prelude::*;
 
@@ -19,11 +20,10 @@ use crate::{
     map::{Map, Route, Village, WorkedRoute},
 };
 
-const FRAME_SIZE: u32 = 22;
-/// The cast is drawn art now, so its base tint is *no* tint: the sprite's own
-/// colours are the colours, and `sprite.color` is left to carry only the things
-/// the game has to say on top of them - the depth shade and the hire flash.
-const MONKEY_TINT: Color = Color::WHITE;
+/// A walker's contact shadow: the green of the art's own baked shadows, a
+/// third opaque, so a crowd's shadows pool into a darker patch rather than
+/// stacking into black.
+const SHADOW: Color = isometric::SHADOW_COLOUR;
 
 /// How far a monkey drifts ahead of or behind the point the economy has it at,
 /// as a fraction of the whole walk.
@@ -65,7 +65,7 @@ const SWARM_HALF_MAX: f64 = 4.0;
 /// plus its scuffed ring is 5 m from the centre), so the pad contains the crowd
 /// that stands on it instead of the crowd spilling onto plain grass around it.
 const RING_INNER: f32 = 2.2;
-const RING_OUTER: f32 = 4.8;
+pub(crate) const RING_OUTER: f32 = 4.8;
 
 /// How much of the ring is left open at the back, as a fraction of the circle.
 ///
@@ -190,7 +190,7 @@ impl NextLane {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Lane(u32);
 
-/// Salts, so one hire index yields five uncorrelated numbers.
+/// Salts, so one hire index yields six uncorrelated numbers.
 ///
 /// Arbitrary odd constants, but not *entirely* arbitrary: the avalanche below
 /// has zero as a fixed point, so `dial(index, salt) == 0` exactly at the index
@@ -200,6 +200,8 @@ pub struct Lane(u32);
 /// index of each stream is past any reachable hire count.
 const SALT_WOBBLE: u32 = 0xBF58_476D;
 const SALT_ACROSS: u32 = 0x85EB_CA6B;
+/// The second dial summed into `across`: see [`Lane::across`].
+const SALT_ACROSS_SPREAD: u32 = 0x94D0_49BB;
 const SALT_SCATTER: u32 = 0xC2B2_AE35;
 const SALT_ANGLE: u32 = 0x27D4_EB2F;
 const SALT_RADIUS: u32 = 0x1656_67B1;
@@ -240,8 +242,17 @@ impl Lane {
 
     /// Where across the corridor it walks, as a fraction of the half-width.
     /// Positive is towards the viewer; [`near_side`] turns that into a side.
+    ///
+    /// Triangular, not uniform: the sum of two dials, less one. A uniform draw
+    /// fills the corridor at one density right up to its edges, so a crowd of
+    /// sixty reads as a strip with ruled sides - a road painted brown rather
+    /// than monkeys walking one. A triangle is densest on the route's spine
+    /// and thins linearly to nothing at the edge, so the crowd has a core and
+    /// a ragged fringe. Same range, `-1.0..1.0`, so nothing that bounds a
+    /// monkey inside the corridor has to change; only where in it they tend
+    /// to walk.
     fn across(self) -> f32 {
-        self.swing(SALT_ACROSS)
+        self.dial(SALT_ACROSS) + self.dial(SALT_ACROSS_SPREAD) - 1.0
     }
 
     /// Metres along the route from where the wobble put it.
@@ -322,6 +333,12 @@ fn corridor_spread(map: &Map, at: Vec2, across: Vec2) -> f32 {
 #[derive(Component)]
 pub struct CarriedBanana;
 
+/// A contact shadow under an actor. A child, so it follows for free; its depth
+/// is pinned to [`isometric::MARK_Z`] every frame instead, so it can never draw
+/// over the monkey behind its owner.
+#[derive(Component)]
+pub(crate) struct Shadow;
+
 /// A brief highlight on a freshly hired worker.
 ///
 /// Every hire now walks out of the stall, which is the purchase's own visible
@@ -332,38 +349,90 @@ pub struct CarriedBanana;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct JustHired {
     remaining: f32,
+    /// Seconds since the hire, for the walk out of the bins (see [`emerge`]).
+    age: f32,
 }
 
 const HIRE_HIGHLIGHT_SECONDS: f32 = 0.6;
 
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Pose {
-    Idle,
-    Run,
+/// How fast a fresh hire walks out of the bins at its quickest, in metres a
+/// second: a harvester's own pace.
+const EMERGE_SPEED: f32 = 3.0;
+
+/// Where a fresh hire is drawn, `age` seconds after it was hired, on its way
+/// from the bins at `from` to the place in the crowd it is headed for at `to` -
+/// and whether it has got there.
+///
+/// Every monkey comes out of the treehouse (D30). The walk is timed by the
+/// distance, not by the hire flash: a smoothstep peaks at one and a half times
+/// its average speed, so a duration of `1.5 d / EMERGE_SPEED` holds the peak
+/// to a walking pace. Spent over the 0.6 s flash instead, a monkey bound for
+/// the outer ring left the bins at twelve metres a second.
+fn emerge(from: Vec2, to: Vec2, age: f32) -> (Vec2, bool) {
+    let duration = 1.5 * from.distance(to) / EMERGE_SPEED;
+    if duration <= 0.0 || age >= duration {
+        return (to, true);
+    }
+    let t = age / duration;
+    (from.lerp(to, t * t * (3.0 - 2.0 * t)), false)
 }
 
 /// Which loop a monkey is playing, and where it has got to.
 ///
+/// Presentation state, so the presentation makes it: [`dress_actors`] inserts
+/// it, and the simulation's spawns know nothing about animation. It is also the
+/// only record of whether a monkey is walking - a separate `Pose` component
+/// used to be computed from the same test in the same loop and was never read.
+///
 /// A playhead per monkey rather than one shared clock, and that is the point:
-/// the starting frame is seeded from the hire index, so sixty monkeys spawned
-/// on the same tick are already spread across the walk cycle. A shared clock
-/// would have every one of them plant the same foot at the same moment, which
-/// is the formation read the swarm offsets exist to break - reintroduced in the
-/// one channel those offsets cannot reach.
+/// it is seeded from the hire index, so sixty monkeys spawned on the same tick
+/// are already spread across the stride. A shared clock would have every one of
+/// them plant the same foot at the same moment, which is the formation read the
+/// swarm offsets exist to break - reintroduced in the one channel those offsets
+/// cannot reach.
 #[derive(Component, Debug)]
 pub(crate) struct Playing {
     clip: Clip,
     frame: u32,
+    /// Seconds into the current idle frame.
     elapsed: f32,
+    /// How far through one walk loop, as a fraction of a stride. Advanced by
+    /// distance drawn, never by time: see [`art::WALK_STRIDE_TEXELS`].
+    stride: f32,
+    /// Texels walked since the playhead last looked, on the unit-zoom board.
+    travelled: f32,
+    /// Where the monkey was last drawn standing, in metres.
+    last: Option<Vec2>,
 }
 
 impl Playing {
-    fn starting(index: u32) -> Self {
+    fn starting(clip: Clip, index: u32) -> Self {
+        // The golden ratio walks the unit interval without ever repeating a
+        // pattern a crowd could line up on, which `index % frames` does every
+        // twelfth hire.
+        let stride = (index as f32 * 0.618_034).fract();
+        let frame = match clip {
+            Clip::Walk => Clip::walk_frame(stride),
+            Clip::Idle => index % Clip::Idle.frames(),
+        };
         Self {
-            clip: Clip::Walk,
-            frame: index % Clip::Walk.frames(),
+            clip,
+            frame,
             elapsed: 0.0,
+            stride,
+            travelled: 0.0,
+            last: None,
         }
+    }
+
+    /// Record where the monkey is drawn this frame.
+    fn walk_to(&mut self, point: Vec2) {
+        if let Some(last) = self.last {
+            // Along the board, at unit zoom: the stride is measured off the
+            // art, and the art is drawn in board texels whatever the zoom.
+            self.travelled += isometric::project(point - last).length();
+        }
+        self.last = Some(point);
     }
 }
 
@@ -447,8 +516,6 @@ pub fn spawn_missing_workers(
             cycle,
             CycleSpec::WORKER,
             Lane(index),
-            Pose::Run,
-            Playing::starting(index),
             Transform::from_xyz(0.0, 0.0, 1.0),
         ));
         if was_restored {
@@ -456,20 +523,13 @@ pub fn spawn_missing_workers(
         } else {
             worker.insert(JustHired {
                 remaining: HIRE_HIGHLIGHT_SECONDS,
+                age: 0.0,
             });
         }
-        worker.with_children(|parent| {
-            // Over the monkey's shoulder. The parent's transform is its *feet*
-            // now that the art carries its own ground anchor, so this is a
-            // height above the ground rather than an offset from a centre.
-            parent.spawn((
-                CarriedBanana,
-                Sprite::from_color(Color::srgb(1.0, 0.78, 0.10), Vec2::splat(5.0)),
-                Transform::from_xyz(4.0, 14.0, 0.2)
-                    .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4)),
-                Visibility::Hidden,
-            ));
-        });
+        // The banana it carries home. Spawned bare, like the monkey: it is a
+        // simulation fact that the worker has a banana to hold, and the
+        // presentation's business what one looks like and where it rides.
+        worker.with_child((CarriedBanana, Transform::default(), Visibility::Hidden));
     }
 }
 
@@ -665,6 +725,7 @@ type WorkerView<'a> = (
     Option<Mut<'a, JustHired>>,
     Mut<'a, Transform>,
     Mut<'a, Sprite>,
+    Mut<'a, Playing>,
 );
 
 pub fn position_workers(
@@ -676,7 +737,7 @@ pub fn position_workers(
     multipliers: Res<Multipliers>,
     mut workers: Query<WorkerView, With<Worker>>,
 ) {
-    for (entity, cycle, lane, hired, mut transform, mut sprite) in &mut workers {
+    for (entity, cycle, lane, hired, mut transform, mut sprite, mut playing) in &mut workers {
         let progress = cycle.segment_fraction(CycleSpec::WORKER, *multipliers);
         let Phase {
             fraction,
@@ -686,9 +747,23 @@ pub fn position_workers(
 
         // Walking and standing are two different shapes, blended rather than
         // switched between. See `stand_point`.
-        let (point, along) = stand_point(&village, &route.0, fraction, *lane, ring_weight);
+        let (mut point, along) = stand_point(&village, &route.0, fraction, *lane, ring_weight);
         let travel = if outbound { along } else { -along };
-        let facing_right = isometric::project(travel).x >= 0.0;
+        let mut facing_right = isometric::project(travel).x >= 0.0;
+        // A fresh hire walks out of the bins - the treehouse, which is where
+        // every monkey appears from (D30) - to its place in the crowd, facing
+        // the way it is going rather than the way the route will take it.
+        let mut emerged = true;
+        if let Some(hired) = hired.as_ref() {
+            let bins = isometric::tile_centre(village.town_centre());
+            let target = point;
+            let (drawn, arrived) = emerge(bins, target, hired.age);
+            if !arrived {
+                point = drawn;
+                facing_right = isometric::project(target - bins).x >= 0.0;
+            }
+            emerged = arrived;
+        }
 
         // Depth cue, taken from where the monkey is actually drawn rather than
         // from `across`, which describes only the walking shape: a monkey on
@@ -702,7 +777,11 @@ pub fn position_workers(
         // position *is* the transform.
         let screen = layout.board_snapped(point, 0.0);
         let translation = screen.extend(isometric::stand_z(point, lane.nudge()));
-        let scale = Vec3::splat(layout.world_scale());
+        // Unit z scale, so a child's local z is a real depth offset: the
+        // shadow is pinned to the ground-mark layer by subtracting this
+        // monkey's depth, and a z scale of the zoom would multiply that back.
+        let scale = Vec3::new(layout.world_scale(), layout.world_scale(), 1.0);
+        playing.walk_to(point);
         // Written only on change: a worker stands still through Pick and
         // Unload, and transform propagation is `Changed<Transform>`-driven.
         if transform.translation != translation {
@@ -711,13 +790,14 @@ pub fn position_workers(
         if transform.scale != scale {
             transform.scale = scale;
         }
-        if sprite.flip_x != !facing_right {
+        if sprite.flip_x == facing_right {
             sprite.flip_x = !facing_right;
         }
 
+        // The art's own colours are the colours; `sprite.color` carries only
+        // what the game says on top of them - this depth shade, and the flash.
         let shade = 1.0 - 0.18 * back;
-        let base = MONKEY_TINT.to_srgba();
-        let mut tint = Vec3::new(base.red, base.green, base.blue) * shade;
+        let mut tint = Vec3::splat(shade);
         // A worker stuck waiting for a banana to eat has stopped producing, and
         // the player has to be able to see why the rate died. Idling at the
         // stall alone is ambiguous - unloading looks the same.
@@ -730,9 +810,10 @@ pub fn position_workers(
         // `HarvestCycle::earmarked`.
         if let Some(mut hired) = hired {
             hired.remaining -= time.delta_secs();
-            if hired.remaining <= 0.0 {
+            hired.age += time.delta_secs();
+            if hired.remaining <= 0.0 && emerged {
                 commands.entity(entity).remove::<JustHired>();
-            } else {
+            } else if hired.remaining > 0.0 {
                 let strength = (hired.remaining / HIRE_HIGHLIGHT_SECONDS).clamp(0.0, 1.0);
                 // Toward gold, and brightening, so the new hire reads against
                 // both the ground and the other workers.
@@ -758,16 +839,44 @@ pub fn position_workers(
 /// build `Sprite`s of their own, which worked only because a coloured rectangle
 /// needs no resource to make. The first sprite that needed one broke every
 /// headless contract at once.
+///
+/// Runs first in the chain that poses the cast, in the same frame the
+/// simulation spawned the actor (`FixedUpdate` runs before `Update`), so there
+/// is no frame on which a monkey is drawn undressed or on the wrong loop.
 pub fn dress_actors(
     mut commands: Commands,
     art: Res<Art>,
-    workers: Query<(Entity, &Lane), (With<Worker>, Without<Sprite>)>,
+    workers: Query<(Entity, &Lane, &HarvestCycle), (With<Worker>, Without<Sprite>)>,
+    bananas: Query<Entity, (With<CarriedBanana>, Without<Sprite>)>,
     riders: Query<(Entity, &CartSeat), Without<Sprite>>,
 ) {
-    for (entity, lane) in &workers {
+    for (entity, lane, cycle) in &workers {
+        // On the loop its segment wants from the first frame: a monkey
+        // restored mid-unload used to open on a walk frame and swap a frame
+        // later.
+        let clip = if cycle.segment().is_walking() {
+            Clip::Walk
+        } else {
+            Clip::Idle
+        };
+        let playing = Playing::starting(clip, lane.0);
         commands
             .entity(entity)
-            .insert((art.worker(Clip::Walk, lane.0), art::WORKER.anchor()));
+            .insert((
+                art.worker(clip, playing.frame),
+                art::WORKER.anchor(),
+                playing,
+            ))
+            .with_child((
+                Shadow,
+                art.shadow(art::SHADOW_TEXELS, SHADOW),
+                Transform::default(),
+            ));
+    }
+    for entity in &bananas {
+        commands
+            .entity(entity)
+            .insert(art.banana(art::CARRIED_BANANA_TEXELS, art::BANANA_REST_FRAME));
     }
     for (entity, seat) in &riders {
         commands
@@ -776,34 +885,41 @@ pub fn dress_actors(
     }
 }
 
+/// What `animate_workers` touches on a worker's children.
+type CarriedView<'a> = (Mut<'a, Transform>, Mut<'a, Visibility>);
+
+#[allow(clippy::type_complexity)]
 pub fn animate_workers(
     time: Res<Time>,
     art: Res<Art>,
     mut workers: Query<
         (
             &HarvestCycle,
-            &mut Pose,
+            &Transform,
             &mut Playing,
             &mut Sprite,
             &Children,
         ),
         With<Worker>,
     >,
-    mut carried: Query<&mut Visibility, With<CarriedBanana>>,
+    mut carried: Query<CarriedView, (With<CarriedBanana>, Without<Worker>, Without<Shadow>)>,
+    mut shadows: Query<&mut Transform, (With<Shadow>, Without<Worker>, Without<CarriedBanana>)>,
 ) {
-    for (cycle, mut pose, mut playing, mut sprite, children) in &mut workers {
+    // Where the banana rides, relative to the feet, for a monkey facing right.
+    let back = art::WORKER.offset_of(art::WORKER_BACK);
+
+    for (cycle, transform, mut playing, mut sprite, children) in &mut workers {
         let segment = cycle.segment();
-        let walking = segment.is_walking();
-        let next_pose = if walking { Pose::Run } else { Pose::Idle };
-        if *pose != next_pose {
-            *pose = next_pose;
-        }
 
         // Walking or not walking, which is the whole of what the two loops have
         // to say. Switching clips keeps the frame index rather than resetting
         // it, so a crowd that all stops at once does not all restart its idle
         // on frame zero together.
-        let wanted = if walking { Clip::Walk } else { Clip::Idle };
+        let wanted = if segment.is_walking() {
+            Clip::Walk
+        } else {
+            Clip::Idle
+        };
         if playing.clip != wanted {
             playing.clip = wanted;
             playing.frame %= wanted.frames();
@@ -815,13 +931,24 @@ pub fn animate_workers(
             }
         }
 
-        // Capped before the loop below spends it: a frame that arrives after a
-        // long stall - a backgrounded tab, a breakpoint - would otherwise be
-        // paid out one animation frame at a time.
-        playing.elapsed = (playing.elapsed + time.delta_secs()).min(1.0);
-        while playing.elapsed >= playing.clip.hold(playing.frame) {
-            playing.elapsed -= playing.clip.hold(playing.frame);
-            playing.frame = (playing.frame + 1) % playing.clip.frames();
+        let travelled = std::mem::take(&mut playing.travelled);
+        match playing.clip {
+            // The feet grip the ground: one loop per stride actually drawn,
+            // whatever the speed. See `art::WALK_STRIDE_TEXELS`.
+            Clip::Walk => {
+                playing.stride = (playing.stride + travelled / art::WALK_STRIDE_TEXELS).fract();
+                playing.frame = Clip::walk_frame(playing.stride);
+            }
+            Clip::Idle => {
+                // Capped before the loop below spends it: a frame that arrives
+                // after a long stall - a backgrounded tab, a breakpoint - would
+                // otherwise be paid out one animation frame at a time.
+                playing.elapsed = (playing.elapsed + time.delta_secs()).min(1.0);
+                while playing.elapsed >= Clip::hold(playing.frame) {
+                    playing.elapsed -= Clip::hold(playing.frame);
+                    playing.frame = (playing.frame + 1) % Clip::Idle.frames();
+                }
+            }
         }
         if let Some(atlas) = sprite.texture_atlas.as_mut()
             && atlas.index != playing.frame as usize
@@ -829,18 +956,35 @@ pub fn animate_workers(
             atlas.index = playing.frame as usize;
         }
 
+        // `flip_x` mirrors the texture and not the children, so anything
+        // placed against the art has to be mirrored by hand. The art is not
+        // symmetric - head forward, tail back - and an unmirrored banana on a
+        // monkey walking left rides on its tail.
+        let facing = if sprite.flip_x { -1.0 } else { 1.0 };
         for child in children.iter() {
-            if let Ok(mut visibility) = carried.get_mut(child) {
+            if let Ok((mut at, mut visibility)) = carried.get_mut(child) {
                 // Held through the snack too: that banana is the meal, and
                 // seeing it in hand is what connects the counter's dip to the
                 // monkey that caused it.
-                let wanted = if segment.holds_banana() {
+                let shown = if segment.holds_banana() {
                     Visibility::Inherited
                 } else {
                     Visibility::Hidden
                 };
-                if *visibility != wanted {
-                    *visibility = wanted;
+                if *visibility != shown {
+                    *visibility = shown;
+                }
+                let place = Vec3::new(back.x * facing, back.y, 0.2);
+                if at.translation != place {
+                    at.translation = place;
+                }
+            }
+            if let Ok(mut at) = shadows.get_mut(child) {
+                // The parent's z scale is one, so this lands the shadow at
+                // exactly `MARK_Z` in the world.
+                let z = isometric::MARK_Z - transform.translation.z;
+                if at.translation.z != z {
+                    at.translation.z = z;
                 }
             }
         }
@@ -1133,6 +1277,7 @@ mod tests {
         for salt in [
             SALT_WOBBLE,
             SALT_ACROSS,
+            SALT_ACROSS_SPREAD,
             SALT_SCATTER,
             SALT_ANGLE,
             SALT_RADIUS,
@@ -1145,6 +1290,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_fresh_hire_walks_out_of_the_bins_at_a_walking_pace() {
+        // Held to the same continuity bar as the rest of the cycle: at sixty
+        // frames a second no step of the walk out is more than a tenth of a
+        // metre, even to the far edge of the standing ring - and it arrives,
+        // exactly where it was going, rather than snapping there at the end.
+        const FRAME: f32 = 1.0 / 60.0;
+        let from = Vec2::ZERO;
+        for bearing in 0..12 {
+            let to = Vec2::from_angle(bearing as f32 * std::f32::consts::TAU / 12.0) * RING_OUTER;
+            let (mut last, mut age, mut arrived) = (from, 0.0, false);
+            let mut worst: f32 = 0.0;
+            while !arrived {
+                age += FRAME;
+                let (at, done) = emerge(from, to, age);
+                worst = worst.max(at.distance(last));
+                last = at;
+                arrived = done;
+                assert!(age < 10.0, "the walk out never arrives");
+            }
+            assert!(worst < 0.10, "a hire steps {worst} m in one frame");
+            assert_eq!(last, to);
+        }
+    }
+
+    #[test]
+    fn a_walking_crowd_has_a_dense_spine_and_a_ragged_edge() {
+        // The property `across` exists for, measured on the crowd rather than
+        // read off its formula. A triangle on -1..1 has mean |x| of 1/3 and
+        // puts 4% beyond 0.8; a uniform draw - what this replaced - gives 1/2
+        // and 20%. Each bar sits between the two models rather than just
+        // under a measurement, so the distribution is free to move within the
+        // triangle's neighbourhood and a regression to a flat strip cannot
+        // pass. At a thousand hires the sampling error is under a hundredth.
+        let lanes: Vec<f32> = (0..1000).map(|index| Lane(index).across()).collect();
+        let mean = lanes.iter().map(|x| x.abs()).sum::<f32>() / lanes.len() as f32;
+        assert!(mean < 0.42, "mean |across| is {mean}: the crowd is flat");
+        let fringe = lanes.iter().filter(|x| x.abs() > 0.8).count() as f32 / lanes.len() as f32;
+        assert!(
+            fringe < 0.10,
+            "{fringe} of the crowd walks at the corridor's edge"
+        );
+        // And the two sides stay balanced. This cannot see correlation between
+        // the two dials - correlation changes the spread, never the mean - so
+        // it is the two bars above that would catch a correlated pair.
+        let bias = lanes.iter().sum::<f32>() / lanes.len() as f32;
+        assert!(bias.abs() < 0.05, "the crowd leans {bias} to one side");
     }
 
     #[test]
@@ -1439,10 +1633,9 @@ pub fn spawn_missing_carts(
                 let offset = (seat as f32 - (CART_CREW as f32 - 1.0) * 0.5) * SEAT_STEP_TEXELS;
                 cart.spawn((
                     CartSeat { cart: index, seat },
-                    // Sitting in the box: feet behind its front wall, heads
-                    // clear of the top. Local texels, so the parent's world
+                    // Sitting in the box. Local texels, so the parent's world
                     // scale applies without this having to know it.
-                    Transform::from_xyz(offset, FRAME_SIZE as f32 * 0.30, -0.001),
+                    Transform::from_xyz(offset, seat_height(), -0.001),
                     Visibility::Hidden,
                 ));
             }
@@ -1480,7 +1673,7 @@ pub struct CartSeat {
 /// The box, in source texels. Wide enough to seat three monkeys shoulder to
 /// shoulder, low enough that their heads clear the top - the whole read is
 /// "three monkeys in a box", so the box must not swallow them.
-const CART_BOX_TEXELS: Vec2 = Vec2::new(52.0, 15.0);
+const CART_BOX_TEXELS: Vec2 = Vec2::new(130.0 * art::ART_SCALE, 37.5 * art::ART_SCALE);
 const CART_BOX: Color = Color::srgb(0.55, 0.33, 0.14);
 /// The bananas piled in the box. Banana-yellow, and the only large yellow mass
 /// in the scene, so a loaded cart is distinguishable from the Unpacker's crate
@@ -1488,9 +1681,21 @@ const CART_BOX: Color = Color::srgb(0.55, 0.33, 0.14);
 const CART_LOAD: Color = Color::srgb(0.98, 0.82, 0.20);
 /// The load, at full payload, in source texels. Inset so the box's own walls
 /// still read as walls.
-const CART_LOAD_TEXELS: Vec2 = Vec2::new(46.0, 9.0);
+const CART_LOAD_TEXELS: Vec2 = Vec2::new(115.0 * art::ART_SCALE, 22.5 * art::ART_SCALE);
 /// Seat spacing inside the box.
-const SEAT_STEP_TEXELS: f32 = 15.0;
+const SEAT_STEP_TEXELS: f32 = 37.5 * art::ART_SCALE;
+
+/// Where a rider's feet go, in the box's local texels: low enough that its
+/// hips are level with the top of the front wall, so the legs are inside the
+/// box and the body, head and tail are above it.
+///
+/// Measured from the art. The seat used to be `22 * 0.30` - a centre offset
+/// written for a 22-texel rectangle - and once the rider was anchored at its
+/// feet that same number stood all three monkeys on the lid.
+fn seat_height() -> f32 {
+    let box_top = CART_BOX_TEXELS.y * 0.5;
+    box_top - art::WORKER.height_above(art::WORKER_HIP_ROW) * art::RIDER_SCALE
+}
 
 /// Fill the boarding cart from the pool.
 ///
@@ -1679,5 +1884,128 @@ pub fn position_carts(
         if *visibility != wanted {
             *visibility = wanted;
         }
+    }
+}
+
+#[cfg(test)]
+mod dressing_tests {
+    use super::*;
+    use bevy::{asset::AssetPlugin, image::TextureAtlasLayout, sprite::Anchor};
+
+    /// The presentation's dressing pass on its own, with a real asset server
+    /// behind it, so `Art` is the resource the game actually builds.
+    fn dressing() -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            AssetPlugin::default(),
+            ImagePlugin::default(),
+        ));
+        app.init_asset::<TextureAtlasLayout>();
+        let world = app.world_mut();
+        let art = world.resource_scope(|world, mut layouts: Mut<Assets<TextureAtlasLayout>>| {
+            world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                Art::load(world.resource::<AssetServer>(), &mut layouts, &mut images)
+            })
+        });
+        app.insert_resource(art);
+        app.add_systems(Update, dress_actors);
+        app
+    }
+
+    /// A worker as `spawn_missing_workers` makes one: no sprite, no playhead,
+    /// and a bare banana to carry.
+    fn spawn_bare(app: &mut App, cycle: HarvestCycle, lane: u32) -> Entity {
+        app.world_mut()
+            .spawn((
+                Worker,
+                cycle,
+                CycleSpec::WORKER,
+                Lane(lane),
+                Transform::default(),
+            ))
+            .with_child((CarriedBanana, Transform::default(), Visibility::Hidden))
+            .id()
+    }
+
+    fn children_with<T: Component>(app: &mut App, parent: Entity) -> usize {
+        let children: Vec<Entity> = app
+            .world()
+            .get::<Children>(parent)
+            .map(|children| children.iter().collect())
+            .unwrap_or_default();
+        children
+            .into_iter()
+            .filter(|child| app.world().get::<T>(*child).is_some())
+            .count()
+    }
+
+    #[test]
+    fn an_actor_spawned_after_startup_is_dressed_once_on_the_loop_it_needs() {
+        // The seam D28 rests on: the simulation spawns a monkey with nothing
+        // to draw, and the presentation gives it everything, once. A second
+        // pass must not stack a second shadow on it, and a monkey restored
+        // mid-unload must open standing, not on a walk frame.
+        let mut app = dressing();
+        app.update();
+
+        let walker = spawn_bare(&mut app, HarvestCycle::starting(CycleSpec::WORKER), 3);
+        let multipliers = Multipliers::default();
+        let cycle = cycle_time(CycleSpec::WORKER, multipliers);
+        let unloading = (0..1000)
+            .map(|step| {
+                HarvestCycle::from_phase(
+                    cycle * f64::from(step) / 1000.0,
+                    CycleSpec::WORKER,
+                    multipliers,
+                )
+            })
+            .find(|cycle| cycle.segment() == Segment::Unload)
+            .expect("a worker's cycle has an unload in it");
+        let unloader = spawn_bare(&mut app, unloading, 4);
+
+        app.update();
+        app.update();
+
+        let art = app.world().resource::<Art>().clone();
+        for (entity, clip) in [(walker, Clip::Walk), (unloader, Clip::Idle)] {
+            let world = app.world();
+            assert!(world.get::<Anchor>(entity).is_some(), "{clip:?}: no anchor");
+            let playing = world.get::<Playing>(entity).expect("no playhead");
+            assert_eq!(playing.clip, clip, "opened on the wrong loop");
+            let sprite = world.get::<Sprite>(entity).expect("no sprite");
+            assert_eq!(sprite.image, art.clip(clip).0, "{clip:?}: wrong sheet");
+            assert_eq!(children_with::<Shadow>(&mut app, entity), 1, "{clip:?}");
+            let banana = app
+                .world()
+                .get::<Children>(entity)
+                .unwrap()
+                .iter()
+                .find(|child| app.world().get::<CarriedBanana>(*child).is_some())
+                .unwrap();
+            assert!(
+                app.world().get::<Sprite>(banana).is_some(),
+                "{clip:?}: the carried banana was never dressed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rider_sits_in_the_cart_rather_than_on_it() {
+        // The box spans its height about its centre. A rider sitting in it has
+        // its feet inside the box, and its head clear of the front wall - by
+        // enough to read as a monkey rather than a tuft over the rim.
+        let rim = CART_BOX_TEXELS.y * 0.5;
+        let feet = seat_height();
+        let crown = feet + art::WORKER.height_above(art::WORKER_CROWN_ROW) * art::RIDER_SCALE;
+        assert!(
+            feet < rim && feet > -rim,
+            "a rider's feet at {feet} are outside a box spanning ±{rim}"
+        );
+        assert!(
+            crown - rim >= 4.0,
+            "a rider's head shows only {} texels over the rim",
+            crown - rim
+        );
     }
 }

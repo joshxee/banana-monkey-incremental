@@ -877,6 +877,254 @@ placed from the art's measured silhouette rather than from the rectangle they
 were authored against, which is why they read as carried rather than as floating
 squares, but they remain the weakest thing on the board.
 
+*Corrected on review.* This increment shipped unreviewed, and review found that
+several of the sentences above were not true of the code, and that some of the
+code was not true of the art. Recorded here rather than silently edited, because
+each is the same mistake — a number read off the wrong thing:
+
+- **The scale was pinned to an asset the game never loads.** "55 pixels" is the
+  bounding box of `docs/references/spider-worker.png`, a standing study. The
+  sheets played are a quadruped 58 pixels from tail tip to toe: 23.2 texels,
+  46 logical pixels at the zoom floor. `ART_SCALE` stays 0.4 — everything was
+  tuned within a texel of that — but its test now decodes the sheets and
+  measures every frame, where it used to multiply two literals together.
+- **The walk skated at two and a half times its stride.** The sheet's planted
+  foot covers eight texels a loop; the loop was played against the clock in
+  0.72 s while the monkey moved 27 texels a second, and faster with every Chef.
+  The playhead is now advanced by distance *drawn*, one loop per eight texels,
+  keeping the manifest's 70/60/50 proportions as shares of the stride. It is
+  right at any speed, any Chef bonus and any swarm remap by construction.
+- **Placements used the placeholder's numbers.** Riders sat at `22 × 0.30`, a
+  centre offset for a rectangle, which stood all three on the cart's lid once
+  they were anchored at their feet; the chef's cap covered the face down to the
+  snout; the carried banana sat on the head and rode the tail when the sprite
+  flipped, because `flip_x` mirrors the texture and not its children. Every one
+  now goes through `Cell::offset_of` from a row measured off the sheet, and the
+  tests hold the rows to the pixels.
+- **The role tint was invisible.** 94–100% white multiplied over near-black
+  fur. Roles are now said by a disc of the shop's own swatch colour under each
+  support monkey — its contact shadow too — with the props recoloured to match
+  the shop, where the unpacker's crate had been the *worker's* orange. Hunger
+  drains the disc to grey, since dimming a black monkey showed nothing.
+- **The fan was a queue.** Same-role monkeys stepped 13 texels along a ground
+  diagonal that projects mostly *into* the screen, so two chefs drew as one
+  monkey with two caps. A fan is something the player sees, so it is now laid
+  out in screen texels and taken to the ground by `unproject`: one in front,
+  two behind to either side. A line across the screen does not fit — the walk
+  runs up the screen past the depot, and a line wide enough for three monkeys
+  crosses it on one side and leaves a landscape phone on the other.
+- **`Pose` was never read**, and `Playing` was spawned by the simulation. The
+  playhead is presentation, so `dress_actors` inserts it on the loop the
+  monkey's segment wants — a monkey restored mid-unload used to open on a walk
+  frame — and the chain is dress, position, animate in one frame. "One frame
+  later" above was also wrong: `FixedUpdate` spawns before `Update` dresses.
+- **Nothing had a contact shadow but the scenery**, which bakes its own, so the
+  cast looked more detached than the rectangles had. Walkers get a flat
+  ellipse at 33% in the art's shadow green, on a shared ground-mark layer
+  between the terrain and anything standing, so a shadow never covers the
+  monkey behind its owner.
+- **0.62 is not two thirds**, and two thirds would not fit. The treehouse's
+  opaque art is 254 × 282 pixels at the zoom floor against a 286-pixel safe
+  area, and a test now says so from the PNG.
+
+**D29 — The drag starts and ends on the ground.**
+*(Manual-harvest increment.)*
+
+The hand-harvest drag predates the board it now lives on. Its targets were
+squares of *screen*, `scene_side × 0.18` across, sized from the chrome: zoom in
+and the plant grew while its target stayed put, zoom out and the target
+swallowed the village. They were axis-aligned in an isometric world, and so was
+the deposit glow — which on a phone was the most dominant object on the board
+and the only thing on it off the 2:1 grid.
+
+*The targets are footprints, and the pointer goes down to meet them.* A
+`Footprint` is a square of ground, `half` metres either side of a centre along
+both ground axes: a tile, grown. On screen it is a diamond on the grid. A drag
+is tested by taking the pointer to the ground — `SceneLayout::ground`, which is
+`unproject` under the camera — and asking whether that metre is on it. Bringing
+the target up to the screen instead is the tempting version and it is only
+approximate, because the fold turns a square into a diamond and a box round the
+diamond grabs its corners' empty air.
+
+The cheaper alternative was to keep screen rectangles and scale them with the
+zoom rather than with `scene_side`. It fixes the size and nothing else: the
+target is still a box off the grid, still a different shape from the ground it
+marks, and still tested in a space where "on the depot" means "near its label".
+
+The sizes are the ground's own. The harvest target is three metres either side
+of the home tree at the zoom floor, where its diamond's short axis is 96 px — and
+it never grows past that on screen. Harvest has first refusal on every press,
+so its target is ground the camera cannot be driven from, and three metres at
+every zoom was 576 × 288 px at zoom 6: three quarters of a landscape phone's
+board, with nothing left to pan or pinch on but the corners. Zoomed in, the
+plant grows and the ground its target covers shrinks, never below the banana's
+own spot. A narrow column up the trunk into the lower crown grabs as well. The
+palm is the biggest, brightest thing by the banana and what a stranger reaches
+for, and a press on it used to be the camera's, so the player's first try slid
+the board away from the thing they were reaching for. The drop
+target is the depot's trodden and scuffed ground edge to edge
+(`DEPOT_REACH_METRES`, five), so what the player sees as the depot is exactly
+what takes the banana. The home tree is ten metres out along one ground axis,
+so three and five leave two metres that are neither, and a drag cannot start
+on its own drop target. A test walks both targets at every zoom from 2 to 6
+and three pans, and asserts a point grabs exactly when the ground under it is
+on the footprint, that it stays at least a thumb across at every zoom, and —
+sampled over the whole board with the camera on the home tree — that harvest
+never claims a quarter of it. The screen squares got the first wrong, and the
+first version of this increment got the last.
+
+The glow is the drop target's own diamond, a translucent mesh on the ground
+under the crowd's shadows (`GLOW_Z`, below `MARK_Z`), placed by its transform so
+it pans and zooms with the ground it marks.
+
+*The banana is drawn, and it lies on the ground.* `assets/Banana/Banana.png`, a
+twelve-frame spin that was loaded nowhere, replaces three coloured rectangles.
+It is an icon rather than part of the shared-scale set, so it cannot inherit a
+size from the monkey; it is drawn at one art pixel to one texel, the only whole
+ratio that leaves it smaller than the monkey carrying it (D28), and at half that
+on a monkey's back. It lies at the home tree's foot, a step towards the viewer
+so it sorts in front of the plant, where it used to hang 1.4 m up — a height
+chosen for the palm mesh's crown, which against the drawn plant tied a yellow
+band round the trunk.
+
+A held banana is drawn fourteen texels above the pointer and never less than 44
+logical pixels, so it clears a thumb's pad and the DEPOT sign it is aimed at.
+Its shadow stays on the ground under the pointer, on the metre the drop is
+tested against. With a mouse the shadow is the aim; on a phone it is under the
+thumb, the finger itself is the aim, and the banana riding above it is what says
+it is being carried. One system places both, after input, so the shadow is never
+a frame behind the banana.
+
+*Until the first banana is carried home, both ends are marked.* A faint gold
+diamond lies under the banana — exactly the target, at whatever size the zoom
+has made it — and the depot glow breathes slowly. The board then says "from here
+to there" without a word of text. Both go out for good at the first hand
+delivery, and never show on a board with monkeys hired: a tutorial glow under
+sixty workers is noise, and a player who has hired has learned the drag.
+
+*The crowd walks a triangle across the corridor, not a flat strip.* `across` is
+now the sum of two hashed dials less one — densest on the route's spine and
+thinning linearly to nothing at the edge, where a uniform draw filled the
+corridor at one density right up to ruled sides. Same range, so nothing that
+keeps a monkey inside the corridor changed; mean |across| is 1/3 against a
+uniform 1/2, and a test holds the crowd between the two models.
+
+*Harvest stays reachable, or says it is not.* The pan clamp promises that some
+of the walk is on screen (D26), not the home tree, so a player can pan to where
+hand harvest is impossible. On a desktop `C` recentres; on a phone there was
+nothing. The bar's empty left cell — there only to centre the banner — now
+holds a HOME button, shown exactly when either end of the drag is outside the
+safe area. Always shown, it is a permanent control for a problem most players
+never have; never shown, the player who panned to the grove has no way back and
+no sign the banana still exists. Appearing when the drag leaves the screen makes
+it the feedback and the fix at once. It recentres the zoom as well as the aim,
+exactly as `C` does, through the camera system that owns both.
+
+*The gesture seam is unchanged, which is the evidence it was built right.*
+Harvest still gets first refusal at touch-down (D26) and the camera still takes
+what it declines; all that changed is what "on the banana" means. No simulation
+state moved — a manual harvest is credited through the same `DeliveryQueue` on
+the same tick — so there is no new economy contract, and the headless suite and
+`docs/test_banana.py` pass untouched.
+
+Known limits, stated so they are not rediscovered. A press on the plant's outer
+fronds, beyond the trunk column, still pans: the column is kept narrow so that
+zoomed in, where the crown fills the screen, the board is still the camera's. HOME returns to the opening
+view rather than to "enough to see both ends", which from maximum zoom is a
+jump of four steps. A drag does not pan the camera, so at high zoom on a
+landscape phone the depot can be off screen with the banana in hand; releasing
+there cancels, and HOME is visible. And a second finger landing mid-drag pans
+the board (only the harvesting finger is claimed), so the ground — and the
+drop point the shadow marks — can slide under a finger that has not moved;
+that predates this increment, and the shadow at least shows it happening.
+`tests/e2e/visual.spec.ts-snapshots/` were
+already stale after D28 and are more so now; they cannot be regenerated without
+`trunk` and the wasm target, and CI does not run them.
+
+**D30 — The treehouse is the depot, and every monkey comes out of it.**
+*(Owner's call, after D29.)*
+
+The treehouse stood eight metres aside from the delivery point and the opening
+view was aimed between the home tree and the depot, so the village's landmark
+was never on screen whole: cut by the right edge in portrait, under the shop in
+landscape. The artist drew three banana bins at its bottom right, and the depot
+the player was asked to drag to was an empty pad beside a building full of
+bananas.
+
+*The building is placed by its bins.* `stall_stand` puts the treehouse's ground
+anchor wherever lands `TOWN_CENTRE_BINS` — an art pixel, pinned to an opaque bin
+pixel by a test — exactly on the delivery tile. Nothing economic moved: the
+delivery point is the map's `@` as it was, so `GROVE_DISTANCE` and every
+contract stand. The house rises behind the bins, on the side D27's horseshoe
+already leaves open, so the unloading crowd stands in front of its counter; the
+walk to the grove leaves from under the deck. D25's reason for standing aside —
+a hut centred on the delivery point swallowed the queue — was true of a hut
+with no counter. A building whose counter is its front corner puts the queue in
+front of it.
+
+*The opening view is centred on it.* The focus is the ground under the middle
+of the treehouse's opaque art. On portrait phones the hand-harvest drag, which
+lies across the house's front, is in view whole. On an 844 × 390 landscape phone
+the house fills the 286-pixel board and the home tree opens eleven pixels inside
+its left edge — nearer than HOME's half-thumb margin, so HOME is shown from the
+first frame there and a short pan brings the drag fully into view. That
+was the owner's trade: the landmark centred, over the drag framed on the
+tightest phone.
+
+*Every monkey appears from the bins.* A fresh harvester already began its
+cycle at the delivery point; it now eases out of the bins into its place in the
+crowd over its hire flash. A new support monkey walks from the bins to its
+station on the walk loop, feet gripping the ground as a harvester's do, and
+then stands.
+
+*And the art scale is one half.* At zoom 2 that is one art pixel to one
+logical pixel, where 0.4 dropped a fifth of the artist's rows and columns on a
+standard-density screen. The monkey is 29 texels, 58 pixels at the floor,
+against 23 before. Every texel constant placed against the monkey — props,
+discs, the fan, shadows, the cart — is now written as art pixels times
+`ART_SCALE`, so it moves with it. The treehouse keeps its drawn size at a
+deviation of one half: half a logical pixel per art pixel at the floor, so on a
+standard-density screen it shows every other row of its art — exact on a 2×
+screen — and it is what fits the landscape board, to half a pixel. The
+objection to 0.4 holds against the treehouse too; the alternative was a
+building wider than the board.
+
+*Its cast shade lies on the ground.* The artist painted the house's shade on
+the ground into the same picture as the house, fully opaque, and drawn as one
+sprite all of it sorted at the house's depth — so it covered half the drop
+target's glow and a third of the contact shadows of the crowd at the bins. The
+master keeps it as its own bottom layer (`01 Quiet ground and cast shade`), so
+the house is exported as two sprites from its own layers: the shade flat
+between the terrain and the glow, everything else at the house's depth. The
+fallen-leaves layer stays with the house: the artist painted some of it over
+the structure, and splitting it off changed 54 pixels of the picture. A test
+holds that the two sprites, drawn one over the other, are the artist's picture
+to the pixel.
+
+Limits, measured rather than guessed. The house is one depth at its anchor
+(D25), and it is by far the largest footprint that limit applies to: a monkey
+passing under the front of the deck draws over it. It stands on the walk out to
+the grove, so a walker is mostly behind its art for about a quarter of each leg
+— and it vanishes in a single frame about five metres out, where it crosses
+the house's one depth, rather than walking in under the deck: D25's promise
+that order changes smoothly does not hold for a building this size. The swarm
+reads thinner there than it did with the house aside, and the only
+fix that keeps the house where the owner put it is a route that turns before
+the house, which moves `GROVE_DISTANCE` (D24) and is the owner's call. It also
+covers about a quarter of the home plant's crown, which stands behind it. The
+loose banana stays clear, but a third of the harvest square and a little of the
+trunk column are drawn under the house, so a press on the stairs or the left of
+the deck starts a harvest. The support stations stand clear of the unloading
+ring by half a body, every monkey of every fan, and a test holds it. A support monkey restored
+with a save appears standing — only a hire walks out. The bins are drawn in the house, so a monkey standing on the
+delivery point stands over the bins rather than among them. And on the two
+smallest boards — the 320 × 568 phone and the 844 × 390 landscape one — the
+board is little more than the house, and part of every role's fan opens past
+an edge of it, a short pan away. The unpacker moved
+from behind where the house now stands to beside the bins, and the
+technologist a step away from the home tree, so that every other viewport still
+opens with the whole crew in view.
+
 ---
 
 ## 4. Data Model

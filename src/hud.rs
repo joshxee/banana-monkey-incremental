@@ -84,9 +84,15 @@ pub(crate) struct StoreRoot;
 #[derive(Component)]
 pub(crate) struct Banner;
 
-/// The word on the bar's menu button, which shrinks with its cell.
+/// A word on one of the bar's side buttons, which shrinks with its cell.
 #[derive(Component)]
 pub(crate) struct MenuLabel;
+
+/// The bar's HOME button: takes the camera back to the opening view. Hidden
+/// until the hand-harvest drag has left the screen; see
+/// `game::sync_recentre_button`.
+#[derive(Component)]
+pub(crate) struct RecentreButton;
 
 #[derive(Component)]
 pub(crate) struct CounterText;
@@ -331,9 +337,12 @@ pub(crate) fn setup_hud(commands: &mut Commands, asset_server: &AssetServer) {
             HudRoot,
         ))
         .with_children(|root| {
-            // An empty cell, the same width as the one holding MENU. It exists
-            // only so the banner between them is centred on the viewport
-            // rather than on what is left over beside a button.
+            // The same width as the cell holding MENU, so the banner between
+            // them is centred on the viewport rather than on what is left over
+            // beside a button. Empty until the player pans the hand-harvest
+            // drag off the screen, when it offers the way back: on a phone
+            // there is no `C` key, and nothing else says the banana is still
+            // there.
             root.spawn((
                 Node {
                     width: px(MENU_BUTTON_WIDTH),
@@ -341,7 +350,29 @@ pub(crate) fn setup_hud(commands: &mut Commands, asset_server: &AssetServer) {
                 },
                 Pickable::IGNORE,
                 SideCell,
-            ));
+            ))
+            .with_children(|cell| {
+                cell.spawn((
+                    Button,
+                    ButtonAction::Recentre,
+                    RecentreButton,
+                    Node {
+                        display: Display::None,
+                        width: percent(100),
+                        min_height: px(52),
+                        padding: UiRect::axes(px(10), px(8)),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    ClassList::new("menu-button"),
+                ))
+                .with_child((
+                    Text::new("HOME"),
+                    TextFont::from_font_size(20.0),
+                    MenuLabel,
+                ));
+            });
 
             root.spawn((
                 Node {
@@ -1071,7 +1102,10 @@ pub fn apply_responsive_hud(
     mut root: Single<&mut Node, (With<HudRoot>, Without<SideCell>, Without<Banner>)>,
     mut cells: Query<&mut Node, (With<SideCell>, Without<HudRoot>, Without<Banner>)>,
     mut banner: Single<&mut Node, (With<Banner>, Without<HudRoot>, Without<SideCell>)>,
-    mut menu_label: Single<&mut TextFont, With<MenuLabel>>,
+    // Every word in a side cell, MENU and HOME alike. A `Single` here would
+    // skip this whole system - the bar's padding, the banner's width - the
+    // moment a second label existed, with nothing to say it had.
+    mut labels: Query<&mut TextFont, With<MenuLabel>>,
 ) {
     let narrow = layout.viewport.x < NARROW_WIDTH;
     let pad = bar_padding(layout.viewport.x);
@@ -1091,10 +1125,12 @@ pub fn apply_responsive_hud(
     for mut side in &mut cells {
         set_if_changed(&mut side.width, px(cell));
     }
-    set_if_changed(
-        &mut menu_label.font_size,
-        FontSize::Px(if cell < MENU_BUTTON_WIDTH { 15.0 } else { 20.0 }),
-    );
+    for mut label in &mut labels {
+        set_if_changed(
+            &mut label.font_size,
+            FontSize::Px(if cell < MENU_BUTTON_WIDTH { 15.0 } else { 20.0 }),
+        );
+    }
     set_if_changed(
         &mut banner.max_width,
         px(if narrow {

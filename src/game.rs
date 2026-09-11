@@ -10,7 +10,8 @@ use crate::{
         SupportRole, Treasury, UnitKind, Workforce, cart_crew_shortfall, multipliers_for,
         plan_hire, research_per_sec, restart_run,
     },
-    hud, isometric,
+    hud,
+    isometric::{self, Footprint},
     launch::{Launch, View},
     map::{self, Map},
     persistence,
@@ -18,8 +19,6 @@ use crate::{
     worker::{self, Cart, RestoredCycle, Worker},
 };
 
-const BANANA_FRAMES: usize = 12;
-const BANANA_FRAME_SIZE: u32 = 16;
 const KEYBOARD_HARVEST_SECONDS: f32 = 0.42;
 /// A pulse for the deposit the player just made, and is looking at.
 const SUCCESS_PULSE_SECONDS: f32 = 0.18;
@@ -168,6 +167,8 @@ impl Plugin for PresentationPlugin {
             .init_resource::<SceneLayout>()
             .init_resource::<BoardCamera>()
             .init_resource::<CameraGesture>()
+            .init_resource::<RecentreRequest>()
+            .init_resource::<FirstHarvest>()
             .init_resource::<HarvestController>()
             .init_resource::<PendingSettlement>()
             .init_resource::<Feedback>()
@@ -233,13 +234,20 @@ impl Plugin for PresentationPlugin {
                 (
                     // Before anything poses the cast: the simulation spawns
                     // actors with no art on them, and this is what puts it
-                    // there. See `worker::dress_actors`.
-                    (worker::dress_actors, worker::position_workers).chain(),
+                    // there. See `worker::dress_actors`. Animation last: it
+                    // spends the distance `position_workers` just measured.
+                    (
+                        worker::dress_actors,
+                        worker::position_workers,
+                        worker::animate_workers,
+                    )
+                        .chain(),
                     worker::position_carts,
-                    worker::animate_workers,
                     support::sync_support_avatars,
                     support::sync_support_badges,
                     animate_banana,
+                    place_held_banana,
+                    sync_recentre_button,
                     // Before the two systems that consume what it produces, so
                     // a delivery pulses and floats on the frame it settled.
                     (present_settlements, update_feedback, update_floaters).chain(),
@@ -260,11 +268,37 @@ impl Plugin for PresentationPlugin {
 #[derive(Component)]
 struct MainCamera;
 
-#[derive(Component)]
-struct HarvestZone;
+/// A press of the HUD's HOME button, waiting for the camera to act on it.
+///
+/// A resource rather than a direct write because the two halves live in
+/// different systems for good reason: `handle_menu` owns every button, and
+/// `handle_camera_input` owns the camera. It is consumed the frame it lands,
+/// exactly as the `C` key is.
+#[derive(Resource, Debug, Default)]
+struct RecentreRequest(bool);
 
+/// The player's banana's shadow: see [`place_held_banana`].
 #[derive(Component)]
-struct DepositZone;
+struct BananaShadow;
+
+/// The harvest end's own diamond, shown faintly until the first hand delivery.
+#[derive(Component)]
+struct HarvestHint;
+
+/// Whether the player has yet carried a banana home by hand this session.
+///
+/// Presentation state: it decides only whether the board teaches the drag
+/// (see `update_feedback`), and nothing in the economy reads it.
+#[derive(Resource, Debug)]
+struct FirstHarvest {
+    pending: bool,
+}
+
+impl Default for FirstHarvest {
+    fn default() -> Self {
+        Self { pending: true }
+    }
+}
 
 #[derive(Component)]
 struct DepositGlow;
@@ -302,10 +336,10 @@ struct Floater {
 
 #[derive(Component, Clone, Copy)]
 enum LayoutElement {
-    HarvestZone,
-    DepositZone,
     DepositGlow,
+    HarvestHint,
     Banana,
+    BananaShadow,
     HarvestLabel,
     DepositLabel,
 }
@@ -313,6 +347,8 @@ enum LayoutElement {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ButtonAction {
     OpenMenu,
+    /// Take the camera back to the opening view. See [`RecentreRequest`].
+    Recentre,
     Hire(UnitKind),
     Info(hud::Unit),
     PreviousShopTab,
@@ -338,6 +374,7 @@ impl ButtonAction {
     fn active_in(self, menu: MenuState) -> bool {
         match self {
             ButtonAction::OpenMenu
+            | ButtonAction::Recentre
             | ButtonAction::Hire(_)
             | ButtonAction::Info(_)
             | ButtonAction::PreviousShopTab
@@ -389,7 +426,7 @@ impl BoardCamera {
     /// The furthest the board goes, bounded by **how big a monkey is**, never
     /// by how much of the map fits.
     ///
-    /// A monkey is 22 texels tall, so this renders one 44 logical pixels — about
+    /// A monkey is 29 texels tall, so this renders one 58 logical pixels — about
     /// a thumbnail, and the point below which the cast stops reading as animals
     /// and starts reading as confetti. Clamping to "fit the 69x69 map" instead
     /// would put a phone near zoom 0.3 and a monkey at six pixels: the whole
@@ -409,6 +446,10 @@ impl BoardCamera {
     /// phone — the tightest safe area the game supports, 286 px square — the
     /// second of those fails at any zoom past this one.
     ///
+    /// Since D30 the opening view is centred on the treehouse instead, and on
+    /// that phone the home tree and part of the crew open just off the board;
+    /// a higher zoom would lose the depot as well.
+    ///
     /// So this sits on `MIN_ZOOM` rather than above it, and pinching outwards
     /// from a fresh board does nothing. That is a real cost, and it is the
     /// cheaper one: the alternative is opening below the zoom at which a monkey
@@ -423,15 +464,14 @@ impl BoardCamera {
     /// quarter of the board at the low end - so it eases instead.
     const SETTLE_RATE: f32 = 14.0;
 
-    /// The view a new player opens on: the opening drag, centred.
+    /// The view a new player opens on: centred on the treehouse, the village's
+    /// landmark and its depot (D30). The hand-harvest drag lies across its
+    /// front, so on a portrait phone both ends of it are in view; on a
+    /// landscape one the home tree opens nearer the edge than a thumb, and HOME
+    /// says so.
     fn opening(map: &Map) -> Self {
-        let town_centre = isometric::tile_centre(map.town_centre());
-        let home_tree = map
-            .home_trees()
-            .first()
-            .map_or(town_centre, |&tile| isometric::tile_centre(tile));
         Self {
-            focus: town_centre.midpoint(home_tree),
+            focus: isometric::town_centre_view(map),
             zoom: Self::DEFAULT_ZOOM,
             resting_zoom: Self::DEFAULT_ZOOM,
         }
@@ -575,6 +615,48 @@ impl Default for SceneLayout {
         Self::for_viewport(Vec2::new(1280.0, 720.0))
     }
 }
+
+/// How far the hand-harvest target reaches either side of the home tree, in
+/// metres: three tiles square.
+///
+/// That is its size at the zoom floor, where its diamond's short axis is 96
+/// pixels; above the floor it is capped on screen instead (see
+/// [`HARVEST_SHORT_AXIS_PX`]). And it stops well short of the depot: the home
+/// tree is ten metres out, so three here and five there leave two metres of
+/// ground that is neither, and a drag cannot start on its own drop target.
+const HARVEST_REACH_METRES: f32 = 3.0;
+/// The most screen the grab target's diamond may take, as its short axis in
+/// logical pixels: exactly its size at the zoom floor.
+///
+/// Harvest gets first refusal on every press (D26), so its target is also
+/// where the camera cannot be driven from. Three metres at every zoom is a
+/// diamond of 576 x 288 pixels at zoom 6 - three quarters of a landscape
+/// phone's board - which left a player zoomed in on the village nothing to
+/// pan or pinch with but the corners. Zoomed in, the plant grows and the
+/// ground its target covers shrinks, never below the banana's own spot.
+const HARVEST_SHORT_AXIS_PX: f32 = 96.0;
+/// The plant above the banana grabs too, within a narrow column up the trunk:
+/// half its width, and its height at most, in logical pixels.
+///
+/// The palm is the biggest, brightest thing by the banana and it is what a
+/// stranger reaches for; a press on its fronds used to be the camera's, and the
+/// player's very first try slid the board away from the thing they were
+/// reaching for. Narrow, and capped, so that zoomed in - where the crown fills
+/// the screen - the board is still the camera's.
+const TRUNK_HALF_WIDTH_PX: f32 = 24.0;
+const TRUNK_REACH_PX: f32 = 160.0;
+/// Where the loose banana lies relative to the home tree's trunk, in metres:
+/// towards the viewer, so it sorts in front of the plant and lies on its shadow.
+const BANANA_REST_OFFSET: Vec2 = Vec2::new(0.8, 0.8);
+/// How far a held banana is drawn above the pointer, in board texels: most of
+/// a banana, so a thumb on the glass does not cover it.
+const HELD_LIFT_TEXELS: f32 = 14.0;
+/// And never less than this, in logical pixels: clear of a thumb's pad, and of
+/// the lower edge of the DEPOT sign the banana is being aimed at.
+const HELD_LIFT_MIN_PX: f32 = 44.0;
+/// How far inside the safe area both ends of the drag must be for it to count
+/// as in view, in logical pixels: half a thumb.
+const DRAG_VIEW_MARGIN: f32 = 22.0;
 
 /// How far past the ground they work the player may pan, in metres.
 ///
@@ -832,30 +914,111 @@ impl SceneLayout {
         self.zoom
     }
 
-    /// How wide a hand-harvest target is on screen.
-    pub(crate) fn zone_size(self) -> f32 {
-        (self.scene_side * 0.18).max(48.0)
+    /// Where the loose banana lies, in metres: on the ground at the home tree's
+    /// foot, which is the node the player picks by hand (D24), a step towards
+    /// the viewer so the plant can never draw over it.
+    ///
+    /// On the ground, not in the plant. It used to hang 1.4 m up, a height
+    /// chosen for the old palm mesh's crown, and against the drawn plant that
+    /// is across the trunk: a yellow band tied round the tree rather than
+    /// something lying there to be picked up.
+    pub(crate) fn banana_ground(self) -> Vec2 {
+        self.home_tree + BANANA_REST_OFFSET
     }
 
-    pub(crate) fn banana_size(self) -> f32 {
-        (self.scene_side * 0.050).clamp(18.0, 36.0)
-    }
-
-    /// Where the loose banana sits when nobody is dragging it: at the home
-    /// tree, which is the node the player picks by hand (D24).
+    /// Where the loose banana is drawn when nobody is holding it: its feet.
     pub(crate) fn banana_home(self) -> Vec2 {
-        self.board_raised(self.home_tree, 1.4)
+        self.board(self.banana_ground())
+    }
+
+    /// Where a held banana is drawn, for a pointer at `screen`.
+    ///
+    /// Lifted clear of the pointer, so on a phone the thumb covers the
+    /// banana's shadow - which marks the ground the drop is tested against -
+    /// and not the banana it is carrying.
+    pub(crate) fn held_banana(self, screen: Vec2) -> Vec2 {
+        screen + Vec2::new(0.0, (HELD_LIFT_TEXELS * self.zoom).max(HELD_LIFT_MIN_PX))
+    }
+
+    /// The ground position, in metres, under a point on the screen: the exact
+    /// inverse of [`Self::board`].
+    pub(crate) fn ground(self, screen: Vec2) -> Vec2 {
+        isometric::unproject((screen - self.origin) / self.zoom)
+    }
+
+    /// Where a hand harvest starts: a square of ground round the home tree.
+    ///
+    /// Three metres at the zoom floor, and no more than
+    /// [`HARVEST_SHORT_AXIS_PX`] of screen above it.
+    pub(crate) fn harvest_target(self) -> Footprint {
+        // The diamond's short axis per metre of half, at unit zoom.
+        let per_metre = 2.0 * isometric::project(Vec2::splat(-1.0)).y;
+        let half = HARVEST_REACH_METRES.min(HARVEST_SHORT_AXIS_PX / (per_metre * self.zoom));
+        Footprint::new(self.home_tree, half)
+    }
+
+    /// Where it ends: the depot's trodden ground, edge to edge.
+    pub(crate) fn deposit_target(self) -> Footprint {
+        Footprint::new(self.town_centre, isometric::DEPOT_REACH_METRES)
+    }
+
+    /// Whether a point on the screen is over the harvest target.
+    ///
+    /// Taken down to the ground and tested there. The target used to be a
+    /// square of screen, `scene_side * 0.18`, sized from the chrome rather than
+    /// from the board: zoom in and the plant grew while the box stayed put,
+    /// zoom out and the box swallowed the village, and at any zoom it was the
+    /// one shape on screen off the 2:1 grid.
+    pub(crate) fn on_harvest(self, screen: Vec2) -> bool {
+        self.harvest_target().contains(self.ground(screen)) || self.on_trunk(screen)
+    }
+
+    /// Whether a point on the screen is on the home plant, up its trunk into
+    /// the lower crown. See [`TRUNK_HALF_WIDTH_PX`].
+    fn on_trunk(self, screen: Vec2) -> bool {
+        let foot = self.board(self.home_tree);
+        let crown = (art::PLANT.height_above(art::PLANT_CROWN_ROW) * self.zoom).min(TRUNK_REACH_PX);
+        (screen.x - foot.x).abs() <= TRUNK_HALF_WIDTH_PX
+            && screen.y >= foot.y
+            && screen.y <= foot.y + crown
+    }
+
+    /// Whether a point on the screen is over the depot.
+    pub(crate) fn on_deposit(self, screen: Vec2) -> bool {
+        self.deposit_target().contains(self.ground(screen))
+    }
+
+    /// The box round a footprint's diamond, on screen. For the diagnostics
+    /// log and the browser suite, which want a rectangle; never for hit
+    /// testing, which is what `on_harvest` and `on_deposit` are for.
+    pub(crate) fn screen_box(self, footprint: Footprint) -> Rect {
+        let [top, right, bottom, left] = footprint.diamond().map(|p| self.origin + p * self.zoom);
+        Rect::from_corners(Vec2::new(left.x, bottom.y), Vec2::new(right.x, top.y))
     }
 
     pub(crate) fn harvest_bounds(self) -> Rect {
-        Rect::from_center_size(self.banana_home(), Vec2::splat(self.zone_size()))
+        self.screen_box(self.harvest_target())
     }
 
     pub(crate) fn deposit_bounds(self) -> Rect {
-        Rect::from_center_size(
-            self.board(self.town_centre),
-            Vec2::splat(self.zone_size() + 36.0),
-        )
+        self.screen_box(self.deposit_target())
+    }
+
+    /// Whether both ends of the hand-harvest drag are in the safe area.
+    ///
+    /// The pan clamp promises that *some of the walk* is always on screen, not
+    /// that the home tree is: pan to the grove end and the one gesture a new
+    /// player is taught becomes impossible, silently. When this is false the
+    /// HUD offers a way home (see `sync_recentre_button`), which on a phone is
+    /// the only one there is.
+    pub(crate) fn drag_in_view(self) -> bool {
+        // Half a thumb inside the edge, not merely inside it: a home tree
+        // whose centre is a pixel inside the safe area has most of its target
+        // under the store panel, and the drag is as good as gone.
+        let inner = self.safe.inflate(-DRAG_VIEW_MARGIN);
+        [self.home_tree, self.town_centre]
+            .into_iter()
+            .all(|at| contains_inclusive(inner, self.board(at)))
     }
 
     pub(crate) fn stall_glow_anchor(self) -> Vec2 {
@@ -879,14 +1042,19 @@ impl SceneLayout {
     /// the eleven-metre station is off the side of a phone, so a chef the
     /// player paid for is drawing wages somewhere they cannot see.
     ///
-    /// All three now sit 8.2 metres out at bearings chosen for *projected*
-    /// separation, which the isometric fold makes a different question from
-    /// ground separation. The closest two are 85 px apart at unit zoom against
-    /// a fan half-width of 21 — nearly a fifth further than the line they
-    /// replace — while every avatar of every fan is inside the safe area at the
-    /// opening camera on every viewport, and stands at least 2.8 m clear of the
-    /// walk, 9 m clear of the stall and 5.9 m clear of the home tree. That last
-    /// one is a real constraint, not a courtesy: the home tree carries the
+    /// Since the treehouse became the depot (D30) the three stand round its
+    /// bins rather than on an 8.2 m ring, and every monkey of every fan clear
+    /// of the ring the unloading crowd stands on (4.8 m) by half a body, so no
+    /// role is mistaken for the queue: the unpacker to the right of the bins it
+    /// empties, where the old ring put it behind the house; the chef in front
+    /// and to the left, towards the stairs; the technologist further left,
+    /// clear of the home tree. `support_never_stands_in_the_unloading_crowd`
+    /// holds the first of those. The closest two are still more than a full fan apart
+    /// on screen, every avatar of every fan is inside the safe area at the
+    /// opening camera on every viewport but the two smallest boards - the
+    /// 320 x 568 phone and the 844 x 390 landscape one (D30) - and all
+    /// three stand clear of the walk, of the house and of the home tree. That
+    /// last one is a real constraint, not a courtesy: the home tree carries the
     /// hand-harvest drag target, so a station under its crown puts a monkey
     /// inside the thing the player is trying to grab.
     /// `every_support_avatar_is_on_screen_when_the_game_opens`,
@@ -896,28 +1064,36 @@ impl SceneLayout {
     /// that leaves the screen first.
     pub(crate) fn support_stand(self, role: SupportRole) -> Vec2 {
         let offset = match role {
-            // Towards the grove, so it meets the arriving queue where the queue
-            // actually arrives from - and the furthest of the three from the
-            // viewer, which puts it behind the crowd it is clearing rather than
-            // in front of it.
-            SupportRole::Unpacker => Vec2::new(-4.47, -6.88),
+            // Beside the bins it empties, level with them on screen and to
+            // their right: clear of the house behind the depot, where the old
+            // ring stood it, and of the walk out to the grove on the left.
+            SupportRole::Unpacker => Vec2::new(4.0, -4.6),
             // Nearest the viewer, at the front of the village: being fed is the
             // most-watched thing that happens at the stall, and what the player
             // is looking for when the banner reads HUNGRY.
-            SupportRole::Chef => Vec2::new(4.1, 7.1),
+            SupportRole::Chef => Vec2::new(1.0, 7.0),
             // Off to one side, clear of the ground between the depot and the
             // kitchen: research is the one job with no traffic of its own. Its
             // bearing is also the one the home tree constrains - swung further
             // round, the research desk stands underneath the tree the player
             // hand-harvests from, inside the drag target.
-            SupportRole::Technologist => Vec2::new(-6.63, 4.82),
+            SupportRole::Technologist => Vec2::new(-6.2, 5.0),
         };
         self.town_centre + offset
     }
 
-    /// Where one member of a role's fan stands, in metres.
-    pub(crate) fn support_point(self, role: SupportRole, spread: f32) -> Vec2 {
-        self.support_stand(role) + Vec2::new(spread, spread * 0.5)
+    /// Where one member of a role's fan stands, in metres, placed `offset`
+    /// board texels from the station *on the screen* (see
+    /// `support::slot_offset`).
+    ///
+    /// A fan is a thing the player sees, so it is laid out in screen terms and
+    /// taken back to the ground through `unproject`. It used to be a step along
+    /// the ground diagonal `(1, 0.5)`, which projects to about six texels
+    /// across and nine down per metre: the monkeys stood in a queue receding
+    /// from the viewer, each mostly hidden behind the one in front, and no
+    /// spacing along that line could separate them.
+    pub(crate) fn support_point(self, role: SupportRole, offset: Vec2) -> Vec2 {
+        self.support_stand(role) + isometric::unproject(offset)
     }
 
     /// Snap a distance *from the board's origin* to the world's texel grid, so
@@ -1235,62 +1411,79 @@ pub(crate) enum MenuState {
     ConfirmRestart,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     asset_server: Res<AssetServer>,
     mut atlas_layouts: ResMut<Assets<bevy::image::TextureAtlasLayout>>,
+    mut images: ResMut<Assets<Image>>,
     launch: Res<Launch>,
     village: Res<map::Village>,
 ) {
     commands.spawn((Camera2d, MainCamera));
 
-    let art = art::Art::load(&asset_server, &mut atlas_layouts);
+    let art = art::Art::load(&asset_server, &mut atlas_layouts, &mut images);
     isometric::spawn_world(&mut commands, &mut meshes, &mut materials, &art, &village);
-    commands.insert_resource(art);
+    commands.insert_resource(art.clone());
 
+    // The depot's own diamond, laid on the ground under the crowd standing in
+    // it. It was an axis-aligned square of light hung a metre up, sized from
+    // the chrome: on a phone the single most dominant object on the board, and
+    // the only thing on it off the 2:1 grid. Built round the origin and placed
+    // by its transform, so it pans and zooms with the ground it marks.
+    let [top, right, bottom, left] =
+        Footprint::new(Vec2::ZERO, isometric::DEPOT_REACH_METRES).diamond();
     commands.spawn((
-        Sprite::from_color(Color::NONE, Vec2::ONE),
-        Transform::from_xyz(0.0, 0.0, 0.0),
-        HarvestZone,
-        LayoutElement::HarvestZone,
-    ));
-
-    commands.spawn((
-        Sprite::from_color(Color::srgba(1.0, 0.78, 0.08, 0.0), Vec2::ONE),
-        Transform::from_xyz(0.0, 0.0, -0.5),
+        Mesh2d(meshes.add(Rhombus::new(right.x - left.x, top.y - bottom.y))),
+        MeshMaterial2d(materials.add(ColorMaterial {
+            color: GLOW.with_alpha(0.0),
+            alpha_mode: bevy::sprite_render::AlphaMode2d::Blend,
+            ..default()
+        })),
+        Transform::default(),
         DepositGlow,
         LayoutElement::DepositGlow,
     ));
 
+    // The harvest end's own diamond, faint, until the player has made one
+    // delivery by hand: see `update_feedback`. Built at a unit half and scaled
+    // to whatever the target is at the current zoom.
+    let [top, right, bottom, left] = Footprint::new(Vec2::ZERO, 1.0).diamond();
     commands.spawn((
-        Sprite::from_color(Color::NONE, Vec2::ONE),
-        Transform::from_xyz(0.0, 0.0, 0.0),
-        DepositZone,
-        LayoutElement::DepositZone,
+        Mesh2d(meshes.add(Rhombus::new(right.x - left.x, top.y - bottom.y))),
+        MeshMaterial2d(materials.add(ColorMaterial {
+            color: GLOW.with_alpha(0.0),
+            alpha_mode: bevy::sprite_render::AlphaMode2d::Blend,
+            ..default()
+        })),
+        Transform::default(),
+        HarvestHint,
+        LayoutElement::HarvestHint,
     ));
 
-    commands
-        .spawn((
-            Sprite::from_color(GOLD, Vec2::new(10.0, 5.0)),
-            Transform::from_xyz(0.0, 0.0, 3.0),
-            Banana,
-            LayoutElement::Banana,
-            BananaAnimation {
-                timer: Timer::new(Duration::from_secs_f32(1.0 / 12.0), TimerMode::Repeating),
-            },
-        ))
-        .with_children(|banana| {
-            banana.spawn((
-                Sprite::from_color(GOLD, Vec2::new(9.0, 5.0)),
-                Transform::from_xyz(7.0, -2.0, 0.1).with_rotation(Quat::from_rotation_z(-0.42)),
-            ));
-            banana.spawn((
-                Sprite::from_color(BROWN, Vec2::new(2.0, 3.0)),
-                Transform::from_xyz(11.0, -4.0, 0.2).with_rotation(Quat::from_rotation_z(-0.42)),
-            ));
-        });
+    // The drawn banana, spinning where it lies: the one thing on the board
+    // that moves for no reason but to be noticed, which is what a pickup is.
+    // Anchored at its bottom edge, so it lies *on* the ground at its feet.
+    commands.spawn((
+        art.banana(art::BANANA_TEXELS, 0),
+        bevy::sprite::Anchor::BOTTOM_CENTER,
+        Transform::default(),
+        Banana,
+        LayoutElement::Banana,
+        BananaAnimation {
+            timer: Timer::new(Duration::from_secs_f32(1.0 / 12.0), TimerMode::Repeating),
+        },
+    ));
+    // And its shadow, which stays on the ground while the banana is carried:
+    // under the pointer, marking the exact ground the drop is tested against.
+    commands.spawn((
+        art.shadow(art::SHADOW_TEXELS, isometric::SHADOW_COLOUR),
+        Transform::default(),
+        BananaShadow,
+        LayoutElement::BananaShadow,
+    ));
 
     spawn_place_label(
         &mut commands,
@@ -1315,6 +1508,15 @@ fn setup(
         hud::setup_menu(&mut commands, &asset_server);
     }
 }
+
+/// Where the DEPOT sign stands relative to the delivery point, in metres, and
+/// how high: towards the viewer's right of the bins, at their lip.
+const DEPOT_SIGN_OFFSET: Vec2 = Vec2::new(1.2, -1.2);
+const DEPOT_SIGN_RAISE: f32 = 2.4;
+
+/// Where delivery floaters rise from, relative to the delivery point, in
+/// metres: beside the bins, to the right, rather than through the sign.
+const FLOATER_ORIGIN: Vec2 = Vec2::new(2.0, -2.0);
 
 /// The type size a place label is drawn at.
 const PLACE_LABEL_FONT: f32 = 16.0;
@@ -1391,7 +1593,6 @@ fn refresh_layout(
 #[allow(clippy::type_complexity)]
 fn apply_layout(
     layout: Res<SceneLayout>,
-    controller: Res<HarvestController>,
     mut world: Single<&mut Transform, With<isometric::WorldRoot>>,
     mut elements: Query<
         (&LayoutElement, Option<&mut Sprite>, &mut Transform),
@@ -1409,48 +1610,31 @@ fn apply_layout(
         world.scale = root.scale;
     }
 
-    let zone_size = layout.zone_size();
-    for (element, sprite, mut transform) in &mut elements {
+    // Board texels to screen pixels, and a unit z scale so a depth offset
+    // stays a depth offset.
+    let board_scale = Vec3::new(layout.world_scale(), layout.world_scale(), 1.0);
+    for (element, _, mut transform) in &mut elements {
         match element {
-            LayoutElement::HarvestZone => {
-                // The hand-harvest target is the home tree, not the worked
-                // node: the worked node is thirty tiles out and never shares a
-                // screen with the town centre (D24).
-                transform.translation = layout.banana_home().extend(isometric::OVERLAY_Z);
-                sprite.expect("harvest hit target has sprite").custom_size =
-                    Some(Vec2::splat(zone_size));
-            }
-            LayoutElement::DepositZone => {
-                transform.translation = layout
-                    .board(layout.town_centre())
-                    .extend(isometric::OVERLAY_Z);
-                sprite.expect("deposit hit target has sprite").custom_size =
-                    Some(Vec2::splat(zone_size));
+            LayoutElement::HarvestHint => {
+                // Built at a unit half; scaled to whatever the target is at
+                // this zoom, so the hint is exactly what grabs.
+                let half = layout.harvest_target().half;
+                transform.translation = layout.board(layout.home_tree()).extend(isometric::GLOW_Z);
+                transform.scale = Vec3::new(board_scale.x * half, board_scale.y * half, 1.0);
             }
             LayoutElement::DepositGlow => {
-                sprite.expect("deposit glow has sprite").custom_size =
-                    Some(Vec2::splat(zone_size + 36.0));
-                transform.translation = layout.stall_glow_anchor().extend(isometric::stand_z(
-                    layout.town_centre(),
-                    -4.0 * isometric::NUDGE_STEP,
-                ));
+                transform.translation =
+                    layout.board(layout.town_centre()).extend(isometric::GLOW_Z);
+                transform.scale = board_scale;
             }
             LayoutElement::Banana => {
-                if matches!(controller.interaction, HarvestInteraction::Idle) {
-                    transform.translation = layout.banana_home().extend(isometric::stand_z(
-                        layout.home_tree(),
-                        2.0 * isometric::NUDGE_STEP,
-                    ));
-                }
-                let lift = if matches!(controller.interaction, HarvestInteraction::Dragging { .. })
-                {
-                    1.12
-                } else {
-                    1.0
-                };
-                transform.scale =
-                    Vec3::splat(layout.banana_size() / BANANA_FRAME_SIZE as f32 * lift);
-                transform.rotation = Quat::from_rotation_z(-0.15);
+                // Placed by `place_held_banana`, after input. One art pixel to one board texel, at every zoom, held or not:
+                // a whole-number scale is what keeps a sixteen-pixel sprite from
+                // crawling as it moves.
+                transform.scale = board_scale;
+            }
+            LayoutElement::BananaShadow => {
+                transform.scale = board_scale;
             }
             LayoutElement::HarvestLabel => {
                 transform.translation = layout
@@ -1464,8 +1648,11 @@ fn apply_layout(
                 // metres it hung a hundred pixels above the pad it names, which
                 // is what let it sit over bare grass for so long without
                 // anyone noticing there was nothing under it.
+                // On the bins it names, just above their lip, and off the
+                // porch and door above them - the drawing's best detail, which
+                // a sign centred on the delivery point covered.
                 transform.translation = layout
-                    .board_raised(layout.town_centre(), 3.5)
+                    .board_raised(layout.town_centre() + DEPOT_SIGN_OFFSET, DEPOT_SIGN_RAISE)
                     .extend(PLACE_LABEL_Z);
                 transform.scale = Vec3::splat(layout.world_scale().clamp(0.8, 1.35));
             }
@@ -1835,6 +2022,7 @@ fn present_settlements(
     mut commands: Commands,
     layout: Res<SceneLayout>,
     floaters: Query<Entity, With<Floater>>,
+    mut first: ResMut<FirstHarvest>,
 ) {
     // Otherwise up to 0.9 s of "+5" keeps rising over a stall that just went
     // back to zero.
@@ -1844,6 +2032,9 @@ fn present_settlements(
         }
     }
     for Settled { delivery, .. } in settled.read() {
+        if delivery.kind == DeliveryKind::Manual {
+            first.pending = false;
+        }
         if delivery.kind.is_income() {
             feedback.success = Some(Timer::new(
                 Duration::from_secs_f32(match delivery.kind {
@@ -1945,7 +2136,8 @@ fn spawn_floater(commands: &mut Commands, layout: &SceneLayout, delivery: Delive
         ((mixed >> 40) as u32) as f32 / 16_777_216.0
     };
     let angle = spin * std::f32::consts::TAU;
-    let anchor = layout.town_centre() + Vec2::from_angle(angle) * FLOATER_SPREAD_METRES;
+    let anchor =
+        layout.town_centre() + FLOATER_ORIGIN + Vec2::from_angle(angle) * FLOATER_SPREAD_METRES;
     let (label, size, colour) = match delivery.kind {
         DeliveryKind::Worker => (format!("+{:.0}", delivery.amount), 34.0, GOLD),
         // Bigger, because it is forty times the size and lands once every three
@@ -2014,6 +2206,7 @@ fn handle_menu(
     time: Res<Time>,
     layout: Res<SceneLayout>,
     mut banana: Single<&mut Transform, With<Banana>>,
+    mut recentre: ResMut<RecentreRequest>,
 ) {
     pointer_guard.suppress_hire_for =
         (pointer_guard.suppress_hire_for - time.delta_secs()).max(0.0);
@@ -2079,6 +2272,9 @@ fn handle_menu(
         match action {
             ButtonAction::OpenMenu if *menu == MenuState::Closed => {
                 requested = Some(MenuState::Open);
+            }
+            ButtonAction::Recentre if *menu == MenuState::Closed => {
+                recentre.0 = true;
             }
             ButtonAction::Hire(kind)
                 if *menu == MenuState::Closed
@@ -2199,8 +2395,7 @@ fn handle_harvest_input(
                 let camera_position =
                     pointer_in_camera_space(raw, window.resolution.base_scale_factor());
                 let world = screen_to_world(camera_position, &camera);
-                let accepted = world
-                    .is_some_and(|position| contains_inclusive(layout.harvest_bounds(), position));
+                let accepted = world.is_some_and(|position| layout.on_harvest(position));
                 diagnostic_log!(
                     frame_count,
                     "touch_start",
@@ -2242,7 +2437,7 @@ fn handle_harvest_input(
                     position,
                 };
                 diagnostic_trace.begin(PointerId::Touch(id), raw);
-                banana.translation = position.extend(isometric::OVERLAY_Z);
+                banana.translation = layout.held_banana(position).extend(isometric::OVERLAY_Z);
                 diagnostic_log!(
                     frame_count,
                     "drag_begin",
@@ -2267,8 +2462,7 @@ fn handle_harvest_input(
                     pointer_in_camera_space(position, window.resolution.base_scale_factor())
                 });
                 let world = camera_position.and_then(|position| screen_to_world(position, &camera));
-                let in_harvest = world
-                    .is_some_and(|position| contains_inclusive(layout.harvest_bounds(), position));
+                let in_harvest = world.is_some_and(|position| layout.on_harvest(position));
                 let accepted =
                     pointer_guard.suppress_mouse_for == 0.0 && in_harvest && !started_in_ui;
                 diagnostic_log!(
@@ -2295,7 +2489,7 @@ fn handle_harvest_input(
                         position,
                     };
                     diagnostic_trace.begin(PointerId::Mouse, raw);
-                    banana.translation = position.extend(isometric::OVERLAY_Z);
+                    banana.translation = layout.held_banana(position).extend(isometric::OVERLAY_Z);
                     diagnostic_log!(
                         frame_count,
                         "drag_begin",
@@ -2335,8 +2529,7 @@ fn handle_harvest_input(
                 let camera_position =
                     pointer_in_camera_space(raw, window.resolution.base_scale_factor());
                 let position = screen_to_world(camera_position, &camera);
-                let in_deposit = position
-                    .is_some_and(|position| contains_inclusive(layout.deposit_bounds(), position));
+                let in_deposit = position.is_some_and(|position| layout.on_deposit(position));
                 diagnostic_log!(
                     frame_count,
                     "touch_release",
@@ -2396,7 +2589,7 @@ fn handle_harvest_input(
                         pointer: PointerId::Touch(id),
                         position,
                     };
-                    banana.translation = position.extend(isometric::OVERLAY_Z);
+                    banana.translation = layout.held_banana(position).extend(isometric::OVERLAY_Z);
                 }
             } else if !diagnostic_trace.missing_reported {
                 diagnostic_log!(
@@ -2420,8 +2613,7 @@ fn handle_harvest_input(
                 })
                 .and_then(|position| screen_to_world(position, &camera));
             if mouse.just_released(MouseButton::Left) {
-                let in_deposit = position
-                    .is_some_and(|position| contains_inclusive(layout.deposit_bounds(), position));
+                let in_deposit = position.is_some_and(|position| layout.on_deposit(position));
                 diagnostic_log!(
                     frame_count,
                     "mouse_release",
@@ -2447,7 +2639,7 @@ fn handle_harvest_input(
                         pointer: PointerId::Mouse,
                         position,
                     };
-                    banana.translation = position.extend(isometric::OVERLAY_Z);
+                    banana.translation = layout.held_banana(position).extend(isometric::OVERLAY_Z);
                 }
             } else {
                 diagnostic_log!(
@@ -2552,6 +2744,7 @@ fn handle_camera_input(
     village: Res<map::Village>,
     mut gesture: ResMut<CameraGesture>,
     mut board: ResMut<BoardCamera>,
+    mut recentre: ResMut<RecentreRequest>,
 ) {
     let centre = layout.scene_center();
     let mut next = *board;
@@ -2732,7 +2925,11 @@ fn handle_camera_input(
                 * time.delta_secs();
             drag(&mut next, centre, step);
         }
-        if keys.just_pressed(KeyCode::KeyC) {
+        // `C` on a keyboard, HOME on the HUD - the only way back on a phone.
+        // Taken before the test, so a HOME press landing on the same frame as
+        // `C` is spent rather than firing again next frame.
+        let home = std::mem::take(&mut recentre.0);
+        if keys.just_pressed(KeyCode::KeyC) || home {
             // The zoom as well as the aim. Recentring a player who is lost at
             // maximum zoom onto a three-tile keyhole leaves them exactly as
             // lost, facing the right way. The zoom eases rather than jumping,
@@ -2810,7 +3007,7 @@ fn finish_pointer_drag(
     pending: &mut PendingSettlement,
     banana: &mut Transform,
 ) {
-    if position.is_some_and(|position| contains_inclusive(layout.deposit_bounds(), position)) {
+    if position.is_some_and(|position| layout.on_deposit(position)) {
         pending.0 = Some(SettlementSource::Pointer(pointer));
     } else {
         cancel_harvest(controller, pending);
@@ -2843,7 +3040,7 @@ fn move_keyboard_harvest(
 
     let elapsed = elapsed + time.delta_secs();
     let progress = (elapsed / KEYBOARD_HARVEST_SECONDS).clamp(0.0, 1.0);
-    let eased = progress * progress * (3.0 - 2.0 * progress);
+    let eased = ease(progress);
     let mut position = layout
         .banana_home()
         .lerp(layout.board(layout.town_centre()), eased);
@@ -2971,6 +3168,74 @@ fn persist_changes(
     }
 }
 
+/// Show HOME only while the hand-harvest drag is out of view.
+///
+/// Shown always, it is a permanent button for a problem most players never
+/// have; hidden always, a player who has panned to the grove on a phone has no
+/// way back and no hint that the banana still exists. Appearing exactly when
+/// the drag leaves the screen makes it the feedback as well as the fix.
+fn sync_recentre_button(
+    layout: Res<SceneLayout>,
+    mut buttons: Query<&mut Node, With<hud::RecentreButton>>,
+) {
+    let display = if layout.drag_in_view() {
+        Display::None
+    } else {
+        Display::Flex
+    };
+    for mut node in &mut buttons {
+        if node.display != display {
+            node.display = display;
+        }
+    }
+}
+
+/// Smoothstep: a motion that starts and ends at rest.
+fn ease(progress: f32) -> f32 {
+    progress * progress * (3.0 - 2.0 * progress)
+}
+
+/// Where the player's banana and its shadow are drawn this frame, from what
+/// the hand is doing.
+///
+/// One system, after input, for both. They used to be placed a schedule
+/// apart, the shadow in layout from last frame's interaction and the banana by
+/// input this frame, so the shadow trailed the banana by a frame on every drag,
+/// stayed under the tree for the whole keyboard arc, and a banana put back
+/// drew over the plant's visitors for a frame. The shadow is the drop point;
+/// it cannot be a frame stale.
+fn place_held_banana(
+    layout: Res<SceneLayout>,
+    controller: Res<HarvestController>,
+    mut banana: Single<&mut Transform, (With<Banana>, Without<BananaShadow>)>,
+    mut shadow: Single<&mut Transform, (With<BananaShadow>, Without<Banana>)>,
+) {
+    let ground = match controller.interaction {
+        // Lying where it rests, sorted with the world: in front of the plant
+        // it lies before, behind a monkey walking past in front of it.
+        HarvestInteraction::Idle => {
+            banana.translation = layout
+                .banana_home()
+                .extend(isometric::stand_z(layout.banana_ground(), 0.0));
+            layout.banana_ground()
+        }
+        // In the hand, over everything; its shadow under the pointer.
+        HarvestInteraction::Dragging { position, .. } => {
+            banana.translation = layout.held_banana(position).extend(isometric::OVERLAY_Z);
+            layout.ground(position)
+        }
+        // The keyboard flies the banana on an arc (`move_keyboard_harvest`);
+        // its shadow crosses the ground under it on the same easing.
+        HarvestInteraction::KeyboardHarvest { elapsed, .. } => {
+            let progress = (elapsed / KEYBOARD_HARVEST_SECONDS).clamp(0.0, 1.0);
+            layout
+                .banana_ground()
+                .lerp(layout.town_centre(), ease(progress))
+        }
+    };
+    shadow.translation = layout.board(ground).extend(isometric::MARK_Z);
+}
+
 fn animate_banana(
     time: Res<Time>,
     mut banana: Single<(&mut BananaAnimation, &mut Sprite), With<Banana>>,
@@ -2979,21 +3244,26 @@ fn animate_banana(
     if banana.0.timer.just_finished()
         && let Some(atlas) = banana.1.texture_atlas.as_mut()
     {
-        atlas.index = (atlas.index + 1) % BANANA_FRAMES;
+        atlas.index = (atlas.index + 1) % art::BANANA_FRAMES as usize;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_feedback(
     time: Res<Time>,
     controller: Res<HarvestController>,
     layout: Res<SceneLayout>,
+    first: Res<FirstHarvest>,
+    workforce: Res<Workforce>,
     mut feedback: ResMut<Feedback>,
-    mut glow: Single<&mut Sprite, With<DepositGlow>>,
+    glow: Single<&MeshMaterial2d<ColorMaterial>, With<DepositGlow>>,
+    hint: Single<&MeshMaterial2d<ColorMaterial>, With<HarvestHint>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     let drag_highlight = matches!(
         controller.interaction,
         HarvestInteraction::Dragging { position, .. }
-            if contains_inclusive(layout.deposit_bounds(), position)
+            if layout.on_deposit(position)
     );
 
     let mut pulse = 0.0;
@@ -3007,9 +3277,55 @@ fn update_feedback(
     }
     feedback.pulse = pulse;
 
-    let alpha = if drag_highlight { 0.34 } else { pulse * 0.46 };
-    glow.color = Color::srgba(1.0, 0.78, 0.08, alpha);
+    // Until the player has carried one banana home, both ends of the drag are
+    // marked - a faint diamond under the banana, a slow breath on the depot -
+    // so the board says "from here to there" without a word of text. Only on
+    // a board nobody else is working: once monkeys are hired the player has
+    // learned the drag, or skipped it for a scenario, and a tutorial glow
+    // under sixty workers is noise.
+    let teaching = first.pending
+        && workforce.count() == 0
+        && !matches!(controller.interaction, HarvestInteraction::Dragging { .. });
+    let breath = if teaching {
+        let phase = time.elapsed_secs() * std::f32::consts::TAU * HINT_BREATH_HZ;
+        0.06 + 0.08 * (0.5 + 0.5 * phase.sin())
+    } else {
+        0.0
+    };
+    let alpha = if drag_highlight {
+        0.34
+    } else {
+        (pulse * 0.46).max(breath)
+    };
+    set_colour(&mut materials, &glow.0, GLOW.with_alpha(alpha));
+    let hint_alpha = if teaching { 0.12 } else { 0.0 };
+    set_colour(&mut materials, &hint.0, GLOW.with_alpha(hint_alpha));
 }
+
+/// How fast the untaught depot breathes: slow enough to read as an invitation
+/// rather than an alarm.
+const HINT_BREATH_HZ: f32 = 0.5;
+
+/// Set a material's colour, reading it first. `get_mut` marks a material
+/// changed, and a changed material is re-uploaded - every frame, for glows that
+/// are dark almost all of the time.
+fn set_colour(
+    materials: &mut Assets<ColorMaterial>,
+    handle: &Handle<ColorMaterial>,
+    colour: Color,
+) {
+    if materials
+        .get(handle)
+        .is_some_and(|material| material.color != colour)
+        && let Some(mut material) = materials.get_mut(handle)
+    {
+        material.color = colour;
+    }
+}
+
+/// The depot's glow: banana gold, over the pad while a drag is over it and in
+/// a pulse when a delivery lands.
+const GLOW: Color = Color::srgb(1.0, 0.78, 0.08);
 
 fn update_floaters(
     time: Res<Time>,
@@ -3622,16 +3938,189 @@ mod tests {
 
             assert!(layout.board(layout.grove()).x < layout.board(layout.town_centre()).x);
             assert!(layout.board(layout.grove()).y > layout.board(layout.town_centre()).y);
-            assert!(layout.banana_size() >= 18.0);
-            assert!(contains_inclusive(
-                layout.harvest_bounds(),
-                layout.banana_home()
-            ));
-            // `Rect::from_center_size` rounds through a half-extent, so this is
-            // the same number twice rather than a real inequality.
-            assert!(layout.harvest_bounds().width() >= layout.zone_size() - 1e-3);
-            assert!(layout.harvest_bounds().width() >= 44.0);
-            assert!(layout.deposit_bounds().width() >= 80.0);
+            // The drawn banana is inside the thing that grabs it, and the
+            // depot's own point is inside the thing that takes it.
+            assert!(
+                layout.on_harvest(layout.banana_home()),
+                "{viewport:?}: the banana lies outside its own target"
+            );
+            // A thumb's worth on the diamond's *short* axis, at the zoom the
+            // board opens at - the smallest it is ever drawn.
+            assert!(
+                layout.harvest_bounds().height() >= 80.0,
+                "{viewport:?}: the harvest target is {} px tall",
+                layout.harvest_bounds().height()
+            );
+            // And the two ends of the drag are never the same ground, so a
+            // drag cannot start on its own drop target.
+            let apart = (layout.home_tree() - layout.town_centre())
+                .abs()
+                .max_element();
+            assert!(apart > layout.harvest_target().half + layout.deposit_target().half);
+        }
+    }
+
+    #[test]
+    fn the_drag_targets_are_places_on_the_ground_at_every_zoom() {
+        // What they replaced were squares of *screen*, sized from the chrome:
+        // zoom in and the plant grew while its target stayed put, zoom out and
+        // the target swallowed the village. So the property, at every zoom
+        // the camera allows and wherever it is aimed: whether a point on the
+        // screen grabs the banana depends only on the ground under it, and the
+        // target is drawn at a size set by the zoom and by nothing else.
+        let map = map::start();
+        let opening = BoardCamera::opening(map);
+        for viewport in VIEWPORTS {
+            for zoom in [2.0, 3.0, 4.0, 5.0, 6.0] {
+                for pan in [Vec2::ZERO, Vec2::new(3.0, -2.0), Vec2::new(-4.5, 5.5)] {
+                    let camera = BoardCamera {
+                        focus: opening.focus + pan,
+                        zoom,
+                        resting_zoom: zoom,
+                    };
+                    let layout = SceneLayout::for_map(viewport, View::Full, map, camera);
+                    // Thumb-sized at every zoom: the ground it covers shrinks
+                    // as the plant grows, never to less than a thumb.
+                    let short = layout.harvest_bounds().height();
+                    assert!(
+                        short >= 80.0,
+                        "{viewport:?} zoom {zoom}: the grab target is {short} px across"
+                    );
+                    // The drawn banana always lies inside what grabs it.
+                    assert!(
+                        layout.harvest_target().contains(layout.banana_ground()),
+                        "{viewport:?} zoom {zoom}: the banana lies outside its own target"
+                    );
+                    // A press up the trunk grabs the plant; a press a thumb and
+                    // a half clear of it is the camera's.
+                    let foot = layout.board(layout.home_tree());
+                    assert!(layout.on_harvest(foot + Vec2::new(0.0, 60.0)));
+                    for off in [
+                        Vec2::new(200.0, 0.0),
+                        Vec2::new(-200.0, 0.0),
+                        Vec2::new(0.0, -120.0),
+                        Vec2::new(100.0, 120.0),
+                    ] {
+                        assert!(
+                            !layout.on_harvest(foot + off),
+                            "{viewport:?} zoom {zoom}: a press {off} off the plant grabs"
+                        );
+                    }
+                    // A grid round each end of the drag, scaled to that
+                    // target so it reaches half as far again outside it - a
+                    // fixed step that stops inside the larger target can
+                    // never see it accept too much - and never lands exactly
+                    // on an edge (steps of 0.15 of the half).
+                    for x in -10..=10 {
+                        for y in -10..=10 {
+                            let grid = Vec2::new(x as f32, y as f32) * 0.15;
+                            // The harvest end also grabs up the plant's trunk,
+                            // which is a column of *screen*, not ground; the
+                            // depot is its footprint and nothing else.
+                            for (target, hit, trunk) in [
+                                (
+                                    layout.harvest_target(),
+                                    SceneLayout::on_harvest as fn(SceneLayout, Vec2) -> bool,
+                                    true,
+                                ),
+                                (layout.deposit_target(), SceneLayout::on_deposit, false),
+                            ] {
+                                let step = grid * target.half;
+                                let screen = layout.board(target.centre + step);
+                                let on = hit(layout, screen);
+                                assert_eq!(
+                                    on,
+                                    target.contains(target.centre + step)
+                                        || (trunk && layout.on_trunk(screen)),
+                                    "{viewport:?} zoom {zoom} pan {pan}: {step} m off {:?}",
+                                    target.centre
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn harvest_never_takes_the_board_from_the_camera() {
+        // Harvest has first refusal on every press, so what it covers is
+        // ground the camera cannot be driven from. Sampled over the whole
+        // board, at every zoom, with the camera on the home tree - the worst
+        // case, where the most of the target is on screen - it must leave the
+        // player at least three quarters of the board to pan and pinch on.
+        let map = map::start();
+        for viewport in [
+            Vec2::new(320.0, 568.0),
+            Vec2::new(390.0, 844.0),
+            Vec2::new(844.0, 390.0),
+        ] {
+            for zoom in [2.0, 3.0, 4.0, 5.0, 6.0] {
+                let camera = BoardCamera {
+                    focus: isometric::tile_centre(map.home_trees()[0]),
+                    zoom,
+                    resting_zoom: zoom,
+                };
+                let layout = SceneLayout::for_map(viewport, View::Full, map, camera);
+                let safe = layout.safe_area();
+                let (mut grabbed, mut total) = (0u32, 0u32);
+                let mut y = safe.min.y;
+                while y < safe.max.y {
+                    let mut x = safe.min.x;
+                    while x < safe.max.x {
+                        total += 1;
+                        grabbed += u32::from(layout.on_harvest(Vec2::new(x, y)));
+                        x += 4.0;
+                    }
+                    y += 4.0;
+                }
+                let share = grabbed as f32 / total as f32;
+                assert!(
+                    share < 0.25,
+                    "{viewport:?} at zoom {zoom}: harvest claims {share} of the board"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_way_home_shows_exactly_when_the_drag_leaves_the_screen() {
+        // The pan clamp keeps *some of the walk* on screen, not the home tree,
+        // so a player can pan to where hand harvest is impossible. On a phone
+        // HOME is the only way back, and its appearing is the only sign that
+        // anything is out of reach - so it must be hidden at the opening view
+        // and shown once the player has panned as far grove-wards as the clamp
+        // lets them.
+        let map = map::start();
+        for viewport in [
+            Vec2::new(320.0, 568.0),
+            Vec2::new(390.0, 844.0),
+            Vec2::new(844.0, 390.0),
+        ] {
+            let opening = BoardCamera::opening(map);
+            let home = SceneLayout::for_map(viewport, View::Full, map, opening);
+            // Portrait phones and desktops open with the whole drag in view.
+            // The short landscape phone opens centred on the treehouse, which
+            // fills its board, with the home tree nearer the edge than a thumb
+            // - so there HOME shows from the first frame (D30).
+            let landscape = home.short_landscape();
+            assert_eq!(
+                home.drag_in_view(),
+                !landscape,
+                "{viewport:?}: HOME is wrong on a fresh board"
+            );
+
+            let wandered = BoardCamera {
+                focus: home.grove(),
+                ..opening
+            }
+            .clamped(home.field(), home.safe_area().size());
+            let away = SceneLayout::for_map(viewport, View::Full, map, wandered);
+            assert!(
+                !away.drag_in_view(),
+                "{viewport:?}: panned to the grove, the drag still counts as in view"
+            );
         }
     }
 
@@ -3658,11 +4147,20 @@ mod tests {
         // rather than the framing quietly getting worse.
         for viewport in VIEWPORTS {
             let layout = SceneLayout::for_viewport(viewport);
-            let safe = layout.safe_area();
+            // Half a thumb inside the edge, as HOME measures it, so the two
+            // tests cannot disagree about whether the drag is in view.
+            let safe = layout.safe_area().inflate(-DRAG_VIEW_MARGIN);
             for (name, at) in [
                 ("the home tree", layout.home_tree()),
                 ("the town centre", layout.town_centre()),
             ] {
+                // D30: centred on the treehouse, the landscape phone opens with
+                // the home tree nearer its edge than a thumb, and HOME showing
+                // - see `the_way_home_shows_exactly_when_the_drag_leaves_the_screen`.
+                // The depot is still held, which is what pins `DEFAULT_ZOOM`.
+                if name == "the home tree" && layout.short_landscape() {
+                    continue;
+                }
                 let on_screen = layout.board(at);
                 assert!(
                     contains_inclusive(safe, on_screen),
@@ -3821,9 +4319,9 @@ mod tests {
 
     #[test]
     fn the_zoom_is_bounded_by_how_big_a_monkey_is() {
-        // Not by how much of the map fits. A monkey is 22 texels tall, and the
-        // floor keeps it a readable 44 logical pixels.
-        const MONKEY_TEXELS: f32 = 22.0;
+        // Not by how much of the map fits. A monkey is 58 art pixels tall,
+        // and the floor keeps it a readable 44 logical pixels or more.
+        const MONKEY_TEXELS: f32 = 58.0 * art::ART_SCALE;
         const { assert!(MONKEY_TEXELS * BoardCamera::MIN_ZOOM >= 44.0) };
         // The counter-case, stated so nobody "fixes" the floor by fitting the
         // map: the whole 69-tile board on a phone needs a zoom that renders a

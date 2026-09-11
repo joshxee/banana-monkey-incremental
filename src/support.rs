@@ -13,22 +13,19 @@
 //! hanging a role's avatar off "the first entity of that role", which breaks the
 //! moment that entity is despawned.
 //!
-//! Every monkey uses the same outlined lo-fi marker. Roles are told apart by a
-//! coloured box worn as a hat, carried as a crate, or used as a desk.
+//! Every monkey is the same drawn spider worker the harvesters are. Roles are
+//! told apart first by the disc of colour each stands on - the role's own
+//! swatch from the shop, so the board and the shop name a role the same way -
+//! and second by what it wears, carries or works at: a hat, a crate, a desk.
 
 use bevy::prelude::*;
 
 use crate::{
     art::{self, Art, Clip},
     domain::{SUPPORT_MEAL_PERIOD, SUPPORT_PHASE_STRIDE, Staff, SupportCycle, SupportRole},
-    game::{CREAM, GOLD, SceneLayout},
+    game::{CREAM, SceneLayout},
     isometric,
 };
-
-/// Source texels to a metre of ground, at unit zoom. A monkey is 22 texels tall
-/// and stands a shade under two metres, so the fan spacings that were authored
-/// in texels keep the spread they were tuned to.
-const METRES_TO_TEXELS: f32 = 12.0;
 
 /// Sprites drawn per role before the count moves to a badge.
 ///
@@ -46,28 +43,79 @@ pub(crate) const AVATARS_PER_ROLE: usize = 3;
 
 /// Half the width of the monkey's actual body, in source texels.
 ///
-/// Not half the 32-texel frame: these sheets centre a much narrower monkey in a
-/// square cell, and budgeting the whole frame would declare a collision from
-/// two sprites whose transparent margins touch.
-const BODY_HALF_TEXELS: f32 = 8.0;
+/// Not half the 32-texel cell: the sheets centre a narrower monkey in a
+/// square cell, and budgeting the whole cell would declare a collision from two
+/// sprites whose transparent margins touch. Measured off the idle frames, whose
+/// opaque columns run from 9 to 51 about an anchor at 32 - and the *wider* of
+/// the two sides, the tail's, because a fan budgeted on the narrow side lets
+/// neighbours overlap by the difference and nothing notices.
+const BODY_HALF_TEXELS: f32 = (32.0 - 9.0) * art::ART_SCALE;
 
-/// Spacing between two monkeys of the same role, in source texels.
+/// How far to either side of the front monkey the two behind it stand, in
+/// board texels across the screen.
 ///
-/// Wider than the widest role box, or three chefs' hats merge into one white
-/// rectangle and the role reads as a single object with a strange head. Narrow
-/// enough that a role's whole fan still fits between its neighbours - see
-/// [`slot_offset_texels`].
-const SLOT_STEP_TEXELS: f32 = 13.0;
+/// More than half a body (19 art pixels on the head side), so each shows a snout
+/// or a tail past the one in front. The fan used to be a line 13 texels a step
+/// along a ground diagonal that recedes from the viewer, and two chefs drawn
+/// that way overlapped almost completely: one monkey wearing two white caps.
+const FAN_ACROSS_TEXELS: f32 = 22.5 * art::ART_SCALE;
+/// How far behind the front monkey the back two stand, in board texels up the
+/// screen: enough that a back monkey's head clears the front one's cap.
+const FAN_BACK_TEXELS: f32 = 15.0 * art::ART_SCALE;
 
-/// Where a role's `slot`th monkey stands, relative to the role's station, when
-/// `drawn` of them are on screen.
+/// The disc a support monkey stands on, in texels: its contact shadow, and the
+/// role's colour. Half again a walker's shadow, so it shows past the feet.
+const ROLE_DISC_TEXELS: Vec2 = Vec2::new(52.5 * art::ART_SCALE, 20.0 * art::ART_SCALE);
+/// And a lighter ring round it, one texel wide, so a disc reads as a marking
+/// rather than as a large shadow - which olive and grey on green grass
+/// otherwise do.
+const ROLE_RIM_TEXELS: Vec2 = Vec2::new(ROLE_DISC_TEXELS.x + 2.0, ROLE_DISC_TEXELS.y + 2.0);
+const ROLE_DISC_ALPHA: f32 = 0.6;
+/// The chef's toque above its band, in texels: wider than the band, so the hat
+/// has a toque's silhouette rather than being a white block on a head.
+const CHEF_PUFF_TEXELS: Vec2 = Vec2::new(20.0 * art::ART_SCALE, 7.5 * art::ART_SCALE);
+
+/// How long a new support monkey takes to walk from the bins to its station,
+/// in seconds: about a harvester's pace over the eight metres between them.
+const ARRIVE_SECONDS: f32 = 2.5;
+
+/// How long after the game opens a support monkey appears already standing
+/// rather than walking out, in seconds.
 ///
-/// Centred on the station rather than running rightwards from it. Fanning in
-/// one direction makes a role's width grow into the next role's space: at three
-/// slots the chefs' third monkey landed exactly on the technologist's desk, so
-/// buying a third chef appeared to delete the researcher.
-pub(crate) fn slot_offset_texels(slot: usize, drawn: usize) -> f32 {
-    (slot as f32 - (drawn as f32 - 1.0) * 0.5) * SLOT_STEP_TEXELS
+/// The walk-out shows a *hire*. The first reconcile after a load builds the
+/// whole crew from the save, and walking all of it out of the house, flashing
+/// gold, on every load says the player just bought staff they have had all
+/// along - which is why a restored harvester skips its hire flash too.
+const OPENING_SECONDS: f32 = 1.0;
+
+/// A support monkey on its way from the bins to its station, and how long it
+/// has been walking. Every monkey appears from the treehouse (D30).
+#[derive(Component, Debug)]
+pub(crate) struct Arriving(f32);
+
+/// Where a role's `slot`th monkey stands relative to the role's station, in
+/// board texels on the screen (y up, so up is further back).
+///
+/// A cluster, not a line: one in front, the next two behind it to either side.
+/// A line wide enough to separate three drawn monkeys does not fit - the walk
+/// runs up the screen past the depot, so a line across the screen runs straight
+/// at it, and the depot sits near the bottom of a small phone's board. A
+/// cluster is half as wide for the same three monkeys.
+///
+/// Centred across the station, never running one way from it: fanning in one
+/// direction makes a role's width grow into the next role's space, and at three
+/// slots the chefs' third monkey once landed on the technologist's desk, so
+/// buying a third chef appeared to delete the researcher. And each slot stands
+/// where it stands however many are drawn, so hiring a third does not shuffle
+/// the first two.
+pub(crate) fn slot_offset(slot: usize) -> Vec2 {
+    match slot {
+        0 => Vec2::ZERO,
+        _ => Vec2::new(
+            if slot % 2 == 1 { -1.0 } else { 1.0 } * FAN_ACROSS_TEXELS,
+            FAN_BACK_TEXELS,
+        ),
+    }
 }
 
 /// How many monkeys of one role the scene has room to draw.
@@ -100,7 +148,10 @@ pub(crate) fn avatars_per_role(layout: &SceneLayout) -> usize {
     (1..=AVATARS_PER_ROLE)
         .rev()
         .find(|drawn| {
-            let half = slot_offset_texels(drawn - 1, *drawn) * scale + BODY_HALF_TEXELS * scale;
+            let across = (0..*drawn)
+                .map(|slot| slot_offset(slot).x.abs())
+                .fold(0.0, f32::max);
+            let half = (across + BODY_HALF_TEXELS) * scale;
             half * 2.0 <= gap
         })
         .unwrap_or(1)
@@ -128,9 +179,22 @@ pub(crate) struct SupportAvatar {
 }
 
 /// The box that tells the roles apart. A child of the avatar, so it inherits
-/// position and scale and needs no layout logic of its own.
+/// position and scale; its own x is where it sits on a monkey facing right,
+/// mirrored by hand for one facing left - `flip_x` mirrors the texture and not
+/// its children, and a chef walking left with its hat still at +x wears it on
+/// its tail.
 #[derive(Component, Debug, Clone, Copy)]
-pub(crate) struct RoleBox;
+pub(crate) struct RoleBox {
+    base_x: f32,
+}
+
+/// The coloured disc a support monkey stands on, and its rim. Children of the
+/// avatar with their depth pinned to the ground-mark layer, like a walker's
+/// shadow, so a disc never covers the monkey standing behind its owner.
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct RoleDisc {
+    rim: bool,
+}
 
 /// The `xN` badge beside a role, shown only once the crowd stops being
 /// countable. A brown plate carrying cream text: the badge has to stay legible
@@ -169,53 +233,56 @@ fn badge_scale(layout: &SceneLayout) -> f32 {
 }
 
 impl SupportRole {
-    /// Sprite tint, so three identical monkeys are still three distinguishable
-    /// monkeys when the boxes overlap at small scale.
-    fn tint(self) -> Color {
+    /// The role's colour: the swatch the shop draws beside its row
+    /// (`assets/style/hud.css`, `.unit-swatch`), so the board and the shop
+    /// name a role the same way.
+    ///
+    /// This replaced a multiply tint of 94-100% white, which on near-black
+    /// monkey art moved nothing a player could see, and prop colours that
+    /// contradicted the shop - the unpacker's crate was the worker's orange.
+    pub(crate) fn colour(self) -> Color {
         match self {
-            SupportRole::Chef => Color::srgb(1.0, 0.98, 0.94),
-            SupportRole::Unpacker => Color::srgb(0.94, 0.98, 1.0),
-            SupportRole::Technologist => Color::srgb(0.98, 0.94, 1.0),
+            SupportRole::Chef => Color::srgb_u8(0x81, 0x94, 0x47),
+            SupportRole::Unpacker => Color::srgb_u8(0x6C, 0x81, 0xA1),
+            SupportRole::Technologist => Color::srgb_u8(0x87, 0x85, 0x7C),
         }
     }
 
     /// Colour of the role's box.
     fn box_color(self) -> Color {
         match self {
-            // A white hat. The only pure-white thing in the scene, which is what
-            // makes a 32 px monkey read as a chef at a glance.
+            // A white hat, and the one prop that keeps its own colour rather
+            // than the shop's: a chef's toque is white everywhere, and it is
+            // the only pure-white thing in the scene, which is what makes a
+            // monkey read as a chef at a glance.
             SupportRole::Chef => Color::srgb(0.98, 0.96, 0.90),
-            SupportRole::Unpacker => Color::srgb(0.72, 0.45, 0.20),
-            SupportRole::Technologist => Color::srgb(0.45, 0.30, 0.55),
+            SupportRole::Unpacker | SupportRole::Technologist => self.colour(),
         }
     }
 
-    /// Box size in source texels, and its offset from the monkey's centre.
-    /// Three shapes, three silhouettes: worn, carried, sat behind.
+    /// Box size in source texels, and where its centre sits relative to the
+    /// monkey's feet. Three shapes, three silhouettes: worn, carried, sat behind.
+    ///
+    /// Placed through the art's own coordinates (`Cell::offset_of`), never in
+    /// texels guessed off the drawing. The art is a *quadruped* with a low back,
+    /// a head forward and a tail that owns the space above it; the cap that was
+    /// placed by eye sat over the face, down to the snout.
     fn box_geometry(self) -> (Vec2, Vec2) {
-        // Redrawn for the spider worker, and both numbers in each pair changed.
-        // These were authored against a 13x22 upright rectangle whose head was
-        // its top edge; the art is a *quadruped* with a low back, a head off to
-        // one side and a tail that owns the space above it. A hat placed on the
-        // old crown floats over nothing, and a desk sized to the old body is
-        // wider than the monkey behind it.
-        //
-        // Offsets are measured up from the monkey's feet, which is where its
-        // transform now sits.
-        //
-        // Read off the art rather than guessed: in a 64x64 cell anchored at
-        // (32, 56), the curled tail owns the upper *left* and the head sits at
-        // about (45, 19) with the chest below it, so a prop placed on the old
-        // rectangle's centre line lands on the tail and a hat placed above its
-        // crown lands in the air.
-        match self {
-            // A small cap on the head, not a bar above the back.
-            SupportRole::Chef => (Vec2::new(6.0, 4.0), Vec2::new(5.0, 15.0)),
+        // Sizes in the worker's own art pixels, so a prop stays the size of
+        // the monkey wearing it whatever the art scale.
+        let (size, art_centre) = match self {
+            // Resting on the crown of the head, overlapping it by a little
+            // over an art pixel so it reads as worn rather than floating.
+            SupportRole::Chef => (
+                Vec2::new(15.0, 10.0),
+                Vec2::new(43.0, art::WORKER_CROWN_ROW - 2.0),
+            ),
             // Carried in front of the chest, breaking the body outline.
-            SupportRole::Unpacker => (Vec2::new(7.0, 6.0), Vec2::new(7.0, 8.0)),
+            SupportRole::Unpacker => (Vec2::new(17.5, 15.0), Vec2::new(49.5, 36.0)),
             // A low desk the monkey works over, no wider than it is.
-            SupportRole::Technologist => (Vec2::new(13.0, 6.0), Vec2::new(5.0, 3.0)),
-        }
+            SupportRole::Technologist => (Vec2::new(32.5, 15.0), Vec2::new(44.5, 48.5)),
+        };
+        (size * art::ART_SCALE, art::WORKER.offset_of(art_centre))
     }
 
     /// Every box draws in front of its monkey.
@@ -256,8 +323,20 @@ pub(crate) fn spawn_missing_support(
     }
 }
 
+/// Everything `sync_support_avatars` touches on one avatar.
+type AvatarView<'a> = (
+    Entity,
+    &'a SupportAvatar,
+    Option<Mut<'a, HireFlash>>,
+    Mut<'a, Transform>,
+    Mut<'a, Sprite>,
+    Option<&'a Children>,
+    Option<Mut<'a, Arriving>>,
+);
+
 /// Presentation. Reconciles the avatar pool against the hired count, then poses
 /// every avatar from the simulation entities behind it.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn sync_support_avatars(
     mut commands: Commands,
     art: Res<Art>,
@@ -265,13 +344,9 @@ pub(crate) fn sync_support_avatars(
     layout: Res<SceneLayout>,
     staff: Res<Staff>,
     units: Query<(&SupportRole, &SupportCycle), With<SupportUnit>>,
-    mut avatars: Query<(
-        Entity,
-        &SupportAvatar,
-        Option<&mut HireFlash>,
-        &mut Transform,
-        &mut Sprite,
-    )>,
+    mut avatars: Query<AvatarView, Without<RoleDisc>>,
+    mut discs: Query<(&RoleDisc, &mut Transform, &mut Sprite), Without<SupportAvatar>>,
+    mut boxes: Query<(&RoleBox, &mut Transform), (Without<SupportAvatar>, Without<RoleDisc>)>,
 ) {
     let per_role = avatars_per_role(&layout);
     for role in SupportRole::ALL {
@@ -281,8 +356,9 @@ pub(crate) fn sync_support_avatars(
             .filter(|(_, avatar, ..)| avatar.role == role)
             .count();
 
+        let walk_out = time.elapsed_secs() > OPENING_SECONDS;
         for slot in drawn..wanted {
-            spawn_avatar(&mut commands, &art, &layout, role, slot);
+            spawn_avatar(&mut commands, &art, &layout, role, slot, walk_out);
         }
         // A resize can shrink the fan, so the pool has to give sprites back as
         // well as take them - otherwise rotating a phone leaves a role drawn
@@ -305,12 +381,48 @@ pub(crate) fn sync_support_avatars(
         }
     }
 
-    for (entity, avatar, flash, mut transform, mut sprite) in &mut avatars {
+    let pulse = 0.5 + 0.5 * (time.elapsed_secs() * HUNGRY_PULSE_HZ * TAU_F32).sin();
+    for (entity, avatar, flash, mut transform, mut sprite, children, arriving) in &mut avatars {
         // In metres across the ground now, not texels across the screen: a fan
         // of chefs spreads on the plane they are standing on, so the depth rule
         // sorts them against each other for free.
-        let spread = slot_offset_texels(avatar.slot, per_role) / METRES_TO_TEXELS;
-        let point = layout.support_point(avatar.role, spread);
+        let station = layout.support_point(avatar.role, slot_offset(avatar.slot));
+        let mut point = station;
+
+        // Walking out of the bins to the station, on the walk loop, its feet
+        // gripping the ground the same way a harvester's do; then standing.
+        if let Some(mut arriving) = arriving {
+            arriving.0 += time.delta_secs();
+            let from = layout.town_centre();
+            let t = (arriving.0 / ARRIVE_SECONDS).clamp(0.0, 1.0);
+            point = from.lerp(station, t * t * (3.0 - 2.0 * t));
+            let (clip, frame, flip) = if t < 1.0 {
+                // Seeded per slot, so a fan hired together does not step in
+                // lockstep - the formation read `Playing::starting` avoids.
+                let stride = isometric::project(point - from).length() / art::WALK_STRIDE_TEXELS
+                    + avatar.slot as f32 * 0.618_034;
+                let facing_left = isometric::project(station - from).x < 0.0;
+                (Clip::Walk, Clip::walk_frame(stride), facing_left)
+            } else {
+                commands.entity(entity).remove::<Arriving>();
+                (Clip::Idle, avatar.slot as u32 % Clip::Idle.frames(), false)
+            };
+            let (image, sheet) = art.clip(clip);
+            if sprite.image != image {
+                sprite.image = image;
+            }
+            if let Some(atlas) = sprite.texture_atlas.as_mut() {
+                if atlas.layout != sheet {
+                    atlas.layout = sheet;
+                }
+                if atlas.index != frame as usize {
+                    atlas.index = frame as usize;
+                }
+            }
+            if sprite.flip_x != flip {
+                sprite.flip_x = flip;
+            }
+        }
 
         // No lift: the art carries its own ground anchor, so the ground
         // position *is* the transform. Keeping the old half-a-monkey lift left
@@ -320,26 +432,67 @@ pub(crate) fn sync_support_avatars(
             // genuinely nearer the viewer.
             isometric::stand_z(point, (avatar.slot % 8) as f32 * isometric::NUDGE_STEP),
         );
+        // Every frame, not only at spawn: a pinch changes the zoom, and an
+        // avatar scaled once drew at its hire-time size beside harvesters -
+        // the same sprite - drawn at the new one. Unit z scale, so the disc's
+        // depth below is a real offset.
+        let scale = Vec3::new(layout.world_scale(), layout.world_scale(), 1.0);
+        if transform.scale != scale {
+            transform.scale = scale;
+        }
 
+        // Hunger shows on the disc rather than on the monkey. The art is
+        // near-black, so the dimming that used to say it moved nothing; a
+        // role's colour draining to grey and back is visible at any zoom.
         let starving = avatar.slot < hungry[role_index(avatar.role)];
-        let base = avatar.role.tint();
-        sprite.color = if starving {
-            // Pulse rather than a flat grey: a static dim sprite reads as a
-            // rendering bug, a slow pulse reads as distress.
-            let pulse = 0.5 + 0.5 * (time.elapsed_secs() * HUNGRY_PULSE_HZ * TAU_F32).sin();
-            let dim = 0.35 + 0.25 * pulse;
-            Color::srgb(dim, dim * 0.92, dim * 0.88)
+        let fill = if starving {
+            let grey = Color::srgb(0.45, 0.43, 0.40);
+            avatar.role.colour().mix(&grey, 0.4 + 0.6 * pulse)
         } else {
-            base
+            avatar.role.colour()
         };
+        let monkey = match flash {
+            Some(mut flash) => {
+                flash.0 -= time.delta_secs();
+                if flash.0 <= 0.0 {
+                    commands.entity(entity).remove::<HireFlash>();
+                    Color::WHITE
+                } else {
+                    // Toward gold and brightening, as a new harvester does.
+                    let t = (flash.0 / HIRE_HIGHLIGHT_SECONDS).clamp(0.0, 1.0);
+                    Color::WHITE.mix(&Color::srgb(2.0, 1.7, 0.6), t)
+                }
+            }
+            None => Color::WHITE,
+        };
+        if sprite.color != monkey {
+            sprite.color = monkey;
+        }
 
-        if let Some(mut flash) = flash {
-            flash.0 -= time.delta_secs();
-            if flash.0 <= 0.0 {
-                commands.entity(entity).remove::<HireFlash>();
-            } else if !starving {
-                let t = (flash.0 / HIRE_HIGHLIGHT_SECONDS).clamp(0.0, 1.0);
-                sprite.color = base.mix(&GOLD, t);
+        let facing = if sprite.flip_x { -1.0 } else { 1.0 };
+        for child in children.into_iter().flatten() {
+            if let Ok((role_box, mut at)) = boxes.get_mut(*child) {
+                let x = role_box.base_x * facing;
+                if at.translation.x != x {
+                    at.translation.x = x;
+                }
+                continue;
+            }
+            let Ok((disc, mut at, mut disc_sprite)) = discs.get_mut(*child) else {
+                continue;
+            };
+            // The rim a shade under the disc, so the two never tie.
+            let z = isometric::MARK_Z - transform.translation.z - if disc.rim { 0.01 } else { 0.0 };
+            if at.translation.z != z {
+                at.translation.z = z;
+            }
+            let colour = if disc.rim {
+                fill.lighter(0.25).with_alpha(ROLE_DISC_ALPHA)
+            } else {
+                fill.with_alpha(ROLE_DISC_ALPHA)
+            };
+            if disc_sprite.color != colour {
+                disc_sprite.color = colour;
             }
         }
     }
@@ -361,6 +514,7 @@ fn spawn_avatar(
     layout: &SceneLayout,
     role: SupportRole,
     slot: usize,
+    walk_out: bool,
 ) {
     let scale = layout.world_scale();
     let (size, offset) = role.box_geometry();
@@ -370,27 +524,45 @@ fn spawn_avatar(
     // them that way would have put two art styles side by side at the one place
     // the player looks most - the depot, where the harvesters gather.
     //
-    // The role tint still multiplies, over the sprite instead of over a flat
-    // fill, so a chef reads as a chef at a glance and as a monkey up close. The
-    // idle frame is the slot's own, so a fan of three is not one pose repeated.
-    commands
-        .spawn((
-            SupportAvatar { role, slot },
-            HireFlash(HIRE_HIGHLIGHT_SECONDS),
-            Sprite {
-                color: role.tint(),
-                ..art.worker(Clip::Idle, slot as u32)
-            },
-            art::WORKER.anchor(),
-            Transform::from_scale(Vec3::splat(scale)),
-        ))
-        .with_children(|avatar| {
+    // The role is said by the disc underneath, in the shop's colour, which is
+    // still legible when sixty harvesters crowd the depot around it. The idle
+    // frame is the slot's own, so a fan of three is not one pose repeated.
+    let mut spawned = commands.spawn((
+        SupportAvatar { role, slot },
+        art.worker(Clip::Idle, slot as u32),
+        art::WORKER.anchor(),
+        Transform::from_scale(Vec3::new(scale, scale, 1.0)),
+    ));
+    // A hire walks out of the bins, flashing; a monkey restored with the save
+    // is simply there (see `OPENING_SECONDS`).
+    if walk_out {
+        spawned.insert((HireFlash(HIRE_HIGHLIGHT_SECONDS), Arriving(0.0)));
+    }
+    spawned.with_children(|avatar| {
+        avatar.spawn((
+            RoleBox { base_x: offset.x },
+            Sprite::from_color(role.box_color(), size),
+            Transform::from_xyz(offset.x, offset.y, role.box_z()),
+        ));
+        if role == SupportRole::Chef {
+            // The puff, sitting on the band and overlapping it by half a
+            // texel so the two read as one hat.
+            let puff = offset.y + (size.y + CHEF_PUFF_TEXELS.y) * 0.5 - 0.5;
             avatar.spawn((
-                RoleBox,
-                Sprite::from_color(role.box_color(), size),
-                Transform::from_xyz(offset.x, offset.y, role.box_z()),
+                RoleBox { base_x: offset.x },
+                Sprite::from_color(role.box_color(), CHEF_PUFF_TEXELS),
+                Transform::from_xyz(offset.x, puff, role.box_z()),
             ));
-        });
+        }
+        for (rim, size) in [(true, ROLE_RIM_TEXELS), (false, ROLE_DISC_TEXELS)] {
+            avatar.spawn((
+                RoleDisc { rim },
+                art.shadow(size, role.colour().with_alpha(ROLE_DISC_ALPHA)),
+                // Depth is set every frame; see `sync_support_avatars`.
+                Transform::default(),
+            ));
+        }
+    });
 }
 
 /// Keeps the role boxes on the texel grid when the viewport changes. They are
@@ -452,16 +624,17 @@ pub(crate) fn sync_support_badges(
         // role was doing.
         transform.translation = layout
             .board_snapped(
-                layout.support_point(badge.0, 0.0),
+                layout.support_point(badge.0, Vec2::ZERO),
                 // Centred over the role's fan and lifted clear of it. Placed
                 // *beside* the group it covered the outermost monkeys - and at
                 // a crowded deposit those were the chefs' hats, which are the
                 // only thing telling that role apart.
                 //
-                // Measured from the monkey's own drawn height rather than from
-                // a constant, so the badge stays above the head the day the art
-                // scale moves.
-                (art::WORKER.size().y + 6.0) * scale,
+                // Measured from the top of the monkey's drawn silhouette - the
+                // tail tip - rather than from a constant or from the canvas,
+                // which reaches below the feet. So the badge stays above the
+                // tail the day the art or its scale moves.
+                (art::WORKER.height_above(art::WORKER_TOP_ROW) + 6.0) * scale,
             )
             // A badge counts monkeys rather than standing among them, so it
             // belongs over the board, not in it.
@@ -503,8 +676,7 @@ mod tests {
         let mut placed = Vec::new();
         for role in SupportRole::ALL {
             for slot in 0..drawn {
-                let spread = slot_offset_texels(slot, drawn) / METRES_TO_TEXELS;
-                placed.push((role, layout.support_point(role, spread)));
+                placed.push((role, layout.support_point(role, slot_offset(slot))));
             }
         }
         placed
@@ -540,8 +712,10 @@ mod tests {
         // grow into its neighbour's, and the chefs' third monkey landed on the
         // technologist's desk - so buying a third chef appeared to delete the
         // researcher. Now that stations are ground positions the test can say
-        // what it always meant: no two monkeys of different roles overlap.
-        let body = BODY_HALF_TEXELS * 2.0 / METRES_TO_TEXELS;
+        // what it always meant: no two monkeys of different roles overlap -
+        // and overlap is a thing that happens on the *screen*, so the gap is
+        // measured projected, in the texels the body width is measured in.
+        let body = BODY_HALF_TEXELS * 2.0;
         for viewport in [
             Vec2::new(320.0, 640.0),
             Vec2::new(390.0, 844.0),
@@ -556,7 +730,7 @@ mod tests {
                         continue;
                     }
                     assert!(
-                        at.distance(*other) > body,
+                        isometric::project(*at - *other).length() > body,
                         "{viewport:?}: {role:?} at {at:?} overlaps {other_role:?} at {other:?}"
                     );
                 }
@@ -644,12 +818,16 @@ mod tests {
         // a camera the player drives, "on the board" is no longer a fixed
         // rectangle, and what the player is owed is that the staff they paid
         // for are visible from where the game puts them at the start.
-        for viewport in [
-            Vec2::new(320.0, 568.0),
-            Vec2::new(390.0, 844.0),
-            Vec2::new(844.0, 390.0),
-            Vec2::new(1280.0, 720.0),
-        ] {
+        //
+        // Every supported viewport but the two smallest boards: the 320 x 568
+        // phone's 320-pixel square and the 844 x 390 landscape phone's 286.
+        // The opening view is centred on the treehouse, which is 284 pixels
+        // tall (D30), so on those two boards it is nearly all there is, and
+        // part of every role's fan opens past an edge of it, a short pan away
+        // - as the home tree does on landscape. The
+        // owner chose the landmark centred over the crew framed on the
+        // smallest boards, and this is where that shows.
+        for viewport in [Vec2::new(390.0, 844.0), Vec2::new(1280.0, 720.0)] {
             let layout = SceneLayout::for_viewport(viewport);
             let safe = layout.safe_area();
             for (role, at) in stations(&layout) {
@@ -657,6 +835,31 @@ mod tests {
                 assert!(
                     safe.contains(screen),
                     "{viewport:?}: {role:?} opens at {screen:?}, outside the safe area {safe:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn support_never_stands_in_the_unloading_crowd() {
+        // The harvesters unloading at the bins stand on a ring out to
+        // `RING_OUTER`. A support monkey inside it is one of the queue as far as
+        // the player can tell - two chefs stood in it once, and their hats read
+        // as delivering monkeys - so every monkey of every fan stands clear of
+        // it by half a body.
+        let clear = crate::worker::RING_OUTER + 0.5;
+        for viewport in [
+            Vec2::new(320.0, 568.0),
+            Vec2::new(390.0, 844.0),
+            Vec2::new(844.0, 390.0),
+            Vec2::new(1280.0, 720.0),
+        ] {
+            let layout = SceneLayout::for_viewport(viewport);
+            for (role, at) in stations(&layout) {
+                let out = at.distance(layout.town_centre());
+                assert!(
+                    out > clear,
+                    "{viewport:?}: {role:?} stands {out} m from the bins, in the queue"
                 );
             }
         }
