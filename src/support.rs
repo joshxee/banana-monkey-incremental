@@ -66,10 +66,14 @@ const FAN_BACK_TEXELS: f32 = 6.0;
 /// The disc a support monkey stands on, in texels: its contact shadow, and the
 /// role's colour. Half again a walker's shadow, so it shows past the feet.
 const ROLE_DISC_TEXELS: Vec2 = Vec2::new(21.0, 8.0);
-/// And the darker ring round it, so a slate-blue disc still has an edge on the
-/// sandy depot pad.
+/// And a lighter ring round it, one texel wide, so a disc reads as a marking
+/// rather than as a large shadow - which olive and grey on green grass
+/// otherwise do.
 const ROLE_RIM_TEXELS: Vec2 = Vec2::new(23.0, 9.0);
 const ROLE_DISC_ALPHA: f32 = 0.6;
+/// The chef's toque above its band, in texels: wider than the band, so the hat
+/// has a toque's silhouette rather than being a white block on a head.
+const CHEF_PUFF_TEXELS: Vec2 = Vec2::new(8.0, 3.0);
 
 /// Where a role's `slot`th monkey stands relative to the role's station, in
 /// board texels on the screen (y up, so up is further back).
@@ -411,7 +415,7 @@ pub(crate) fn sync_support_avatars(
                 at.translation.z = z;
             }
             let colour = if disc.rim {
-                fill.darker(0.25).with_alpha(ROLE_DISC_ALPHA)
+                fill.lighter(0.25).with_alpha(ROLE_DISC_ALPHA)
             } else {
                 fill.with_alpha(ROLE_DISC_ALPHA)
             };
@@ -464,6 +468,16 @@ fn spawn_avatar(
                 Sprite::from_color(role.box_color(), size),
                 Transform::from_xyz(offset.x, offset.y, role.box_z()),
             ));
+            if role == SupportRole::Chef {
+                // The puff, sitting on the band and overlapping it by half a
+                // texel so the two read as one hat.
+                let puff = offset.y + (size.y + CHEF_PUFF_TEXELS.y) * 0.5 - 0.5;
+                avatar.spawn((
+                    RoleBox,
+                    Sprite::from_color(role.box_color(), CHEF_PUFF_TEXELS),
+                    Transform::from_xyz(offset.x, puff, role.box_z()),
+                ));
+            }
             for (rim, size) in [(true, ROLE_RIM_TEXELS), (false, ROLE_DISC_TEXELS)] {
                 avatar.spawn((
                     RoleDisc { rim },

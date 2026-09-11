@@ -68,6 +68,51 @@ pub(crate) const OVERLAY_Z: f32 = 500.0;
 /// its feet. So every ground mark shares one layer between the mesh at
 /// [`GROUND_Z`] and the shallowest depth anything stands at, which is zero.
 pub(crate) const MARK_Z: f32 = -0.5;
+/// And the deposit glow, under the shadows of the crowd standing in it.
+pub(crate) const GLOW_Z: f32 = -0.75;
+
+/// Every contact shadow: the green of the art's own baked shadows, a third
+/// opaque, so a crowd's shadows pool into a darker patch rather than stacking
+/// into black.
+pub(crate) const SHADOW_COLOUR: Color = Color::srgba(0.20, 0.30, 0.20, 0.33);
+
+/// A square of ground, `half` metres either side of `centre` along both ground
+/// axes: what a tile is, grown. On screen it is a diamond on the 2:1 grid.
+///
+/// What the player aims a drag at. A place on the ground rather than a box on
+/// the screen, so it is exactly as big as the thing it marks at every zoom, and
+/// it is hit-tested by taking the pointer *down* to the ground (`unproject`)
+/// rather than by bringing the target up to the screen - which is what makes
+/// the test exact on a plane the projection folds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Footprint {
+    pub(crate) centre: Vec2,
+    pub(crate) half: f32,
+}
+
+impl Footprint {
+    pub(crate) const fn new(centre: Vec2, half: f32) -> Self {
+        Self { centre, half }
+    }
+
+    /// Whether a ground position, in metres, is on it. Edges included.
+    pub(crate) fn contains(self, ground: Vec2) -> bool {
+        let off = (ground - self.centre).abs();
+        off.x <= self.half && off.y <= self.half
+    }
+
+    /// Its four corners, projected at unit zoom: top, right, bottom, left.
+    pub(crate) fn diamond(self) -> [Vec2; 4] {
+        let h = self.half;
+        [
+            Vec2::new(-h, -h),
+            Vec2::new(h, -h),
+            Vec2::new(h, h),
+            Vec2::new(-h, h),
+        ]
+        .map(|corner| project(self.centre + corner))
+    }
+}
 
 /// The most [`stand_z`] will shift anything.
 ///
@@ -118,6 +163,10 @@ const DEPOT_RADIUS: i32 = 1;
 /// And how far the scuffing around it reaches. The standing ring is sized
 /// against this, so the pad contains the crowd that gathers on it.
 pub(crate) const DEPOT_EDGE_REACH: i32 = 2;
+/// The drop target, in metres either side of the delivery point: exactly the
+/// ground the depot has trodden bare and scuffed, so what the player sees as the
+/// depot is what accepts the banana, edge to edge.
+pub(crate) const DEPOT_REACH_METRES: f32 = (DEPOT_EDGE_REACH as f32 + 0.5) * METRE;
 
 #[derive(Component)]
 pub(crate) struct WorldRoot;

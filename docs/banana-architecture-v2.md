@@ -927,6 +927,119 @@ each is the same mistake — a number read off the wrong thing:
   opaque art is 254 × 282 pixels at the zoom floor against a 286-pixel safe
   area, and a test now says so from the PNG.
 
+**D29 — The drag starts and ends on the ground.**
+*(Manual-harvest increment.)*
+
+The hand-harvest drag predates the board it now lives on. Its targets were
+squares of *screen*, `scene_side × 0.18` across, sized from the chrome: zoom in
+and the plant grew while its target stayed put, zoom out and the target
+swallowed the village. They were axis-aligned in an isometric world, and so was
+the deposit glow — which on a phone was the most dominant object on the board
+and the only thing on it off the 2:1 grid.
+
+*The targets are footprints, and the pointer goes down to meet them.* A
+`Footprint` is a square of ground, `half` metres either side of a centre along
+both ground axes: a tile, grown. On screen it is a diamond on the grid. A drag
+is tested by taking the pointer to the ground — `SceneLayout::ground`, which is
+`unproject` under the camera — and asking whether that metre is on it. Bringing
+the target up to the screen instead is the tempting version and it is only
+approximate, because the fold turns a square into a diamond and a box round the
+diamond grabs its corners' empty air.
+
+The cheaper alternative was to keep screen rectangles and scale them with the
+zoom rather than with `scene_side`. It fixes the size and nothing else: the
+target is still a box off the grid, still a different shape from the ground it
+marks, and still tested in a space where "on the depot" means "near its label".
+
+The sizes are the ground's own. The harvest target is three metres either side
+of the home tree at the zoom floor, where its diamond's short axis is 96 px — and
+it never grows past that on screen. Harvest has first refusal on every press,
+so its target is ground the camera cannot be driven from, and three metres at
+every zoom was 576 × 288 px at zoom 6: three quarters of a landscape phone's
+board, with nothing left to pan or pinch on but the corners. Zoomed in, the
+plant grows and the ground its target covers shrinks, never below the banana's
+own spot. A narrow column up the trunk into the lower crown grabs as well. The
+palm is the biggest, brightest thing by the banana and what a stranger reaches
+for, and a press on it used to be the camera's, so the player's first try slid
+the board away from the thing they were reaching for. The drop
+target is the depot's trodden and scuffed ground edge to edge
+(`DEPOT_REACH_METRES`, five), so what the player sees as the depot is exactly
+what takes the banana. The home tree is ten metres out along one ground axis,
+so three and five leave two metres that are neither, and a drag cannot start
+on its own drop target. A test walks both targets at every zoom from 2 to 6
+and three pans, and asserts a point grabs exactly when the ground under it is
+on the footprint, that it stays at least a thumb across at every zoom, and —
+sampled over the whole board with the camera on the home tree — that harvest
+never claims a quarter of it. The screen squares got the first wrong, and the
+first version of this increment got the last.
+
+The glow is the drop target's own diamond, a translucent mesh on the ground
+under the crowd's shadows (`GLOW_Z`, below `MARK_Z`), placed by its transform so
+it pans and zooms with the ground it marks.
+
+*The banana is drawn, and it lies on the ground.* `assets/Banana/Banana.png`, a
+twelve-frame spin that was loaded nowhere, replaces three coloured rectangles.
+It is an icon rather than part of the shared-scale set, so it cannot inherit a
+size from the monkey; it is drawn at one art pixel to one texel, the only whole
+ratio that leaves it smaller than the monkey carrying it (D28), and at half that
+on a monkey's back. It lies at the home tree's foot, a step towards the viewer
+so it sorts in front of the plant, where it used to hang 1.4 m up — a height
+chosen for the palm mesh's crown, which against the drawn plant tied a yellow
+band round the trunk.
+
+A held banana is drawn fourteen texels above the pointer and never less than 44
+logical pixels, so it clears a thumb's pad and the DEPOT sign it is aimed at.
+Its shadow stays on the ground under the pointer, on the metre the drop is
+tested against. With a mouse the shadow is the aim; on a phone it is under the
+thumb, the finger itself is the aim, and the banana riding above it is what says
+it is being carried. One system places both, after input, so the shadow is never
+a frame behind the banana.
+
+*Until the first banana is carried home, both ends are marked.* A faint gold
+diamond lies under the banana — exactly the target, at whatever size the zoom
+has made it — and the depot glow breathes slowly. The board then says "from here
+to there" without a word of text. Both go out for good at the first hand
+delivery, and never show on a board with monkeys hired: a tutorial glow under
+sixty workers is noise, and a player who has hired has learned the drag.
+
+*The crowd walks a triangle across the corridor, not a flat strip.* `across` is
+now the sum of two hashed dials less one — densest on the route's spine and
+thinning linearly to nothing at the edge, where a uniform draw filled the
+corridor at one density right up to ruled sides. Same range, so nothing that
+keeps a monkey inside the corridor changed; mean |across| is 1/3 against a
+uniform 1/2, and a test holds the crowd between the two models.
+
+*Harvest stays reachable, or says it is not.* The pan clamp promises that some
+of the walk is on screen (D26), not the home tree, so a player can pan to where
+hand harvest is impossible. On a desktop `C` recentres; on a phone there was
+nothing. The bar's empty left cell — there only to centre the banner — now
+holds a HOME button, shown exactly when either end of the drag is outside the
+safe area. Always shown, it is a permanent control for a problem most players
+never have; never shown, the player who panned to the grove has no way back and
+no sign the banana still exists. Appearing when the drag leaves the screen makes
+it the feedback and the fix at once. It recentres the zoom as well as the aim,
+exactly as `C` does, through the camera system that owns both.
+
+*The gesture seam is unchanged, which is the evidence it was built right.*
+Harvest still gets first refusal at touch-down (D26) and the camera still takes
+what it declines; all that changed is what "on the banana" means. No simulation
+state moved — a manual harvest is credited through the same `DeliveryQueue` on
+the same tick — so there is no new economy contract, and the headless suite and
+`docs/test_banana.py` pass untouched.
+
+Known limits, stated so they are not rediscovered. A press on the plant's outer
+fronds, beyond the trunk column, still pans: the column is kept narrow so that
+zoomed in, where the crown fills the screen, the board is still the camera's. HOME returns to the opening
+view rather than to "enough to see both ends", which from maximum zoom is a
+jump of four steps. A drag does not pan the camera, so at high zoom on a
+landscape phone the depot can be off screen with the banana in hand; releasing
+there cancels, and HOME is visible. And a second finger landing mid-drag pans
+the board (only the harvesting finger is claimed), so the ground — and the
+drop point the shadow marks — can slide under a finger that has not moved;
+that predates this increment, and the shadow at least shows it happening. `tests/e2e/visual.spec.ts-snapshots/` were
+already stale after D28 and are more so now; they cannot be regenerated without
+`trunk` and the wasm target, and CI does not run them.
+
 ---
 
 ## 4. Data Model

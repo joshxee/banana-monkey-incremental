@@ -127,6 +127,11 @@ pub(crate) const TOWN_CENTRE: Cell = Cell::new((672.0, 704.0), (330.0, 440.0)).s
 /// One frame of the spider worker (see `assets/Monkey/Spider Worker`).
 pub(crate) const WORKER: Cell = Cell::new((64.0, 64.0), (32.0, 56.0));
 
+/// The top row of the banana plant's crown, in both of its states: how far up
+/// the plant a press still means the plant. Measured off the art by
+/// `a_press_on_the_plant_reaches_its_crown`.
+pub(crate) const PLANT_CROWN_ROW: f32 = 96.0;
+
 /// Rows of the worker's art that things are placed against, measured off the
 /// sheets the game plays rather than read off a reference drawing. The tests
 /// decode the PNGs and hold each one.
@@ -543,6 +548,20 @@ mod tests {
             (min, max)
         };
         assert_eq!(bounds(&fruiting), bounds(&harvested));
+    }
+
+    #[test]
+    fn a_press_on_the_plant_reaches_its_crown() {
+        // The hand-harvest grab reaches up the home plant to this row, so it
+        // must be where the art's crown actually tops out - in both states,
+        // since picking the bunch must not move what grabs.
+        for path in ["Jungle/banana-fruiting.png", "Jungle/banana-harvested.png"] {
+            let (width, height, data) = png(path);
+            let top = (0..height)
+                .find(|&y| (0..width).any(|x| data[((y * width + x) * 4 + 3) as usize] > 0))
+                .unwrap();
+            assert_eq!(top as f32, PLANT_CROWN_ROW, "{path}");
+        }
     }
 
     #[test]

@@ -23,7 +23,7 @@ use crate::{
 /// A walker's contact shadow: the green of the art's own baked shadows, a
 /// third opaque, so a crowd's shadows pool into a darker patch rather than
 /// stacking into black.
-const SHADOW: Color = Color::srgba(0.20, 0.30, 0.20, 0.33);
+const SHADOW: Color = isometric::SHADOW_COLOUR;
 
 /// How far a monkey drifts ahead of or behind the point the economy has it at,
 /// as a fraction of the whole walk.
@@ -190,7 +190,7 @@ impl NextLane {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Lane(u32);
 
-/// Salts, so one hire index yields five uncorrelated numbers.
+/// Salts, so one hire index yields six uncorrelated numbers.
 ///
 /// Arbitrary odd constants, but not *entirely* arbitrary: the avalanche below
 /// has zero as a fixed point, so `dial(index, salt) == 0` exactly at the index
@@ -200,6 +200,8 @@ pub struct Lane(u32);
 /// index of each stream is past any reachable hire count.
 const SALT_WOBBLE: u32 = 0xBF58_476D;
 const SALT_ACROSS: u32 = 0x85EB_CA6B;
+/// The second dial summed into `across`: see [`Lane::across`].
+const SALT_ACROSS_SPREAD: u32 = 0x94D0_49BB;
 const SALT_SCATTER: u32 = 0xC2B2_AE35;
 const SALT_ANGLE: u32 = 0x27D4_EB2F;
 const SALT_RADIUS: u32 = 0x1656_67B1;
@@ -240,8 +242,17 @@ impl Lane {
 
     /// Where across the corridor it walks, as a fraction of the half-width.
     /// Positive is towards the viewer; [`near_side`] turns that into a side.
+    ///
+    /// Triangular, not uniform: the sum of two dials, less one. A uniform draw
+    /// fills the corridor at one density right up to its edges, so a crowd of
+    /// sixty reads as a strip with ruled sides - a road painted brown rather
+    /// than monkeys walking one. A triangle is densest on the route's spine
+    /// and thins linearly to nothing at the edge, so the crowd has a core and
+    /// a ragged fringe. Same range, `-1.0..1.0`, so nothing that bounds a
+    /// monkey inside the corridor has to change; only where in it they tend
+    /// to walk.
     fn across(self) -> f32 {
-        self.swing(SALT_ACROSS)
+        self.dial(SALT_ACROSS) + self.dial(SALT_ACROSS_SPREAD) - 1.0
     }
 
     /// Metres along the route from where the wobble put it.
@@ -1226,6 +1237,7 @@ mod tests {
         for salt in [
             SALT_WOBBLE,
             SALT_ACROSS,
+            SALT_ACROSS_SPREAD,
             SALT_SCATTER,
             SALT_ANGLE,
             SALT_RADIUS,
@@ -1238,6 +1250,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_walking_crowd_has_a_dense_spine_and_a_ragged_edge() {
+        // The property `across` exists for, measured on the crowd rather than
+        // read off its formula. A triangle on -1..1 has mean |x| of 1/3 and
+        // puts 4% beyond 0.8; a uniform draw - what this replaced - gives 1/2
+        // and 20%. Each bar sits between the two models rather than just
+        // under a measurement, so the distribution is free to move within the
+        // triangle's neighbourhood and a regression to a flat strip cannot
+        // pass. At a thousand hires the sampling error is under a hundredth.
+        let lanes: Vec<f32> = (0..1000).map(|index| Lane(index).across()).collect();
+        let mean = lanes.iter().map(|x| x.abs()).sum::<f32>() / lanes.len() as f32;
+        assert!(mean < 0.42, "mean |across| is {mean}: the crowd is flat");
+        let fringe = lanes.iter().filter(|x| x.abs() > 0.8).count() as f32 / lanes.len() as f32;
+        assert!(
+            fringe < 0.10,
+            "{fringe} of the crowd walks at the corridor's edge"
+        );
+        // And the two sides stay balanced. This cannot see correlation between
+        // the two dials - correlation changes the spread, never the mean - so
+        // it is the two bars above that would catch a correlated pair.
+        let bias = lanes.iter().sum::<f32>() / lanes.len() as f32;
+        assert!(bias.abs() < 0.05, "the crowd leans {bias} to one side");
     }
 
     #[test]
