@@ -197,12 +197,41 @@ pub(crate) const CART: Cell = Cell::new((208.0, 176.0), (104.0, 126.0));
 
 /// One ground tile, in art pixels (see `assets/Ground`): a 2:1 diamond on a
 /// transparent canvas. At the shared scale it spans two board tiles each way.
+///
+/// **Exported and indexed, but nothing draws it yet.** `isometric::ground_mesh`
+/// still paints the board from flat vertex colours, one quad a tile, in the
+/// four terrain colours plus the depot's trodden pad. Swapping that for these
+/// tiles is not a wiring job: the atlas is a *two-value* field, dirt against
+/// jungle, so it maps onto `Terrain::passable` and has nothing to say about the
+/// path, the town and the clearing being three different greens, or about the
+/// pad being painted into the same mesh. That is a board-wide look, and the
+/// owner's call rather than a side effect of using the asset.
+///
+/// So it is carried rather than deleted, and `ground_uv`'s indexing is pinned
+/// by `the_ground_atlas_is_indexed_the_way_it_is_packed` so it cannot rot
+/// between now and the day something draws it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const GROUND_TILE: Vec2 = Vec2::new(128.0, 64.0);
 /// The packed ground atlas: eight tiles across, sixteen corner masks of four
 /// detail variants each, in mask-major order.
+#[cfg_attr(not(test), allow(dead_code))]
 const GROUND_ATLAS: Vec2 = Vec2::new(1024.0, 512.0);
+#[cfg_attr(not(test), allow(dead_code))]
 const GROUND_COLUMNS: u32 = 8;
+#[cfg_attr(not(test), allow(dead_code))]
 const GROUND_VARIANTS: u32 = 4;
+
+/// How far below the shared ground anchor a monkey's near foot may be drawn, in
+/// art pixels.
+///
+/// Not slack in the anchor: the anchor is a point and a monkey has width in
+/// depth, so on a 2:1 ground plane the foot nearest the viewer sits below the
+/// centre line. Measured off the sheets by
+/// `the_worker_is_as_tall_as_the_board_was_tuned_against`, which is also what
+/// stops it drifting: a sheet exported against a different anchor moves the
+/// whole cell, not one foot, and still fails.
+#[cfg_attr(not(test), allow(dead_code))]
+const NEAR_FOOT_ROWS: f32 = 5.0;
 
 /// The highest row any cart cell draws on, in the cart's art pixels: the tip of
 /// the crew's tails over the load.
@@ -679,6 +708,12 @@ pub(crate) struct Art {
     /// lying at its foot for the player to pick up.
     pub(crate) banana_harvested: Handle<Image>,
     /// The packed ground tiles: see [`ground_uv`].
+    ///
+    /// Loaded and ready; nothing reads it in any build yet, for the reason
+    /// [`GROUND_TILE`] gives. Kept loaded rather than deferred so that the day
+    /// the board is drawn from it, the handle is already warm in the asset
+    /// server and the change is to `isometric` alone.
+    #[allow(dead_code)]
     pub(crate) ground: Handle<Image>,
     worker_idle: Handle<Image>,
     worker_walk: Handle<Image>,
@@ -946,6 +981,7 @@ fn cart_index(clip: CartClip, facing: Facing, frame: u32) -> usize {
 /// `mask` is the tile's four corners, one bit each - top 1, right 2, bottom 4,
 /// left 8 - set for dirt and clear for jungle floor; `variant` is one of four
 /// patterns of detail over the same edges.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn ground_uv(mask: u8, variant: u8) -> (Vec2, Vec2) {
     let index = u32::from(mask) * GROUND_VARIANTS + u32::from(variant) % GROUND_VARIANTS;
     let at = Vec2::new(
@@ -1251,10 +1287,26 @@ mod tests {
                 "at the zoom floor row {row} frame {column} is {} px, under a thumbnail",
                 drawn * 2.0
             );
-            // Every direction stands on the manifest's shared anchor row.
+            // Every direction stands on the manifest's shared anchor row,
+            // give or take the foot nearest the viewer.
+            //
+            // That slack is the drawing being right rather than the check being
+            // lax. The anchor is one point, and a monkey has width in *depth*:
+            // on a 2:1 ground plane the near foot is drawn below the centre
+            // line by half the distance between its feet, and a walk swings
+            // them further apart than a stand does. The idle sheet reaches two
+            // rows past the anchor and the two directional walks reach five,
+            // which is what this allows - tight enough that a sheet exported
+            // against a different anchor still fails, since that moves the
+            // whole cell rather than one foot.
+            //
+            // It said two rows before the directional sheets landed, which was
+            // the idle's own figure and nothing else's.
             assert!(
-                bottom as f32 <= WORKER.ground.y + 2.0,
-                "row {row} frame {column} stands below the ground line at {bottom}"
+                bottom as f32 <= WORKER.ground.y + NEAR_FOOT_ROWS,
+                "row {row} frame {column} stands {} rows below the ground line, past the \
+                 {NEAR_FOOT_ROWS} a near foot may reach",
+                bottom as f32 - WORKER.ground.y
             );
         }
         // And the rows things are placed against are where the art has them.
@@ -1557,6 +1609,51 @@ mod tests {
             }
         }
         (min, max)
+    }
+
+    #[test]
+    fn the_ground_atlas_is_indexed_the_way_it_is_packed() {
+        // Nothing draws these tiles yet (see `GROUND_TILE`), which is exactly
+        // why the indexing is worth pinning now: an atlas nobody reads is an
+        // atlas whose packing can drift under it, and the failure then lands on
+        // whoever finally wires it up rather than on whoever moved it.
+        //
+        // Held against the exporter's own manifest rather than against these
+        // constants restated, so a repacked atlas fails here.
+        let packed = manifest("Ground/ground-atlas.json");
+        assert_eq!(packed["tileWidth"], GROUND_TILE.x as u32);
+        assert_eq!(packed["tileHeight"], GROUND_TILE.y as u32);
+        assert_eq!(packed["columns"], GROUND_COLUMNS);
+        assert_eq!(packed["variants"], GROUND_VARIANTS);
+        let (width, height, _) = png("Ground/ground-atlas.png");
+        assert_eq!(Vec2::new(width as f32, height as f32), GROUND_ATLAS);
+
+        // Every tile the manifest lists is where `ground_uv` looks for it.
+        let tiles = packed["tiles"]
+            .as_array()
+            .expect("the manifest lists tiles");
+        assert_eq!(tiles.len(), 16 * GROUND_VARIANTS as usize);
+        for tile in tiles {
+            let (mask, variant) = (
+                tile["mask"].as_u64().unwrap() as u8,
+                tile["variant"].as_u64().unwrap() as u8,
+            );
+            let (min, max) = ground_uv(mask, variant);
+            let expected = Vec2::new(
+                tile["x"].as_u64().unwrap() as f32,
+                tile["y"].as_u64().unwrap() as f32,
+            );
+            assert_eq!(
+                min * GROUND_ATLAS,
+                expected,
+                "mask {mask} variant {variant}"
+            );
+            assert_eq!((max - min) * GROUND_ATLAS, GROUND_TILE);
+            // And inside the sheet, which is what a wrong column count breaks.
+            assert!(max.cmple(Vec2::ONE).all(), "mask {mask} variant {variant}");
+        }
+        // A variant past the four wraps rather than walking into the next mask.
+        assert_eq!(ground_uv(5, GROUND_VARIANTS as u8), ground_uv(5, 0));
     }
 
     #[test]

@@ -3393,6 +3393,19 @@ fn ease(progress: f32) -> f32 {
     progress * progress * (3.0 - 2.0 * progress)
 }
 
+/// The drop point's shadow: where it is and whether it is shown.
+///
+/// Named rather than spelled out in the signature, the way every other query
+/// with more than a component or two in this crate is - `Without<Banana>` is
+/// half of what stops it aliasing the banana's own transform, and that is worth
+/// a line of its own rather than a fourth clause on a parameter.
+type HeldBananaShadow<'w, 's> = Single<
+    'w,
+    's,
+    (&'static mut Transform, &'static mut Visibility),
+    (With<BananaShadow>, Without<Banana>),
+>;
+
 /// Where the player's banana and its shadow are drawn this frame, from what
 /// the hand is doing.
 ///
@@ -3406,7 +3419,7 @@ fn place_held_banana(
     layout: Res<SceneLayout>,
     controller: Res<HarvestController>,
     mut banana: Single<&mut Transform, (With<Banana>, Without<BananaShadow>)>,
-    mut shadow: Single<(&mut Transform, &mut Visibility), (With<BananaShadow>, Without<Banana>)>,
+    mut shadow: HeldBananaShadow<'_, '_>,
 ) {
     let ground = match controller.interaction {
         // Lying where it rests, sorted with the world: in front of the plant
