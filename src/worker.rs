@@ -1732,7 +1732,12 @@ type CartAvatarQuery<'w, 's> = Query<
 /// after its bananas had visibly gone. A segment shorter than its clip - a
 /// crowd of Unpackers gets the unload there - plays the clip faster rather
 /// than cutting it.
-fn cart_pose(segment: Segment, boarding: bool, progress: f64, seconds: f64) -> (CartClip, u32, bool) {
+fn cart_pose(
+    segment: Segment,
+    boarding: bool,
+    progress: f64,
+    seconds: f64,
+) -> (CartClip, u32, bool) {
     if boarding {
         return (CartClip::TravelEmpty, 0, true);
     }
@@ -2007,7 +2012,10 @@ mod dressing_tests {
         assert_eq!(at(1.2), (CartClip::Fill, 12, true));
         assert_eq!(at(0.0), (CartClip::Fill, 23, true));
         // A segment shorter than the clip still shows all of it.
-        for (segment, clip) in [(Segment::Pick, CartClip::Fill), (Segment::Unload, CartClip::Offload)] {
+        for (segment, clip) in [
+            (Segment::Pick, CartClip::Fill),
+            (Segment::Unload, CartClip::Offload),
+        ] {
             let shown: std::collections::BTreeSet<u32> = (0..=2000)
                 .map(|step| cart_pose(segment, false, f64::from(step) / 2000.0, 0.5))
                 .filter(|(playing, ..)| *playing == clip)
@@ -2026,7 +2034,13 @@ mod dressing_tests {
         let mut changes = 0;
         let mut last = cart_pose(Segment::ToDepot, false, 0.0, seconds).1;
         for step in 1..=steps {
-            let frame = cart_pose(Segment::ToDepot, false, f64::from(step) / f64::from(steps), seconds).1;
+            let frame = cart_pose(
+                Segment::ToDepot,
+                false,
+                f64::from(step) / f64::from(steps),
+                seconds,
+            )
+            .1;
             if frame != last {
                 changes += 1;
                 last = frame;
