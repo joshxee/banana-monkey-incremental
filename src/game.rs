@@ -1078,20 +1078,22 @@ impl SceneLayout {
     /// that leaves the screen first.
     pub(crate) fn support_stand(self, role: SupportRole) -> Vec2 {
         let offset = match role {
-            // Beside the bins it empties, level with them on screen and to
-            // their right: clear of the house behind the depot, where the old
-            // ring stood it, and of the walk out to the grove on the left.
-            SupportRole::Unpacker => Vec2::new(4.0, -4.6),
-            // Nearest the viewer, at the front of the village: being fed is the
+            // Below and right of the bins it empties, nearest the viewer:
+            // clear of the house behind the depot, where the old ring stood
+            // it, and of the walk out to the grove, which leaves up the
+            // screen.
+            SupportRole::Unpacker => Vec2::new(7.125, 0.875),
+            // Left of the bins and nearer the viewer: being fed is the
             // most-watched thing that happens at the stall, and what the player
-            // is looking for when the banner reads HUNGRY.
-            SupportRole::Chef => Vec2::new(1.0, 7.0),
-            // Off to one side, clear of the ground between the depot and the
-            // kitchen: research is the one job with no traffic of its own. Its
-            // bearing is also the one the home tree constrains - swung further
-            // round, the research desk stands underneath the tree the player
-            // hand-harvests from, inside the drag target.
-            SupportRole::Technologist => Vec2::new(-6.2, 5.0),
+            // is looking for when the banner reads HUNGRY. This is the grill's
+            // anchor. The kitchen is a prop four monkeys wide, and down and
+            // left of the depot is the one place with room for it outside the
+            // unloading ring, below the cart parked at the stair, and inside a
+            // portrait phone's opening view.
+            SupportRole::Chef => Vec2::new(-1.75, 9.25),
+            // Off to the other side, beside the house and right of the bins:
+            // research is the one job with no traffic of its own.
+            SupportRole::Technologist => Vec2::new(2.75, -6.25),
         };
         self.town_centre + offset
     }
@@ -3235,6 +3237,14 @@ fn ease(progress: f32) -> f32 {
     progress * progress * (3.0 - 2.0 * progress)
 }
 
+/// The banana's cast shadow: where it is, and whether it is shown.
+type BananaShadowView<'w, 's> = Single<
+    'w,
+    's,
+    (&'static mut Transform, &'static mut Visibility),
+    (With<BananaShadow>, Without<Banana>),
+>;
+
 /// Where the player's banana and its shadow are drawn this frame, from what
 /// the hand is doing.
 ///
@@ -3244,12 +3254,11 @@ fn ease(progress: f32) -> f32 {
 /// stayed under the tree for the whole keyboard arc, and a banana put back
 /// drew over the plant's visitors for a frame. The shadow is the drop point;
 /// it cannot be a frame stale.
-#[allow(clippy::type_complexity)]
 fn place_held_banana(
     layout: Res<SceneLayout>,
     controller: Res<HarvestController>,
     mut banana: Single<&mut Transform, (With<Banana>, Without<BananaShadow>)>,
-    mut shadow: Single<(&mut Transform, &mut Visibility), (With<BananaShadow>, Without<Banana>)>,
+    mut shadow: BananaShadowView,
 ) {
     let ground = match controller.interaction {
         // Lying where it rests, sorted with the world: in front of the plant

@@ -59,9 +59,10 @@ y-down. The new body is about 54 pixels high, slightly larger than the Spider
 Worker's roughly 44-pixel body; its body mass is deliberately heavier.
 
 The base poses remain available as static art. The separate animation master
-adds idle and tongs-lift loops for all four chef angles. Runtime integration,
-hiring limits and the simulation are not changed. Human visual acceptance is
-still pending.
+adds idle and tongs-lift loops for all four chef angles. In the game (D31)
+the chefs take the grill's three seats in order, cook while fed and idle while
+hungry; `src/art.rs` holds the anchors, seats and timings to the manifests.
+The simulation is not changed.
 
 ## Animation review
 

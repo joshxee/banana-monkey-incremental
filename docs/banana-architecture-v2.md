@@ -872,7 +872,8 @@ jungle and the town centre move by a single native pixel, which at this scale is
 four tenths of a texel and cannot render, so those use the static exports and
 the game loads five small textures instead of two atlases of 2688×2816. And the
 support roles are still told apart by a tinted primitive worn over the sprite —
-a cap, a crate, a desk — because there is no prop art. Those primitives are now
+a cap, a crate, a desk — because there is no prop art (the chefs and unpackers
+have their own animals since D31). Those primitives are now
 placed from the art's measured silhouette rather than from the rectangle they
 were authored against, which is why they read as carried rather than as floating
 squares, but they remain the weakest thing on the board.
@@ -1124,6 +1125,93 @@ an edge of it, a short pan away. The unpacker moved
 from behind where the house now stands to beside the bins, and the
 technologist a step away from the home tree, so that every other viewport still
 opens with the whole crew in view.
+
+**D31 — The ground, the kitchen and the unpackers are the artist's.**
+*(Owner's request: fix the art integration, the ground tiles and the baboon
+chefs.)*
+
+An audit of every drawn asset against what the game loads found four gaps. The
+ground atlas was loaded and never drawn, so the board was still flat colour.
+The baboon chef and its grill, and the squirrel-monkey unpacker, were finished
+art the game did not use: every support role was a spider worker in a tinted
+primitive, which D28 had called the weakest thing on the board. And deleting
+the old single-banana study had put a whole bunch, three times its size, on
+the back of every monkey that stopped. None of it touches the simulation.
+
+*The ground is drawn, on one grid of vertices.* Ground tiles are two board
+tiles a step at the shared scale, placed by the manifest's rule, so the art's
+pixels are the board's texels. Material is decided at vertices, which is what
+makes neighbouring tiles agree on their shared edge; a test holds every shared
+corner. A vertex is dirt where monkeys walk - the ring path, a plaza two ground
+tiles each way round the vertex nearest the bins, so every tile the drop target
+touches is wholly dirt, and the worked route to the grove - and sage floor
+everywhere else open. The ring path is two tiles wide on a two-tile grid, so it
+draws one row of vertices wide on its far sides and two on its near ones. The artist drew clay for the whole town, and
+drawn that way it was a forty-tile sheet of one colour ruled by the same few
+marks: every marked variant puts its marks at the same place in its diamond,
+so marked tiles always fall on the grid. Two tiles in three are the quiet
+variant for the same reason. The trail is the reference route, three metres
+either side - a little over half a ground tile's diagonal, so it never breaks
+into islands - and the swarm walks wider than it, as a crowd on a worn path
+does. Tiles cover open ground and the tree line; the deep jungle stays flat
+canopy so the barrier still reads. The flat underlay under the tiles is painted
+each material's own base colour, so a seam left by rounding at a pinched zoom
+shows the ground rather than a dark green speck. The depot's painted pad is gone;
+the plaza is the pad.
+
+*The chefs are baboons at a grill.* The kitchen is one prop with three seats, and
+the chefs take them in the artist's order - the two working it from either
+side, then the one in front with its back to the viewer - so hiring a chef
+fills a seat and never moves the others. A fed chef plays the tongs-lift loop,
+a hungry one the idle, drawn darker; when no chef is fed the grill darkens too,
+since its art always has bananas on it. The grill sorts just behind its rear
+seats rather than at its own feet, because the artist draws all three chefs over
+it; nothing the unloading ring stands reaches it, which a test sweeps. Chefs are
+placed off the grill's snapped position by whole texels, so they do not crawl
+against it through a pinch.
+
+*Hunger is brick, not grey.* Review found a starving kitchen indistinguishable
+from a working one: grey at 60% over the sage floor is the floor's colour, and
+the grill stood over the side seats' discs. Every role's disc now drains to
+brick, with a darker rim, and a chef's disc lies just over the grill. There is
+no walk drawn for a baboon, so a new chef appears at its seat with the hire flash
+instead of walking out of the bins; sliding a standing pose across the village
+read as a cut-out being pushed.
+
+*The unpackers are squirrel monkeys.* They dart out of the bins on the drawn
+eight-way dart and stand facing the bins they empty. The courier clips - carry,
+take and drop, for running bananas from workers to the bins - wait for an
+unpacker that does that; today it stands at its station like every support
+monkey. The technologist is still a spider worker at a desk primitive: there is
+no desk art.
+
+*The stations moved, because the kitchen is four monkeys wide.* The grill and
+its chefs stand left of the bins and nearer the viewer, clear of the unloading
+ring - the grill's base as well as every chef's feet, which a test holds - below
+the cart parked at the stair, and inside a portrait phone's opening view. The
+unpackers moved below and right of the bins, and the technologist to the right,
+beside the house. A fan's badge clears the tallest thing drawn in it; the
+kitchen's sits on the grill's hood, because above the toques it rose into the
+cart parked at the stair and read as the cart's count. The technologist's desk
+is the deck's timber rather than the role swatch, which next to drawn art read
+as a missing texture.
+
+*The carried banana is one banana.* The squirrel's handoff fruit is a single
+banana at the shared scale, drawn for riding on a monkey; it now rides on the
+back by its registration point and mirrors with the monkey.
+
+Limits. The spider worker's height test had been failing since the eight-way
+walks landed: their feet swing up to five rows below the anchor mid-stride. It
+now takes the idle's feet as the ground: no walk frame reaches more than three
+rows below them, and every loop plants a foot on them. The ground's alpha mask
+relies on the tiles landing on whole texels; a zoom between whole steps can
+leave a one-pixel seam, which the underlay colours, and the tiles' texture
+coordinates are pulled a tenth of an art pixel inside their cells so a corner
+never samples its neighbour in the gutterless atlas. Open, and left to the
+owner: the trail meets the ring path in a square notch; the grill's glowing
+bananas are the most saturated thing near the depot and may pull a first drag
+towards the kitchen; the sage floor is close in value to the sky past the
+board's edge; and the technologist still has no desk art.
 
 ---
 

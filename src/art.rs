@@ -147,16 +147,42 @@ pub(crate) const CART: Cell = Cell::new((208.0, 176.0), (104.0, 126.0));
 
 /// One ground tile, in art pixels (see `assets/Ground`): a 2:1 diamond on a
 /// transparent canvas. At the shared scale it spans two board tiles each way.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const GROUND_TILE: Vec2 = Vec2::new(128.0, 64.0);
 /// The packed ground atlas: eight tiles across, sixteen corner masks of four
 /// detail variants each, in mask-major order.
-#[cfg_attr(not(test), allow(dead_code))]
 const GROUND_ATLAS: Vec2 = Vec2::new(1024.0, 512.0);
-#[cfg_attr(not(test), allow(dead_code))]
 const GROUND_COLUMNS: u32 = 8;
-#[cfg_attr(not(test), allow(dead_code))]
 const GROUND_VARIANTS: u32 = 4;
+/// The two ground materials' base colours, read off the middle of the quiet
+/// all-floor and all-dirt tiles: what the flat underlay is painted, so a seam
+/// the tiles leave shows the ground it belongs to.
+pub(crate) const GROUND_FLOOR: Color = Color::srgb_u8(164, 197, 175);
+pub(crate) const GROUND_DIRT: Color = Color::srgb_u8(188, 173, 159);
+
+/// One frame of the baboon chef (see `assets/Monkey/Baboon Chef/v2`), for the
+/// poses drawn facing screen-right and screen-left. The feet are not in the
+/// middle of the canvas - the tail trails behind - so the two differ.
+pub(crate) const CHEF_RIGHT: Cell = Cell::new((64.0, 64.0), (35.0, 59.0));
+pub(crate) const CHEF_LEFT: Cell = Cell::new((64.0, 64.0), (28.0, 59.0));
+/// The banana grill the chefs work at (see `assets/BananaGrill`).
+pub(crate) const GRILL: Cell = Cell::new((128.0, 112.0), (64.0, 100.0));
+/// The middle of the grill's hood, in its art pixels: where the kitchen's
+/// badge sits.
+pub(crate) const GRILL_HOOD_ROW: f32 = 64.0;
+/// The grill station's own ground anchor, in the station's art pixels: the
+/// frame the seats in `baboon-chef.json` are measured in. The grill's anchor
+/// lands exactly here.
+const GRILL_STATION_ANCHOR: Vec2 = Vec2::new(112.0, 137.0);
+const CHEF_FRAMES: u32 = 16;
+/// The top of the chef's toque, in every frame of every pose.
+pub(crate) const CHEF_TOP_ROW: f32 = 2.0;
+
+/// One frame of the squirrel-monkey unpacker (see
+/// `assets/Monkey/Squirrel Unpacker`): the spider worker's canvas and anchor.
+pub(crate) const SQUIRREL: Cell = Cell::new((64.0, 64.0), (32.0, 56.0));
+/// The top of the squirrel's silhouette - its raised tail - at its tallest,
+/// across every idle and dart frame.
+pub(crate) const SQUIRREL_TOP_ROW: f32 = 17.0;
 
 /// The top row of the banana plant's crown, in both of its states: how far up
 /// the plant a press still means the plant. Measured off the art by
@@ -169,8 +195,6 @@ pub(crate) const PLANT_CROWN_ROW: f32 = 96.0;
 ///
 /// The tip of the curled tail: the top of the monkey's silhouette.
 pub(crate) const WORKER_TOP_ROW: f32 = 1.0;
-/// The top of the head, in every idle frame. A hat sits here, not on the tail.
-pub(crate) const WORKER_CROWN_ROW: f32 = 14.0;
 /// The middle of the hunched back, which is where a banana rides while the
 /// monkey stands. The head is forward of it and the tail behind, and both are
 /// wrong places for cargo: on the head it reads as a hat, on the tail it
@@ -178,16 +202,35 @@ pub(crate) const WORKER_CROWN_ROW: f32 = 14.0;
 /// carry sheets.
 pub(crate) const WORKER_BACK: Vec2 = Vec2::new(31.0, 24.0);
 
-/// The banana a standing worker carries on its back, in world texels.
+/// The single banana a standing worker carries on its back.
 ///
-/// The old single-banana study was removed, so the shipped still bunch is the
-/// remaining banana asset in the project. It is the same visual role on the
-/// monkey's back, just with the current art set's silhouette and scale.
-pub(crate) const CARRIED_BANANA_TEXELS: f32 = 48.0 * ART_SCALE;
-/// The still banana image used for the carried load: the project still ships a
-/// single-frame bunch asset, and the old rolling single-banana sheet is gone.
-const BANANA_FRAMES: u32 = 1;
-const BANANA_REST_FRAME: u32 = 0;
+/// The squirrel monkey's handoff fruit (`banana-transfer.png`): one banana,
+/// drawn at the shared scale for exactly this job - riding on a monkey between
+/// one hand and the next. The carry walk puts a single banana in the monkey's
+/// hand, and the whole still bunch that stood in here once the old study was
+/// deleted put a second, bigger load on the back of every monkey that stopped.
+/// Its registration point is the manifest's fruit origin, (10, 10).
+pub(crate) const CARRIED_BANANA: Cell = Cell::new((24.0, 24.0), (10.0, 10.0));
+
+/// Where the carried banana's middle rides, from a worker's feet in world
+/// texels: facing right, and facing left (the sprite mirrored).
+///
+/// The fruit's registration point goes on [`WORKER_BACK`]. Mirrored, both
+/// images reflect about their own canvases - the worker's `x = 63 - x`, the
+/// fruit's origin to (13, 10), as the squirrel's manifest gives it - so the
+/// left-facing middle is worked out in pixels rather than by negating the
+/// right-facing one, which lands a pixel off.
+pub(crate) fn carried_banana_middles() -> (Vec2, Vec2) {
+    let middle = CARRIED_BANANA.canvas * 0.5;
+    let right = WORKER_BACK + middle - CARRIED_BANANA.ground;
+    let mirrored_back = Vec2::new(WORKER.canvas.x - 1.0 - WORKER_BACK.x, WORKER_BACK.y);
+    let mirrored_origin = Vec2::new(
+        CARRIED_BANANA.canvas.x - 1.0 - CARRIED_BANANA.ground.x,
+        CARRIED_BANANA.ground.y,
+    );
+    let left = mirrored_back + middle - mirrored_origin;
+    (WORKER.offset_of(right), WORKER.offset_of(left))
+}
 
 /// A contact shadow, in world texels: a little wider than a monkey's feet and
 /// a third as deep as it is wide, which is the 2:1 ground seen from above.
@@ -421,6 +464,159 @@ impl Bunch {
     }
 }
 
+/// The four ways the baboon chef is drawn: three-quarter views facing
+/// screen-left or screen-right, towards the viewer or turned away. In the
+/// animation sheet's row order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChefPose {
+    Left,
+    Right,
+    BackLeft,
+    BackRight,
+}
+
+impl ChefPose {
+    const ALL: [Self; 4] = [Self::Left, Self::Right, Self::BackLeft, Self::BackRight];
+
+    /// The canvas and feet this pose is drawn on.
+    pub(crate) fn cell(self) -> Cell {
+        match self {
+            Self::Left | Self::BackLeft => CHEF_LEFT,
+            Self::Right | Self::BackRight => CHEF_RIGHT,
+        }
+    }
+
+    #[cfg(test)]
+    fn name(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::BackLeft => "back-left",
+            Self::BackRight => "back-right",
+        }
+    }
+}
+
+/// The chef's two loops (see `baboon-animations.json`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChefClip {
+    /// Standing at the grill with a blink and a twitch of the tail: a chef
+    /// with nothing to eat, so nothing to cook with.
+    Idle,
+    /// Lifting the tongs over the grill: a fed chef at work.
+    Cook,
+}
+
+impl ChefClip {
+    /// Every frame's hold, in seconds: the manifest times each loop evenly.
+    pub(crate) fn frame_seconds(self) -> f32 {
+        match self {
+            Self::Idle => 0.180,
+            Self::Cook => 0.120,
+        }
+    }
+
+    fn first_row(self) -> u32 {
+        match self {
+            Self::Idle => 0,
+            Self::Cook => ChefPose::ALL.len() as u32,
+        }
+    }
+}
+
+/// A place at the grill: the pose a chef there is drawn in, and where its feet
+/// stand.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ChefSeat {
+    pub(crate) pose: ChefPose,
+    /// The feet, in the grill station's art pixels.
+    feet: Vec2,
+}
+
+impl ChefSeat {
+    /// Where the feet stand from the grill's ground anchor, in world texels
+    /// with y running up the screen, rounded to whole texels.
+    ///
+    /// The manifest's seats are odd numbers of art pixels from the anchor, so
+    /// half a texel each at the shared scale. Rounded once here, so a chef is
+    /// placed off the grill's position by a whole number of texels and never
+    /// swaps which way it rounds against the grill as the zoom changes.
+    pub(crate) fn offset(self) -> Vec2 {
+        let from = self.feet - GRILL_STATION_ANCHOR;
+        (Vec2::new(from.x, -from.y) * ART_SCALE).round()
+    }
+}
+
+/// The grill's three seats, in the order they fill: the two working it from
+/// either side, facing in across it, then the one in front with its back to
+/// the viewer. From the manifest's station slots, each seat's cell origin plus
+/// its pose's anchor; `the_grill_seats_are_the_manifests` holds them to it.
+pub(crate) const CHEF_SEATS: [ChefSeat; 3] = [
+    ChefSeat {
+        pose: ChefPose::Right,
+        feet: Vec2::new(33.0 + 35.0, 51.0 + 59.0),
+    },
+    ChefSeat {
+        pose: ChefPose::Left,
+        feet: Vec2::new(132.0 + 28.0, 51.0 + 59.0),
+    },
+    ChefSeat {
+        pose: ChefPose::BackRight,
+        feet: Vec2::new(70.0 + 35.0, 89.0 + 59.0),
+    },
+];
+
+/// The squirrel monkey's loops, in eight directions each (see
+/// `assets/Monkey/Squirrel Unpacker/squirrel-monkey.json`).
+///
+/// It also has `carry`, `take` and `drop`, drawn for a courier running bananas
+/// from the workers to the bins. The unpacker does not do that yet - it stands
+/// at its station, as every support monkey does - so those wait for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SquirrelClip {
+    /// Standing, with a slight adjustment of the tail.
+    Idle,
+    /// Scampering on all fours, empty-handed.
+    Dart,
+}
+
+impl SquirrelClip {
+    const ALL: [Self; 2] = [Self::Idle, Self::Dart];
+
+    pub(crate) fn frames(self) -> u32 {
+        match self {
+            Self::Idle => 4,
+            Self::Dart => 8,
+        }
+    }
+
+    pub(crate) fn frame_seconds(self) -> f32 {
+        match self {
+            Self::Idle => 0.300,
+            Self::Dart => 0.050,
+        }
+    }
+
+    fn path(self) -> &'static str {
+        match self {
+            Self::Idle => "Monkey/Squirrel Unpacker/squirrel-monkey-idle.png",
+            Self::Dart => "Monkey/Squirrel Unpacker/squirrel-monkey-dart.png",
+        }
+    }
+
+    #[cfg(test)]
+    fn name(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Dart => "dart",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// Where a clip with per-frame holds has got to.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(crate) struct Playhead {
@@ -550,9 +746,7 @@ pub(crate) struct Art {
     /// And with the bunch cut: the home tree, whose bunch is the loose one
     /// lying at its foot for the player to pick up.
     pub(crate) banana_harvested: Handle<Image>,
-    /// The packed ground tiles: see [`ground_uv`]. Kept loaded for the tile
-    /// renderer that isn't wired up to draw it yet.
-    #[allow(dead_code)]
+    /// The packed ground tiles: see [`ground_uv`].
     pub(crate) ground: Handle<Image>,
     worker_idle: Handle<Image>,
     worker_walk: Handle<Image>,
@@ -563,7 +757,12 @@ pub(crate) struct Art {
     bunch_layouts: [Handle<TextureAtlasLayout>; 4],
     cart_layouts: [Handle<TextureAtlasLayout>; 4],
     banana: Handle<Image>,
-    banana_layout: Handle<TextureAtlasLayout>,
+    /// The chef's grill, which stands at the kitchen with its chefs round it.
+    pub(crate) grill: Handle<Image>,
+    chef: Handle<Image>,
+    chef_layout: Handle<TextureAtlasLayout>,
+    squirrel: [Handle<Image>; 2],
+    squirrel_layouts: [Handle<TextureAtlasLayout>; 2],
     /// A flat ellipse, generated rather than drawn: see [`Art::shadow`].
     shadow: Handle<Image>,
 }
@@ -589,7 +788,13 @@ impl Art {
         let bunch_layouts = Bunch::ALL.map(|clip| grid(BUNCH.canvas, clip.frames(), 1));
         let cart_layouts =
             CartClip::ALL.map(|clip| grid(CART.canvas, clip.frames(), Facing::ALL.len() as u32));
-        let banana_layout = grid(Vec2::splat(48.0), BANANA_FRAMES, 1);
+        let chef_layout = grid(
+            CHEF_RIGHT.canvas,
+            CHEF_FRAMES,
+            ChefClip::Cook.first_row() + ChefPose::ALL.len() as u32,
+        );
+        let squirrel_layouts = SquirrelClip::ALL
+            .map(|clip| grid(SQUIRREL.canvas, clip.frames(), Facing::ALL.len() as u32));
         Self {
             town_centre: assets.load("TownCenter/town-center-structure.png"),
             town_centre_ground: assets.load("TownCenter/town-center-ground.png"),
@@ -609,8 +814,12 @@ impl Art {
             bunch: Bunch::ALL.map(|clip| assets.load(clip.path())),
             bunch_layouts,
             cart_layouts,
-            banana: assets.load("Banana/banana-bunch-still.png"),
-            banana_layout,
+            banana: assets.load("Monkey/Squirrel Unpacker/banana-transfer.png"),
+            grill: assets.load("BananaGrill/banana-grill.png"),
+            chef: assets.load("Monkey/Baboon Chef/v2/baboon-animations.png"),
+            chef_layout,
+            squirrel: SquirrelClip::ALL.map(|clip| assets.load(clip.path())),
+            squirrel_layouts,
             shadow: images.add(shadow_image()),
         }
     }
@@ -709,18 +918,77 @@ impl Art {
         );
     }
 
-    /// The single banana a standing worker carries on its back.
+    /// The single banana a standing worker carries on its back, centred:
+    /// see [`CARRIED_BANANA`] for where its registration point is.
     pub(crate) fn carried_banana(&self) -> Sprite {
         Sprite {
-            custom_size: Some(Vec2::splat(CARRIED_BANANA_TEXELS)),
+            image: self.banana.clone(),
+            custom_size: Some(CARRIED_BANANA.size()),
+            ..default()
+        }
+    }
+
+    /// A baboon chef on a frame of a clip, in a pose. Anchor it with the
+    /// pose's own cell: the right- and left-facing poses stand on different
+    /// columns.
+    pub(crate) fn chef(&self, clip: ChefClip, pose: ChefPose, frame: u32) -> Sprite {
+        Sprite {
+            custom_size: Some(pose.cell().size()),
             ..Sprite::from_atlas_image(
-                self.banana.clone(),
+                self.chef.clone(),
                 TextureAtlas {
-                    layout: self.banana_layout.clone(),
-                    index: BANANA_REST_FRAME as usize,
+                    layout: self.chef_layout.clone(),
+                    index: chef_index(clip, pose, frame),
                 },
             )
         }
+    }
+
+    /// Put a chef sprite on a frame of a clip.
+    pub(crate) fn pose_chef(
+        &self,
+        sprite: &mut Mut<Sprite>,
+        clip: ChefClip,
+        pose: ChefPose,
+        frame: u32,
+    ) {
+        set_cell(
+            sprite,
+            self.chef.clone(),
+            self.chef_layout.clone(),
+            chef_index(clip, pose, frame),
+        );
+    }
+
+    /// A squirrel monkey on a frame of a clip, facing `facing`. Never
+    /// mirrored: all eight directions are drawn.
+    pub(crate) fn squirrel(&self, clip: SquirrelClip, facing: Facing, frame: u32) -> Sprite {
+        Sprite {
+            custom_size: Some(SQUIRREL.size()),
+            ..Sprite::from_atlas_image(
+                self.squirrel[clip.index()].clone(),
+                TextureAtlas {
+                    layout: self.squirrel_layouts[clip.index()].clone(),
+                    index: squirrel_index(clip, facing, frame),
+                },
+            )
+        }
+    }
+
+    /// Put a squirrel sprite on a frame of a clip, facing `facing`.
+    pub(crate) fn pose_squirrel(
+        &self,
+        sprite: &mut Mut<Sprite>,
+        clip: SquirrelClip,
+        facing: Facing,
+        frame: u32,
+    ) {
+        set_cell(
+            sprite,
+            self.squirrel[clip.index()].clone(),
+            self.squirrel_layouts[clip.index()].clone(),
+            squirrel_index(clip, facing, frame),
+        );
     }
 
     /// A flat ellipse on the ground, `size` texels across, in `color`.
@@ -777,13 +1045,22 @@ fn cart_index(clip: CartClip, facing: Facing, frame: u32) -> usize {
     (facing.row() * clip.frames() + frame % clip.frames()) as usize
 }
 
+/// A chef frame's index in the animation sheet: one row per clip and pose.
+fn chef_index(clip: ChefClip, pose: ChefPose, frame: u32) -> usize {
+    ((clip.first_row() + pose as u32) * CHEF_FRAMES + frame % CHEF_FRAMES) as usize
+}
+
+/// A squirrel frame's index in its clip's sheet: one row per facing.
+fn squirrel_index(clip: SquirrelClip, facing: Facing, frame: u32) -> usize {
+    (facing.row() * clip.frames() + frame % clip.frames()) as usize
+}
+
 /// Where one ground tile sits in the packed atlas, as texture coordinates:
 /// its top-left and bottom-right corners.
 ///
 /// `mask` is the tile's four corners, one bit each - top 1, right 2, bottom 4,
 /// left 8 - set for dirt and clear for jungle floor; `variant` is one of four
 /// patterns of detail over the same edges.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn ground_uv(mask: u8, variant: u8) -> (Vec2, Vec2) {
     let index = u32::from(mask) * GROUND_VARIANTS + u32::from(variant) % GROUND_VARIANTS;
     let at = Vec2::new(
@@ -876,6 +1153,7 @@ mod tests {
     const WALK_SHEET: &str = "Monkey/Spider Worker/spider_monkey_walk_8dir.png";
     const CARRY_SHEET: &str = "Monkey/Spider Worker/spider_monkey_carry_walk_8dir.png";
     const IDLE_SHEET: &str = "Monkey/Spider Worker/spider_monkey_idle_sheet.png";
+    const CHEF_SHEET: &str = "Monkey/Baboon Chef/v2/baboon-animations.png";
 
     #[test]
     fn every_cell_matches_the_file_it_is_drawn_from() {
@@ -901,6 +1179,18 @@ mod tests {
         for clip in CartClip::ALL {
             sheets.push((clip.path(), CART, clip.frames(), 8));
         }
+        sheets.push((
+            "Monkey/Squirrel Unpacker/banana-transfer.png",
+            CARRIED_BANANA,
+            1,
+            1,
+        ));
+        sheets.push(("BananaGrill/banana-grill.png", GRILL, 1, 1));
+        sheets.push((CHEF_SHEET, CHEF_RIGHT, CHEF_FRAMES, 8));
+        sheets.push((CHEF_SHEET, CHEF_LEFT, CHEF_FRAMES, 8));
+        for clip in SquirrelClip::ALL {
+            sheets.push((clip.path(), SQUIRREL, clip.frames(), 8));
+        }
         for (path, cell, columns, rows) in sheets {
             let (width, height, _) = png(path);
             assert_eq!(
@@ -909,8 +1199,6 @@ mod tests {
                 "{path}"
             );
         }
-        let (width, height, _) = png("Banana/banana-bunch-still.png");
-        assert_eq!((width, height), (48, 48));
         let (width, height, _) = png("Ground/ground-atlas.png");
         assert_eq!(Vec2::new(width as f32, height as f32), GROUND_ATLAS);
     }
@@ -1062,18 +1350,21 @@ mod tests {
         let cell = WORKER.canvas.x as u32;
         let mut frames = vec![];
         for frame in 0..IDLE_FRAMES {
-            frames.push((&idle, frame, 0));
+            frames.push((0, &idle, frame, 0));
         }
         let walks = [png(WALK_SHEET), png(CARRY_SHEET)];
-        for sheet in &walks {
+        for (index, sheet) in walks.iter().enumerate() {
             for facing in Facing::ALL {
                 for frame in 0..WALK_FRAMES {
-                    frames.push((sheet, frame, facing.row()));
+                    frames.push((index + 1, sheet, frame, facing.row()));
                 }
             }
         }
-        for (sheet, column, row) in frames {
+        // Every loop's lowest rows, frame by frame, for the average below.
+        let mut contact = std::collections::BTreeMap::<(usize, u32), Vec<u32>>::new();
+        for (loop_of, sheet, column, row) in frames {
             let (top, bottom) = opaque_rows(sheet, column, row, cell);
+            contact.entry((loop_of, row)).or_default().push(bottom);
             let drawn = (bottom + 1 - top) as f32 * ART_SCALE;
             assert!(
                 (24.0..=30.0).contains(&drawn),
@@ -1084,23 +1375,29 @@ mod tests {
                 "at the zoom floor row {row} frame {column} is {} px, under a thumbnail",
                 drawn * 2.0
             );
-            // Every direction stands within a pixel or two of the manifest's
-            // shared anchor row - the spider worker's walk cycle sways to
-            // either side of the line, so every direction is held to that
-            // band rather than a single row.
+        }
+        // The idle's feet are the ground truth: every idle frame stands on one
+        // row, two below the manifest's anchor. A walk's feet swing a stride
+        // towards the viewer and back, so no frame reaches more than three rows
+        // below the idle's, and every loop in every direction plants a foot on
+        // the idle's row at least once - or the walk floats over the ground the
+        // standing monkey is on.
+        let ground = contact[&(0, 0)][0];
+        assert!(contact[&(0, 0)].iter().all(|&bottom| bottom == ground));
+        for ((_, row), bottoms) in contact {
+            let lowest = *bottoms.iter().max().unwrap();
             assert!(
-                (WORKER.ground.y - 4.0..=WORKER.ground.y + 5.0).contains(&(bottom as f32)),
-                "row {row} frame {column} stands off the ground line, at {bottom}"
+                lowest <= ground + 3,
+                "row {row} reaches row {lowest}, below the ground at {ground}"
+            );
+            assert!(
+                lowest >= ground,
+                "row {row} never plants a foot: its lowest row is {lowest}, the ground {ground}"
             );
         }
         // And the rows things are placed against are where the art has them.
         let (top, _) = opaque_rows(&idle, 0, 0, cell);
         assert_eq!(top as f32, WORKER_TOP_ROW, "the tail tip moved");
-        let (width, _, data) = &idle;
-        let crown = (0..cell)
-            .find(|&y| (40..cell).any(|x| data[((y * width + x) * 4 + 3) as usize] > 0))
-            .unwrap();
-        assert_eq!(crown as f32, WORKER_CROWN_ROW, "the head moved");
     }
 
     #[test]
@@ -1277,7 +1574,18 @@ mod tests {
         // is from the top-left. Getting that conversion wrong does not look
         // like a bug, it looks like everything hovering - so this checks the
         // geometry rather than restating the formula.
-        for cell in [WORKER, PLANT, TOWN_CENTRE, BUNCH, CART] {
+        for cell in [
+            WORKER,
+            PLANT,
+            TOWN_CENTRE,
+            BUNCH,
+            CART,
+            CHEF_LEFT,
+            CHEF_RIGHT,
+            GRILL,
+            SQUIRREL,
+            CARRIED_BANANA,
+        ] {
             let size = cell.size();
             let from_bottom_left = (Vec2::splat(0.5) + cell.anchor().0) * size;
             let ground = Vec2::new(cell.ground.x, cell.canvas.y - cell.ground.y) * cell.texels();
@@ -1448,5 +1756,211 @@ mod tests {
         // the manifest documents, 1.1 s.
         let idle: f32 = (0..Clip::Idle.frames()).map(Clip::hold).sum();
         assert!((idle - 1.100).abs() < 1e-4, "the idle loop runs {idle}s");
+    }
+
+    #[test]
+    fn the_ground_underlay_is_the_ground_tiles_own_colour() {
+        let atlas = png("Ground/ground-atlas.png");
+        let colour = |mask: u8| {
+            let (min, _) = ground_uv(mask, 0);
+            let at = min * GROUND_ATLAS + GROUND_TILE * 0.5;
+            let i = ((at.y as u32 * atlas.0 + at.x as u32) * 4) as usize;
+            Color::srgb_u8(atlas.2[i], atlas.2[i + 1], atlas.2[i + 2])
+        };
+        assert_eq!(colour(0), GROUND_FLOOR);
+        assert_eq!(colour(15), GROUND_DIRT);
+    }
+
+    #[test]
+    fn the_chef_plays_its_manifest() {
+        let chef = manifest("Monkey/Baboon Chef/v2/baboon-animations.json");
+        assert!(CHEF_SHEET.ends_with(chef["sheet"].as_str().unwrap()));
+        let anchor = |side: &str| {
+            Vec2::new(
+                chef["anchors"][side]["x"].as_f64().unwrap() as f32,
+                chef["anchors"][side]["y"].as_f64().unwrap() as f32,
+            )
+        };
+        assert_eq!(anchor("left"), CHEF_LEFT.ground);
+        assert_eq!(anchor("right"), CHEF_RIGHT.ground);
+        assert_eq!(chef["atlasRowIndexBase"], 0);
+        assert_eq!(chef["atlasColumnIndexBase"], 0);
+        let clips = chef["clips"].as_array().unwrap();
+        assert_eq!(clips.len(), ChefPose::ALL.len() * 2);
+        for entry in clips {
+            let clip = match entry["mode"].as_str().unwrap() {
+                "idle" => ChefClip::Idle,
+                "cook" => ChefClip::Cook,
+                other => panic!("an unplayed chef mode {other}"),
+            };
+            let pose = ChefPose::ALL
+                .into_iter()
+                .find(|pose| pose.name() == entry["angle"].as_str().unwrap())
+                .unwrap();
+            let row = entry["row"].as_u64().unwrap();
+            assert_eq!(
+                chef_index(clip, pose, 0) as u64,
+                row * u64::from(CHEF_FRAMES)
+            );
+            assert_eq!(entry["count"].as_u64().unwrap(), u64::from(CHEF_FRAMES));
+            assert!(entry["loop"].as_bool().unwrap());
+            let hold = entry["frameMs"].as_f64().unwrap() as f32 / 1000.0;
+            assert!((hold - clip.frame_seconds()).abs() < 1e-6, "{entry}");
+        }
+    }
+
+    #[test]
+    fn the_grill_seats_are_the_manifests() {
+        // Each seat's feet are its slot's cell origin plus its pose's anchor,
+        // measured from the station's anchor - which is where the grill's own
+        // anchor lands, so the chefs stand where the artist stood them.
+        let station = &manifest("Monkey/Baboon Chef/v2/baboon-chef.json")["station"];
+        let point = |value: &serde_json::Value, x: &str, y: &str| {
+            Vec2::new(
+                value[x].as_f64().unwrap() as f32,
+                value[y].as_f64().unwrap() as f32,
+            )
+        };
+        assert_eq!(point(&station["anchor"], "x", "y"), GRILL_STATION_ANCHOR);
+        assert_eq!(
+            point(&station["grillOffset"], "x", "y") + GRILL.ground,
+            GRILL_STATION_ANCHOR
+        );
+        let slots = station["slots"].as_array().unwrap();
+        assert_eq!(slots.len(), CHEF_SEATS.len());
+        for (seat, slot) in CHEF_SEATS.iter().zip(slots) {
+            let pose = match slot["pose"].as_str().unwrap() {
+                "chef-left" => ChefPose::Left,
+                "chef-right" => ChefPose::Right,
+                "chef-back-left" => ChefPose::BackLeft,
+                "chef-back-right" => ChefPose::BackRight,
+                other => panic!("an unknown pose {other}"),
+            };
+            assert_eq!(seat.pose, pose);
+            let feet = point(slot, "anchorX", "anchorY");
+            assert_eq!(feet, pose.cell().ground, "{pose:?}");
+            assert_eq!(seat.feet, point(slot, "x", "y") + feet, "{pose:?}");
+        }
+        // The two at the sides stand behind the grill's anchor and the third
+        // in front of it.
+        assert!(CHEF_SEATS[0].offset().y > 0.0 && CHEF_SEATS[1].offset().y > 0.0);
+        assert!(CHEF_SEATS[2].offset().y < 0.0);
+    }
+
+    #[test]
+    fn the_squirrel_plays_its_manifest() {
+        let squirrel = manifest("Monkey/Squirrel Unpacker/squirrel-monkey.json");
+        assert_eq!(
+            squirrel["anchor"]["x"].as_f64().unwrap() as f32,
+            SQUIRREL.ground.x
+        );
+        assert_eq!(
+            squirrel["anchor"]["y"].as_f64().unwrap() as f32,
+            SQUIRREL.ground.y
+        );
+        let names: Vec<&str> = squirrel["directions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap())
+            .collect();
+        let ours: Vec<String> = Facing::ALL.iter().map(|f| format!("{f:?}")).collect();
+        assert_eq!(names, ours);
+        let mut seen = 0;
+        for entry in squirrel["clips"].as_array().unwrap() {
+            let Some(clip) = SquirrelClip::ALL
+                .into_iter()
+                .find(|clip| clip.name() == entry["state"].as_str().unwrap())
+            else {
+                continue;
+            };
+            seen += 1;
+            assert!(clip.path().ends_with(entry["sheet"].as_str().unwrap()));
+            assert!(entry["loop"].as_bool().unwrap());
+            let facing = Facing::ALL
+                .into_iter()
+                .find(|f| format!("{f:?}") == entry["direction"].as_str().unwrap())
+                .unwrap();
+            let frames = entry["frames"].as_array().unwrap();
+            assert_eq!(frames.len() as u32, clip.frames());
+            for (frame, rect) in frames.iter().enumerate() {
+                let index = squirrel_index(clip, facing, frame as u32) as u64;
+                let columns = u64::from(clip.frames());
+                assert_eq!(rect["x"].as_u64().unwrap(), index % columns * 64);
+                assert_eq!(rect["y"].as_u64().unwrap(), index / columns * 64);
+                let hold = rect["durationMs"].as_f64().unwrap() as f32 / 1000.0;
+                assert!((hold - clip.frame_seconds()).abs() < 1e-6);
+            }
+        }
+        assert_eq!(seen, SquirrelClip::ALL.len() * Facing::ALL.len());
+    }
+
+    #[test]
+    fn the_support_crowd_tops_are_where_the_art_has_them() {
+        // A role's badge clears the top of what is drawn at its station, so
+        // the rows it is measured from must be the art's tallest.
+        let top = |path: &str, columns: u32, rows: u32| {
+            let sheet = png(path);
+            (0..rows)
+                .flat_map(|row| (0..columns).map(move |column| (column, row)))
+                .map(|(column, row)| opaque_rows(&sheet, column, row, 64).0)
+                .min()
+                .unwrap()
+        };
+        assert_eq!(top(CHEF_SHEET, CHEF_FRAMES, 8) as f32, CHEF_TOP_ROW);
+        let squirrel = SquirrelClip::ALL
+            .map(|clip| top(clip.path(), clip.frames(), 8))
+            .into_iter()
+            .min()
+            .unwrap();
+        assert_eq!(squirrel as f32, SQUIRREL_TOP_ROW);
+    }
+
+    #[test]
+    fn the_carried_banana_rides_the_back_either_way_round() {
+        // Facing right the fruit's origin is on the back; mirrored, the two
+        // reflections put its middle exactly the other side of the anchor.
+        let (right, left) = carried_banana_middles();
+        assert_eq!(right, WORKER.offset_of(Vec2::new(33.0, 26.0)));
+        assert_eq!(left, Vec2::new(-right.x, right.y));
+    }
+
+    #[test]
+    fn every_ground_mask_bit_is_the_material_at_that_corner() {
+        // Masks agree with each other by construction; this holds the bit
+        // convention to the art. Just inside each corner of each quiet tile,
+        // the pixel is dirt exactly when that corner's bit is set.
+        let atlas = png("Ground/ground-atlas.png");
+        let pixel = |at: Vec2| {
+            let i = ((at.y as u32 * atlas.0 + at.x as u32) * 4) as usize;
+            Color::srgb_u8(atlas.2[i], atlas.2[i + 1], atlas.2[i + 2])
+        };
+        // Top, right, bottom, left, a few pixels in from each tip.
+        let corners = [
+            (1u8, Vec2::new(64.0, 3.0)),
+            (2, Vec2::new(122.0, 32.0)),
+            (4, Vec2::new(64.0, 60.0)),
+            (8, Vec2::new(5.0, 32.0)),
+        ];
+        for mask in 0..16u8 {
+            let (min, _) = ground_uv(mask, 0);
+            for (bit, at) in corners {
+                let colour = pixel(min * GROUND_ATLAS + at);
+                let dirt = mask & bit != 0;
+                let expected = if dirt { GROUND_DIRT } else { GROUND_FLOOR };
+                // The moss border can fleck a corner, so compare which base
+                // colour it is nearer to rather than asking for exact equality.
+                let near = |c: Color| {
+                    let (a, b) = (colour.to_srgba(), c.to_srgba());
+                    (a.red - b.red).abs() + (a.green - b.green).abs() + (a.blue - b.blue).abs()
+                };
+                let other = if dirt { GROUND_FLOOR } else { GROUND_DIRT };
+                assert!(
+                    near(expected) < near(other),
+                    "mask {mask} corner bit {bit} is not {}",
+                    if dirt { "dirt" } else { "floor" }
+                );
+            }
+        }
     }
 }

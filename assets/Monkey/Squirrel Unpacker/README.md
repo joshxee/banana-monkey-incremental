@@ -69,8 +69,10 @@ When `bananaFlipX` is true (NW/W/SW), mirror the transfer image horizontally
 and use its mirrored origin (13, 10), keeping the supplied socket unchanged.
 The verifier checks exact standalone-fruit registration in every loaded frame.
 
-These are asset exports and a review demonstration. Runtime movement,
-unpacker assignment, economy events and box occlusion are not integrated.
+In the game (D31) unpackers are squirrel monkeys: they dart out of the bins
+and idle at their station facing them, and `banana-transfer.png` is the banana
+a standing spider worker carries on its back. The courier run - carry, take and
+drop, unpacker assignment, economy events and box occlusion - is not integrated.
 
 ## Regeneration and verification
 
