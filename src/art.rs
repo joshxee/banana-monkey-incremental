@@ -174,17 +174,16 @@ pub(crate) const WORKER_CROWN_ROW: f32 = 14.0;
 /// carry sheets.
 pub(crate) const WORKER_BACK: Vec2 = Vec2::new(31.0, 24.0);
 
-/// The single banana a standing worker carries on its back, in world texels.
+/// The banana a standing worker carries on its back, in world texels.
 ///
-/// `assets/Banana/Banana.png` is the one piece of the old set still drawn: the
-/// carry walk puts a single banana in the monkey's hand, and a whole bunch on
-/// the back of a monkey that has just put one down would read as a second,
-/// bigger load. One art pixel to half a texel, the shared scale.
-pub(crate) const CARRIED_BANANA_TEXELS: f32 = 16.0 * ART_SCALE;
-/// Frames in that banana's spin, and the one it rests on: lying on its side,
-/// the shape it is recognised by, with no glint.
-const BANANA_FRAMES: u32 = 12;
-const BANANA_REST_FRAME: u32 = 8;
+/// The old single-banana study was removed, so the shipped still bunch is the
+/// remaining banana asset in the project. It is the same visual role on the
+/// monkey's back, just with the current art set's silhouette and scale.
+pub(crate) const CARRIED_BANANA_TEXELS: f32 = 48.0 * ART_SCALE;
+/// The still banana image used for the carried load: the project still ships a
+/// single-frame bunch asset, and the old rolling single-banana sheet is gone.
+const BANANA_FRAMES: u32 = 1;
+const BANANA_REST_FRAME: u32 = 0;
 
 /// A contact shadow, in world texels: a little wider than a monkey's feet and
 /// a third as deep as it is wide, which is the 2:1 ground seen from above.
@@ -577,7 +576,7 @@ impl Art {
         let bunch_layouts = Bunch::ALL.map(|clip| grid(BUNCH.canvas, clip.frames(), 1));
         let cart_layouts =
             CartClip::ALL.map(|clip| grid(CART.canvas, clip.frames(), Facing::ALL.len() as u32));
-        let banana_layout = grid(Vec2::splat(16.0), BANANA_FRAMES, 1);
+        let banana_layout = grid(Vec2::splat(48.0), BANANA_FRAMES, 1);
         Self {
             town_centre: assets.load("TownCenter/town-center-structure.png"),
             town_centre_ground: assets.load("TownCenter/town-center-ground.png"),
@@ -597,7 +596,7 @@ impl Art {
             bunch: Bunch::ALL.map(|clip| assets.load(clip.path())),
             bunch_layouts,
             cart_layouts,
-            banana: assets.load("Banana/Banana.png"),
+            banana: assets.load("Banana/banana-bunch-still.png"),
             banana_layout,
             shadow: images.add(shadow_image()),
         }
@@ -896,8 +895,8 @@ mod tests {
                 "{path}"
             );
         }
-        let (width, height, _) = png("Banana/Banana.png");
-        assert_eq!((width, height), (16 * BANANA_FRAMES, 16));
+        let (width, height, _) = png("Banana/banana-bunch-still.png");
+        assert_eq!((width, height), (48, 48));
         let (width, height, _) = png("Ground/ground-atlas.png");
         assert_eq!(Vec2::new(width as f32, height as f32), GROUND_ATLAS);
     }
