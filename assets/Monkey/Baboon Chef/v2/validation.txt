@@ -1,0 +1,1 @@
+PASS: 11 PNG exports; 6 saved character frames; 11 character layers; 4 station occupancies; canonical palette plus ten user-authorized character colors; binary alpha; margins; exact source and export pixels; visible capacity verified for 0 through 15 hires.
