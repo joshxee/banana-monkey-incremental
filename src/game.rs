@@ -3776,7 +3776,9 @@ fn sync_web_test_state(
     for (action, node, transform) in &buttons {
         let index = match action {
             ButtonAction::OpenMenu => 0,
-            ButtonAction::Info(_) => continue,
+            // Neither is driven by the suite: an info card opens from its
+            // row, and HOME only shows once the camera has left the village.
+            ButtonAction::Info(_) | ButtonAction::Recentre => continue,
             ButtonAction::Hire(UnitKind::Worker) => 1,
             ButtonAction::Hire(UnitKind::Support(SupportRole::Chef)) => 2,
             ButtonAction::Hire(UnitKind::Support(SupportRole::Unpacker)) => 3,
