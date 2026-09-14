@@ -11,7 +11,7 @@
 use bevy::prelude::*;
 
 use crate::{
-    art::{self, Art, Clip},
+    art::{self, Art, CartClip, CartSheets, Clip, Facing},
     domain::{
         CART_CREW, Carts, CycleSpec, HarvestCycle, Multipliers, Segment, Workforce, cycle_time,
     },
@@ -394,6 +394,9 @@ fn emerge(from: Vec2, to: Vec2, age: f32) -> (Vec2, bool) {
 pub(crate) struct Playing {
     clip: Clip,
     frame: u32,
+    /// Which way it faces. Decided where the monkey is placed, from the way it
+    /// is going, and drawn where it is posed.
+    facing: Facing,
     /// Seconds into the current idle frame.
     elapsed: f32,
     /// How far through one walk loop, as a fraction of a stride. Advanced by
@@ -411,13 +414,15 @@ impl Playing {
         // pattern a crowd could line up on, which `index % frames` does every
         // twelfth hire.
         let stride = (index as f32 * 0.618_034).fract();
-        let frame = match clip {
-            Clip::Walk => Clip::walk_frame(stride),
-            Clip::Idle => index % Clip::Idle.frames(),
+        let frame = if clip.is_walk() {
+            Clip::walk_frame(stride)
+        } else {
+            index % Clip::Idle.frames()
         };
         Self {
             clip,
             frame,
+            facing: Facing::SE,
             elapsed: 0.0,
             stride,
             travelled: 0.0,
@@ -428,11 +433,21 @@ impl Playing {
     /// Record where the monkey is drawn this frame.
     fn walk_to(&mut self, point: Vec2) {
         if let Some(last) = self.last {
-            // Along the board, at unit zoom: the stride is measured off the
-            // art, and the art is drawn in board texels whatever the zoom.
-            self.travelled += isometric::project(point - last).length();
+            // Along the ground, in the texels the stride was measured in:
+            // the same step whichever of the eight ways the monkey faces.
+            self.travelled += art::walked_texels(point - last);
         }
         self.last = Some(point);
+    }
+}
+
+/// The loop a segment is drawn on: walking or standing, and whether a walking
+/// monkey has the banana in its hand.
+fn clip_for(segment: Segment) -> Clip {
+    match (segment.is_walking(), segment.holds_banana()) {
+        (false, _) => Clip::Idle,
+        (true, false) => Clip::Walk,
+        (true, true) => Clip::CarryWalk,
     }
 }
 
@@ -749,7 +764,7 @@ pub fn position_workers(
         // switched between. See `stand_point`.
         let (mut point, along) = stand_point(&village, &route.0, fraction, *lane, ring_weight);
         let travel = if outbound { along } else { -along };
-        let mut facing_right = isometric::project(travel).x >= 0.0;
+        let mut facing = Facing::of_ground(travel);
         // A fresh hire walks out of the bins - the treehouse, which is where
         // every monkey appears from (D30) - to its place in the crowd, facing
         // the way it is going rather than the way the route will take it.
@@ -760,7 +775,7 @@ pub fn position_workers(
             let (drawn, arrived) = emerge(bins, target, hired.age);
             if !arrived {
                 point = drawn;
-                facing_right = isometric::project(target - bins).x >= 0.0;
+                facing = Facing::of_ground(target - bins);
             }
             emerged = arrived;
         }
@@ -790,9 +805,8 @@ pub fn position_workers(
         if transform.scale != scale {
             transform.scale = scale;
         }
-        if sprite.flip_x == facing_right {
-            sprite.flip_x = !facing_right;
-        }
+        // Drawn by `animate_workers`, which picks the row or the mirror.
+        playing.facing = facing;
 
         // The art's own colours are the colours; `sprite.color` carries only
         // what the game says on top of them - this depth shade, and the flash.
@@ -846,24 +860,22 @@ pub fn position_workers(
 pub fn dress_actors(
     mut commands: Commands,
     art: Res<Art>,
+    assets: Res<AssetServer>,
+    sheets: Option<Res<CartSheets>>,
     workers: Query<(Entity, &Lane, &HarvestCycle), (With<Worker>, Without<Sprite>)>,
     bananas: Query<Entity, (With<CarriedBanana>, Without<Sprite>)>,
-    riders: Query<(Entity, &CartSeat), Without<Sprite>>,
+    carts: Query<Entity, (With<Cart>, Without<Sprite>)>,
 ) {
     for (entity, lane, cycle) in &workers {
         // On the loop its segment wants from the first frame: a monkey
         // restored mid-unload used to open on a walk frame and swap a frame
         // later.
-        let clip = if cycle.segment().is_walking() {
-            Clip::Walk
-        } else {
-            Clip::Idle
-        };
+        let clip = clip_for(cycle.segment());
         let playing = Playing::starting(clip, lane.0);
         commands
             .entity(entity)
             .insert((
-                art.worker(clip, playing.frame),
+                art.worker(clip, playing.facing, playing.frame),
                 art::WORKER.anchor(),
                 playing,
             ))
@@ -874,14 +886,25 @@ pub fn dress_actors(
             ));
     }
     for entity in &bananas {
-        commands
-            .entity(entity)
-            .insert(art.banana(art::CARRIED_BANANA_TEXELS, art::BANANA_REST_FRAME));
+        commands.entity(entity).insert(art.carried_banana());
     }
-    for (entity, seat) in &riders {
-        commands
-            .entity(entity)
-            .insert((art.rider(seat.seat), art::WORKER.anchor()));
+    if !carts.is_empty() {
+        // The cart's sheets arrive with the first cart rather than at startup:
+        // see `CartSheets`.
+        let sheets = match sheets {
+            Some(sheets) => CartSheets::clone(&sheets),
+            None => {
+                let loaded = CartSheets::load(&assets);
+                commands.insert_resource(loaded.clone());
+                loaded
+            }
+        };
+        for entity in &carts {
+            commands.entity(entity).insert((
+                art.cart(&sheets, CartClip::TravelEmpty, Facing::SE, 0),
+                art::CART.anchor(),
+            ));
+        }
     }
 }
 
@@ -911,62 +934,49 @@ pub fn animate_workers(
     for (cycle, transform, mut playing, mut sprite, children) in &mut workers {
         let segment = cycle.segment();
 
-        // Walking or not walking, which is the whole of what the two loops have
-        // to say. Switching clips keeps the frame index rather than resetting
-        // it, so a crowd that all stops at once does not all restart its idle
-        // on frame zero together.
-        let wanted = if segment.is_walking() {
-            Clip::Walk
-        } else {
-            Clip::Idle
-        };
+        // Walking or standing, and whether the banana is in hand, which is the
+        // whole of what the three loops have to say. Switching clips keeps the
+        // frame index rather than resetting it, so a crowd that all stops at
+        // once does not all restart its idle on frame zero together.
+        let wanted = clip_for(segment);
         if playing.clip != wanted {
             playing.clip = wanted;
             playing.frame %= wanted.frames();
             playing.elapsed = 0.0;
-            let (image, layout) = art.clip(wanted);
-            sprite.image = image;
-            if let Some(atlas) = sprite.texture_atlas.as_mut() {
-                atlas.layout = layout;
-            }
         }
 
         let travelled = std::mem::take(&mut playing.travelled);
-        match playing.clip {
+        if playing.clip.is_walk() {
             // The feet grip the ground: one loop per stride actually drawn,
-            // whatever the speed. See `art::WALK_STRIDE_TEXELS`.
-            Clip::Walk => {
-                playing.stride = (playing.stride + travelled / art::WALK_STRIDE_TEXELS).fract();
-                playing.frame = Clip::walk_frame(playing.stride);
-            }
-            Clip::Idle => {
-                // Capped before the loop below spends it: a frame that arrives
-                // after a long stall - a backgrounded tab, a breakpoint - would
-                // otherwise be paid out one animation frame at a time.
-                playing.elapsed = (playing.elapsed + time.delta_secs()).min(1.0);
-                while playing.elapsed >= Clip::hold(playing.frame) {
-                    playing.elapsed -= Clip::hold(playing.frame);
-                    playing.frame = (playing.frame + 1) % Clip::Idle.frames();
-                }
+            // whatever the speed. See `art::WALK_STRIDE_TEXELS`. The empty
+            // and carrying walks are drawn in step, so the stride carries
+            // across a switch between them.
+            playing.stride = (playing.stride + travelled / art::WALK_STRIDE_TEXELS).fract();
+            playing.frame = Clip::walk_frame(playing.stride);
+        } else {
+            // Capped before the loop below spends it: a frame that arrives
+            // after a long stall - a backgrounded tab, a breakpoint - would
+            // otherwise be paid out one animation frame at a time.
+            playing.elapsed = (playing.elapsed + time.delta_secs()).min(1.0);
+            while playing.elapsed >= Clip::hold(playing.frame) {
+                playing.elapsed -= Clip::hold(playing.frame);
+                playing.frame = (playing.frame + 1) % Clip::Idle.frames();
             }
         }
-        if let Some(atlas) = sprite.texture_atlas.as_mut()
-            && atlas.index != playing.frame as usize
-        {
-            atlas.index = playing.frame as usize;
-        }
+        art.pose(&mut sprite, playing.clip, playing.facing, playing.frame);
 
         // `flip_x` mirrors the texture and not the children, so anything
         // placed against the art has to be mirrored by hand. The art is not
         // symmetric - head forward, tail back - and an unmirrored banana on a
-        // monkey walking left rides on its tail.
+        // monkey facing left rides on its tail.
         let facing = if sprite.flip_x { -1.0 } else { 1.0 };
         for child in children.iter() {
             if let Ok((mut at, mut visibility)) = carried.get_mut(child) {
                 // Held through the snack too: that banana is the meal, and
-                // seeing it in hand is what connects the counter's dip to the
-                // monkey that caused it.
-                let shown = if segment.holds_banana() {
+                // seeing it is what connects the counter's dip to the monkey
+                // that caused it. Only while standing: walking, it is in the
+                // monkey's hand, drawn into the carry sheet.
+                let shown = if segment.holds_banana() && !playing.clip.is_walk() {
                     Visibility::Inherited
                 } else {
                     Visibility::Hidden
@@ -1604,42 +1614,12 @@ pub fn spawn_missing_carts(
             CycleSpec::CART,
             cycle,
             CartIndex(index),
-            Sprite::from_color(CART_BOX, CART_BOX_TEXELS),
+            // Spawned bare, like a worker: `dress_actors` gives it its art.
             Transform::default(),
         ));
         if was_restored {
             cart.insert(RestoredCycle);
         }
-        cart.with_children(|cart| {
-            cart.spawn((
-                CartLoad,
-                Sprite::from_color(CART_LOAD, CART_LOAD_TEXELS),
-                // Behind the box's front wall and in front of the riders, so
-                // the pile reads as being *in* the cart.
-                Transform::from_xyz(0.0, 0.0, 0.001),
-                Visibility::Hidden,
-            ));
-            // Riders are *children* of the box, which buys two things: their
-            // position and scale come from the parent for free, and a
-            // restart that despawns the cart takes them with it. Spawned
-            // separately they outlived it, and the next cart bought found
-            // its seats already occupied by ghosts.
-            //
-            // Three of them, always. A cart is crewed by exactly three
-            // monkeys or it does not run, so the sprite count is not a
-            // staffing readout - it is a fill gauge while boarding, and the
-            // whole crew afterwards.
-            for seat in 0..CART_CREW {
-                let offset = (seat as f32 - (CART_CREW as f32 - 1.0) * 0.5) * SEAT_STEP_TEXELS;
-                cart.spawn((
-                    CartSeat { cart: index, seat },
-                    // Sitting in the box. Local texels, so the parent's world
-                    // scale applies without this having to know it.
-                    Transform::from_xyz(offset, seat_height(), -0.001),
-                    Visibility::Hidden,
-                ));
-            }
-        });
     }
 }
 
@@ -1647,55 +1627,19 @@ pub fn spawn_missing_carts(
 #[derive(Component)]
 pub struct Boarding;
 
-/// The pile of bananas inside a cart, scaled to what it is currently carrying.
-///
-/// Without it the two segments a cart spends 93% of its life in look identical:
-/// a still brown box parked at the grove for 67 s and a still brown box parked
-/// at the depot for 100 s. The whitepaper's whole cart argument is "it barely
-/// travels and instead sits at the depot being emptied", and the Unpacker
-/// purchase only explains itself if the player can see the emptying. Every
-/// other actor signals its segment - run pose, carried banana, hunger pulse -
-/// and the cart signalled nothing.
-#[derive(Component)]
-pub struct CartLoad;
-
-/// Which cart this is, so seats can find their box without a parent lookup.
+/// Which cart this is, in purchase order: carts fill in that order, so it is
+/// also how many of the crewed monkeys are this cart's.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct CartIndex(pub(crate) u32);
 
-/// One rider's seat on one cart.
-#[derive(Component, Debug, Clone, Copy)]
-pub struct CartSeat {
-    cart: u32,
-    seat: u32,
-}
-
-/// The box, in source texels. Wide enough to seat three monkeys shoulder to
-/// shoulder, low enough that their heads clear the top - the whole read is
-/// "three monkeys in a box", so the box must not swallow them.
-const CART_BOX_TEXELS: Vec2 = Vec2::new(130.0 * art::ART_SCALE, 37.5 * art::ART_SCALE);
-const CART_BOX: Color = Color::srgb(0.55, 0.33, 0.14);
-/// The bananas piled in the box. Banana-yellow, and the only large yellow mass
-/// in the scene, so a loaded cart is distinguishable from the Unpacker's crate
-/// at a glance - the two are otherwise both brown rectangles at the depot.
-const CART_LOAD: Color = Color::srgb(0.98, 0.82, 0.20);
-/// The load, at full payload, in source texels. Inset so the box's own walls
-/// still read as walls.
-const CART_LOAD_TEXELS: Vec2 = Vec2::new(115.0 * art::ART_SCALE, 22.5 * art::ART_SCALE);
-/// Seat spacing inside the box.
-const SEAT_STEP_TEXELS: f32 = 37.5 * art::ART_SCALE;
-
-/// Where a rider's feet go, in the box's local texels: low enough that its
-/// hips are level with the top of the front wall, so the legs are inside the
-/// box and the body, head and tail are above it.
+/// How opaque an empty cart waiting for its crew is drawn.
 ///
-/// Measured from the art. The seat used to be `22 * 0.30` - a centre offset
-/// written for a 22-texel rectangle - and once the rider was anchored at its
-/// feet that same number stood all three monkeys on the lid.
-fn seat_height() -> f32 {
-    let box_top = CART_BOX_TEXELS.y * 0.5;
-    box_top - art::WORKER.height_above(art::WORKER_HIP_ROW) * art::RIDER_SCALE
-}
+/// The crew is drawn into the cart's art - a driver and two pedallers, sitting
+/// in every one of its frames - so the three riders that used to appear one at
+/// a time as a fill gauge have nothing to appear on. The fade says the same two
+/// things on the one sprite there is: not running yet, and how close. Each
+/// monkey that climbs aboard firms it up by a third of the way to solid.
+const BOARDING_ALPHA: f32 = 0.35;
 
 /// Fill the boarding cart from the pool.
 ///
@@ -1757,42 +1701,100 @@ pub fn launch_crewed_carts(
     }
 }
 
-/// Every cart on the route, and whether it has launched.
+/// Every dressed cart on the route, and whether it has launched.
 type CartAvatarQuery<'w, 's> = Query<
     'w,
     's,
     (
-        Entity,
         &'static HarvestCycle,
+        &'static CartIndex,
         Option<&'static Boarding>,
         &'static mut Transform,
+        &'static mut Sprite,
     ),
-    (With<Cart>, Without<CartLoad>),
+    With<Cart>,
 >;
 
-/// Position every cart, and reveal the riders that have boarded.
+/// What a cart is showing: which clip, which frame of it, and whether it faces
+/// the grove.
 ///
-/// Only the box is placed: the seats are its children, so their offsets and
-/// scale follow for free. All this loop decides is how many of them are visible.
+/// Travel plays a whole number of loops over each leg, so the wheels and pedals
+/// set off on their first frame and arrive on it. Parked, a cart holds that
+/// frame, which is exactly where the fill and the offload begin - the art's
+/// seams are exact (`the_cart_clips_meet_pixel_for_pixel`), and this is what
+/// lands on them.
+///
+/// Each one-shot plays once at its authored pace and is timed to *finish* as
+/// its segment does. The fill ends as the cart pulls away full, and the offload
+/// tips the last bunch out as the +100 lands, which is when the economy credits
+/// it. Started on arrival instead, a cart would show an empty bed for the
+/// whole of a hundred-second unload it had not finished, and pay out long
+/// after its bananas had visibly gone. A segment shorter than its clip - a
+/// crowd of Unpackers gets the unload there - plays the clip faster rather
+/// than cutting it.
+fn cart_pose(segment: Segment, boarding: bool, progress: f64, seconds: f64) -> (CartClip, u32, bool) {
+    if boarding {
+        return (CartClip::TravelEmpty, 0, true);
+    }
+    let rolling = |clip: CartClip| {
+        let laps = (seconds / f64::from(clip.seconds())).round().max(1.0);
+        let phase = (progress * laps).fract();
+        ((phase * f64::from(clip.frames())) as u32).min(clip.frames() - 1)
+    };
+    let finishing = |clip: CartClip, parked: CartClip| {
+        let window = f64::from(clip.seconds()).min(seconds);
+        let left = (1.0 - progress) * seconds;
+        if window <= 0.0 || left > window {
+            (parked, 0)
+        } else {
+            let into = (window - left) / window;
+            let frame = ((into * f64::from(clip.frames())) as u32).min(clip.frames() - 1);
+            (clip, frame)
+        }
+    };
+    match segment {
+        Segment::ToGrove => (CartClip::TravelEmpty, rolling(CartClip::TravelEmpty), true),
+        Segment::Pick => {
+            let (clip, frame) = finishing(CartClip::Fill, CartClip::TravelEmpty);
+            (clip, frame, true)
+        }
+        Segment::ToDepot => (CartClip::TravelFull, rolling(CartClip::TravelFull), false),
+        Segment::Unload => {
+            let (clip, frame) = finishing(CartClip::Offload, CartClip::TravelFull);
+            (clip, frame, false)
+        }
+        // Empty and closed at the depot, where the offload left it, until it
+        // turns for the grove.
+        Segment::Snack => (CartClip::TravelEmpty, 0, false),
+    }
+}
+
+/// Place and pose every cart.
+///
+/// The cart is drawn whole by the artist - bed, wheels, cargo and its crew of
+/// three - in all eight directions, so everything the old box, pile and three
+/// seated riders said is now said by which clip is playing: an empty bed
+/// rolling out, the fill at the grove, a full bed rolling home, and the bed
+/// tipping out at the depot.
 #[allow(clippy::too_many_arguments)]
 pub fn position_carts(
+    art: Res<Art>,
+    sheets: Option<Res<CartSheets>>,
     layout: Res<SceneLayout>,
     village: Res<Village>,
     route: Res<WorkedRoute>,
     multipliers: Res<Multipliers>,
     carts_res: Res<Carts>,
     mut carts: CartAvatarQuery,
-    mut seats: Query<(&CartSeat, &mut Visibility, &mut Sprite), Without<CartLoad>>,
-    mut loads: Query<(&ChildOf, &mut Transform, &mut Visibility, &mut Sprite), With<CartLoad>>,
 ) {
-    let scale = layout.world_scale();
-    // Which way the crew faces. A cart heading out to the grove is travelling
-    // left, so a permanently flipped rider rides backwards for half the trip.
-    let mut facing_left = true;
+    // No sheets means no cart has been dressed yet, so there is nothing to pose.
+    let Some(sheets) = sheets else {
+        return;
+    };
+    let scale = Vec3::new(layout.world_scale(), layout.world_scale(), 1.0);
 
-    let mut carried: Vec<(Entity, f32)> = Vec::new();
-
-    for (entity, cycle, boarding, mut transform) in &mut carts {
+    for (cycle, index, boarding, mut transform, mut sprite) in &mut carts {
+        let segment = cycle.segment();
         let progress = cycle.segment_fraction(CycleSpec::CART, *multipliers);
         // Its own bay at each end, on the *inside* of the route, so the cart
         // never parks on the unloading queue and never reverses into the palm.
@@ -1814,75 +1816,38 @@ pub fn position_carts(
         // workers pass behind it instead of through it. That is one lane's
         // worth of ground towards the viewer, which the depth rule then
         // handles on its own.
-        let (point, _) = cart_point(&village, &route.0, fraction);
-        transform.translation = layout
-            .board_snapped(point, CART_BOX_TEXELS.y * 0.5 * scale)
+        let (point, along) = cart_point(&village, &route.0, fraction);
+        // No lift: the art is anchored where its wheels meet the ground.
+        let translation = layout
+            .board_snapped(point, 0.0)
             .extend(isometric::stand_z(point, isometric::NUDGE_STEP));
-        transform.scale = Vec3::splat(scale);
-        facing_left = !matches!(cycle.segment(), Segment::ToDepot) || boarding.is_some();
+        if transform.translation != translation {
+            transform.translation = translation;
+        }
+        if transform.scale != scale {
+            transform.scale = scale;
+        }
 
-        // How full the box is, 0..=1. Rises as it is picked, stays full for the
-        // ride home, drains as it is unloaded, and is empty on the way out.
-        let load = if boarding.is_some() {
-            0.0
+        let seconds = segment.duration(CycleSpec::CART, *multipliers);
+        let (clip, frame, outbound) = cart_pose(segment, boarding.is_some(), progress, seconds);
+        let facing = Facing::of_ground(if outbound { along } else { -along });
+        art.pose_cart(&mut sprite, &sheets, clip, facing, frame);
+
+        // Faint until its crew is aboard: see `BOARDING_ALPHA`. The boarding
+        // wait is the longest dead stretch in the game, and each monkey that
+        // climbs on is the only thing that happens in it.
+        let alpha = if boarding.is_some() {
+            let aboard = carts_res
+                .crewed()
+                .saturating_sub(index.0 * CART_CREW)
+                .min(CART_CREW);
+            BOARDING_ALPHA + (1.0 - BOARDING_ALPHA) * aboard as f32 / CART_CREW as f32
         } else {
-            match cycle.segment() {
-                Segment::ToGrove => 0.0,
-                Segment::Pick => progress,
-                Segment::ToDepot => 1.0,
-                Segment::Unload => 1.0 - progress,
-                Segment::Snack => 0.0,
-            }
+            1.0
         };
-        carried.push((entity, load as f32));
-    }
-
-    for (parent, mut transform, mut visibility, mut sprite) in &mut loads {
-        let load = carried
-            .iter()
-            .find(|(entity, _)| *entity == parent.parent())
-            .map_or(0.0, |(_, load)| *load);
-        let wanted = if load > 0.01 {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        if *visibility != wanted {
-            *visibility = wanted;
-        }
-        // Grows from the floor of the box rather than from its centre, so a
-        // half-load sits in the bottom half like a pile rather than floating.
-        let height = CART_LOAD_TEXELS.y * load;
-        let size = Vec2::new(CART_LOAD_TEXELS.x, height);
-        if sprite.custom_size != Some(size) {
-            sprite.custom_size = Some(size);
-        }
-        let y = -CART_LOAD_TEXELS.y * 0.5 + height * 0.5;
-        if transform.translation.y != y {
-            transform.translation.y = y;
-        }
-    }
-
-    for (seat, mut visibility, mut sprite) in &mut seats {
-        if sprite.flip_x != facing_left {
-            sprite.flip_x = facing_left;
-        }
-
-        // A seat fills only once its monkey has actually climbed aboard, so an
-        // empty box visibly gains riders one at a time. That filling is the only
-        // feedback during the boarding wait, and the wait is the longest dead
-        // stretch in the game.
-        let aboard = carts_res
-            .crewed()
-            .saturating_sub(seat.cart * CART_CREW)
-            .min(CART_CREW);
-        let wanted = if seat.seat < aboard {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        if *visibility != wanted {
-            *visibility = wanted;
+        let colour = Color::WHITE.with_alpha(alpha);
+        if sprite.color != colour {
+            sprite.color = colour;
         }
     }
 }
@@ -1990,22 +1955,87 @@ mod dressing_tests {
         }
     }
 
+    /// The picture a cart pose shows, naming each one-shot's first and last
+    /// frames by the travel frame they are pixel-identical to.
+    fn picture(clip: CartClip, frame: u32) -> (CartClip, u32) {
+        match (clip, frame) {
+            (CartClip::Fill, 0) => (CartClip::TravelEmpty, 0),
+            (CartClip::Fill, 23) => (CartClip::TravelFull, 0),
+            (CartClip::Offload, 0) => (CartClip::TravelFull, 0),
+            (CartClip::Offload, 23) => (CartClip::TravelEmpty, 0),
+            other => other,
+        }
+    }
+
     #[test]
-    fn a_rider_sits_in_the_cart_rather_than_on_it() {
-        // The box spans its height about its centre. A rider sitting in it has
-        // its feet inside the box, and its head clear of the front wall - by
-        // enough to read as a monkey rather than a tuft over the rim.
-        let rim = CART_BOX_TEXELS.y * 0.5;
-        let feet = seat_height();
-        let crown = feet + art::WORKER.height_above(art::WORKER_CROWN_ROW) * art::RIDER_SCALE;
+    fn a_cart_changes_clip_only_where_the_art_meets_itself() {
+        // Every segment boundary, at the shipped multipliers and with an
+        // unload squeezed shorter than its clip: the last picture of one
+        // segment is the first of the next, so no state change pops.
+        let shipped = |segment: Segment| segment.duration(CycleSpec::CART, Multipliers::default());
+        let squeezed = |segment: Segment| match segment {
+            Segment::Unload | Segment::Pick => 0.7,
+            other => shipped(other),
+        };
+        for seconds in [&shipped as &dyn Fn(Segment) -> f64, &squeezed] {
+            for segment in Segment::ORDER {
+                let next = segment.next();
+                let (end, last, _) = cart_pose(segment, false, 1.0, seconds(segment));
+                let (start, first, _) = cart_pose(next, false, 0.0, seconds(next));
+                assert_eq!(
+                    picture(end, last),
+                    picture(start, first),
+                    "{segment:?} ends on a different picture than {next:?} starts"
+                );
+            }
+        }
+        // And a cart launching off the boarding bay rolls out of the pose it
+        // waited in.
+        let (clip, frame, outbound) = cart_pose(Segment::ToGrove, true, 0.4, 13.0);
+        assert_eq!((clip, frame, outbound), (CartClip::TravelEmpty, 0, true));
+        let (clip, frame, _) = cart_pose(Segment::ToGrove, false, 0.0, 13.0);
+        assert_eq!((clip, frame), (CartClip::TravelEmpty, 0));
+    }
+
+    #[test]
+    fn a_one_shot_plays_every_frame_at_its_pace_as_its_segment_ends() {
+        // Three seconds out, the fill has not begun; 1.2 s out it is half way
+        // through its 2.4 s; at the end it is on its last frame.
+        let seconds = 60.0;
+        let at = |left: f64| cart_pose(Segment::Pick, false, 1.0 - left / seconds, seconds);
+        assert_eq!(at(3.0), (CartClip::TravelEmpty, 0, true));
+        assert_eq!(at(1.2), (CartClip::Fill, 12, true));
+        assert_eq!(at(0.0), (CartClip::Fill, 23, true));
+        // A segment shorter than the clip still shows all of it.
+        for (segment, clip) in [(Segment::Pick, CartClip::Fill), (Segment::Unload, CartClip::Offload)] {
+            let shown: std::collections::BTreeSet<u32> = (0..=2000)
+                .map(|step| cart_pose(segment, false, f64::from(step) / 2000.0, 0.5))
+                .filter(|(playing, ..)| *playing == clip)
+                .map(|(_, frame, _)| frame)
+                .collect();
+            assert_eq!(shown.len() as u32, clip.frames(), "{clip:?} skipped frames");
+        }
+    }
+
+    #[test]
+    fn a_rolling_cart_turns_its_wheels_at_the_authored_pace() {
+        // A whole number of laps over the leg, so the pace is the manifest's
+        // 80 ms a frame to within half a lap spread over the whole trip.
+        let seconds = 13.3;
+        let steps = 13_300;
+        let mut changes = 0;
+        let mut last = cart_pose(Segment::ToDepot, false, 0.0, seconds).1;
+        for step in 1..=steps {
+            let frame = cart_pose(Segment::ToDepot, false, f64::from(step) / f64::from(steps), seconds).1;
+            if frame != last {
+                changes += 1;
+                last = frame;
+            }
+        }
+        let paced = seconds / f64::from(CartClip::TravelFull.frame_seconds());
         assert!(
-            feet < rim && feet > -rim,
-            "a rider's feet at {feet} are outside a box spanning ±{rim}"
-        );
-        assert!(
-            crown - rim >= 4.0,
-            "a rider's head shows only {} texels over the rim",
-            crown - rim
+            (f64::from(changes) - paced).abs() <= 6.0,
+            "{changes} frames over a leg paced for {paced}"
         );
     }
 }

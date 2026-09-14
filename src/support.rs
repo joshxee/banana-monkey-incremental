@@ -21,7 +21,7 @@
 use bevy::prelude::*;
 
 use crate::{
-    art::{self, Art, Clip},
+    art::{self, Art, Clip, Facing},
     domain::{SUPPORT_MEAL_PERIOD, SUPPORT_PHASE_STRIDE, Staff, SupportCycle, SupportRole},
     game::{CREAM, SceneLayout},
     isometric,
@@ -389,39 +389,39 @@ pub(crate) fn sync_support_avatars(
         let station = layout.support_point(avatar.role, slot_offset(avatar.slot));
         let mut point = station;
 
-        // Walking out of the bins to the station, on the walk loop, its feet
-        // gripping the ground the same way a harvester's do; then standing.
+        // Which side of the monkey its head is on, for the props below.
+        let mut heading_left = sprite.flip_x;
+
+        // Walking out of the bins to the station, on the walk row for the way
+        // it is going, its feet gripping the ground the same way a
+        // harvester's do; then standing.
         if let Some(mut arriving) = arriving {
             arriving.0 += time.delta_secs();
             let from = layout.town_centre();
             let t = (arriving.0 / ARRIVE_SECONDS).clamp(0.0, 1.0);
             point = from.lerp(station, t * t * (3.0 - 2.0 * t));
-            let (clip, frame, flip) = if t < 1.0 {
+            let (clip, frame, facing) = if t < 1.0 {
                 // Seeded per slot, so a fan hired together does not step in
                 // lockstep - the formation read `Playing::starting` avoids.
-                let stride = isometric::project(point - from).length() / art::WALK_STRIDE_TEXELS
+                let stride = art::walked_texels(point - from) / art::WALK_STRIDE_TEXELS
                     + avatar.slot as f32 * 0.618_034;
-                let facing_left = isometric::project(station - from).x < 0.0;
-                (Clip::Walk, Clip::walk_frame(stride), facing_left)
+                (
+                    Clip::Walk,
+                    Clip::walk_frame(stride),
+                    Facing::of_ground(station - from),
+                )
             } else {
                 commands.entity(entity).remove::<Arriving>();
-                (Clip::Idle, avatar.slot as u32 % Clip::Idle.frames(), false)
+                (
+                    Clip::Idle,
+                    avatar.slot as u32 % Clip::Idle.frames(),
+                    Facing::SE,
+                )
             };
-            let (image, sheet) = art.clip(clip);
-            if sprite.image != image {
-                sprite.image = image;
-            }
-            if let Some(atlas) = sprite.texture_atlas.as_mut() {
-                if atlas.layout != sheet {
-                    atlas.layout = sheet;
-                }
-                if atlas.index != frame as usize {
-                    atlas.index = frame as usize;
-                }
-            }
-            if sprite.flip_x != flip {
-                sprite.flip_x = flip;
-            }
+            art.pose(&mut sprite, clip, facing, frame);
+            // A walk is never mirrored - its left-facing rows are drawn - so
+            // the head's side comes from the facing rather than the flip.
+            heading_left = facing.mirrors_idle();
         }
 
         // No lift: the art carries its own ground anchor, so the ground
@@ -469,7 +469,7 @@ pub(crate) fn sync_support_avatars(
             sprite.color = monkey;
         }
 
-        let facing = if sprite.flip_x { -1.0 } else { 1.0 };
+        let facing = if heading_left { -1.0 } else { 1.0 };
         for child in children.into_iter().flatten() {
             if let Ok((role_box, mut at)) = boxes.get_mut(*child) {
                 let x = role_box.base_x * facing;
@@ -529,7 +529,7 @@ fn spawn_avatar(
     // frame is the slot's own, so a fan of three is not one pose repeated.
     let mut spawned = commands.spawn((
         SupportAvatar { role, slot },
-        art.worker(Clip::Idle, slot as u32),
+        art.worker(Clip::Idle, Facing::SE, slot as u32),
         art::WORKER.anchor(),
         Transform::from_scale(Vec3::new(scale, scale, 1.0)),
     ));
