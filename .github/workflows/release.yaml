@@ -102,7 +102,7 @@ jobs:
           cp target/x86_64-unknown-linux-gnu/release/${{ env.binary }} linux/
           cp -r assets linux/
       - name: Validate package
-        run: test -x linux/${{ env.binary }} && test -f linux/assets/Banana/Banana.png
+        run: test -x linux/${{ env.binary }} && test -f linux/assets/Banana/banana-bunch-still.png
       - name: Package
         working-directory: linux
         run: zip --recurse-paths ../${{ env.binary }}.zip .
@@ -140,7 +140,7 @@ jobs:
           cp -r assets windows/
       - name: Validate package
         shell: bash
-        run: test -f windows/${{ env.binary }}.exe && test -f windows/assets/Banana/Banana.png
+        run: test -f windows/${{ env.binary }}.exe && test -f windows/assets/Banana/banana-bunch-still.png
       - name: Package
         run: Compress-Archive -Path windows/* -DestinationPath ${{ env.binary }}.zip
       - name: Upload artifact
