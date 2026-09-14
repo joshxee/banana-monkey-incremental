@@ -3244,6 +3244,7 @@ fn ease(progress: f32) -> f32 {
 /// stayed under the tree for the whole keyboard arc, and a banana put back
 /// drew over the plant's visitors for a frame. The shadow is the drop point;
 /// it cannot be a frame stale.
+#[allow(clippy::type_complexity)]
 fn place_held_banana(
     layout: Res<SceneLayout>,
     controller: Res<HarvestController>,
@@ -3334,9 +3335,7 @@ fn animate_collected(
     let scale = Vec3::new(layout.world_scale(), layout.world_scale(), 1.0);
     for (entity, mut collected, mut transform, mut sprite) in &mut bunches {
         let ground = collected.ground;
-        transform.translation = layout
-            .board(ground)
-            .extend(isometric::stand_z(ground, 0.0));
+        transform.translation = layout.board(ground).extend(isometric::stand_z(ground, 0.0));
         transform.scale = scale;
         let clip = art::Bunch::Despawn;
         if collected
