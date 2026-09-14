@@ -51,20 +51,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - name: Install wasm-bindgen CLI
-        run: |
-          version=$(cargo metadata --locked --format-version 1 | jq --raw-output '.packages[] | select(.name=="wasm-bindgen") | .version')
-          cargo install -f wasm-bindgen-cli --locked --version "$version"
+      # Built by trunk from the root index.html: the page `./serve` and the
+      # Playwright suite run. A hand-written page here once shipped without
+      # the canvas's `touch-action: none` or diagnostics.js, so on a phone the
+      # browser took every drag for a scroll and cancelled it.
+      - name: Install trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
       - name: Build
-        run: cargo build --locked --release --target wasm32-unknown-unknown
-      - name: Prepare package
-        run: |
-          wasm-bindgen --no-typescript --out-name bevy_game --out-dir wasm --target web target/wasm32-unknown-unknown/release/${{ env.binary }}.wasm
-          cp -r assets wasm/
+        # Relative URLs: itch serves the game from a subfolder, where
+        # Trunk.toml's `public_url = "/"` would point at the CDN's root.
+        run: trunk build --release --locked --public-url ./ --dist web
       - name: Validate web package
-        run: test -f wasm/index.html && test -d wasm/assets && test -f wasm/bevy_game.js
+        run: |
+          test -f web/index.html && test -d web/assets && test -f web/diagnostics.js
+          grep -q "touch-action: none" web/index.html
+          ! grep -q 'src="/\|href="/' web/index.html
       - name: Package
-        working-directory: wasm
+        working-directory: web
         run: zip --recurse-paths ../${{ env.binary }}.zip .
       - name: Upload artifact
         uses: actions/upload-artifact@v4
