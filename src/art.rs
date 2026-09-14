@@ -1,11 +1,17 @@
 //! The drawn art, and the one number that fixes its scale.
 //!
 //! Every sprite in `assets/` is authored at a single shared pixel scale: the
-//! jungle plants, the town centre and the spider worker were all drawn against
-//! the same 64x64 worker reference, and their manifests give a ground anchor in
-//! art pixels rather than a centre. That is what makes this module small — the
-//! art already agrees with itself, so the game needs one conversion from art
-//! pixels to world texels and one rule for where a sprite's feet are.
+//! jungle plants, the town centre, the spider worker, the banana bunch, the
+//! banana cart and the ground tiles were all drawn against the same 64x64
+//! worker reference, and their manifests give a ground anchor in art pixels
+//! rather than a centre. That is what makes this module small — the art already
+//! agrees with itself, so the game needs one conversion from art pixels to
+//! world texels and one rule for where a sprite's feet are.
+//!
+//! The manifests are also where every clip's length, frame order and timing
+//! come from. The constants here restate them, and the tests read the JSON
+//! beside each sheet and hold the two to each other, so a re-export that moves
+//! a row or retimes a frame fails here rather than playing the wrong direction.
 //!
 //! Nothing here decides *where* anything stands. `isometric` and `worker` do
 //! that, in metres, exactly as they did when the same things were meshes.
@@ -17,6 +23,8 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
     sprite::Anchor,
 };
+
+use crate::isometric;
 
 /// World texels per art pixel.
 ///
@@ -86,10 +94,9 @@ impl Cell {
     /// Where an art pixel of this cell lands, in world texels measured from the
     /// ground anchor, with y running up the screen.
     ///
-    /// The one conversion every prop, badge and seat placed against the art
-    /// goes through. Placing them in texels read off the old placeholder is how
-    /// a chef's cap came to sit on a face and three cart riders came to stand
-    /// on the lid of their cart.
+    /// The one conversion every prop and badge placed against the art goes
+    /// through. Placing them in texels read off the old placeholder is how a
+    /// chef's cap came to sit on a face.
     pub(crate) fn offset_of(self, art: Vec2) -> Vec2 {
         Vec2::new(art.x - self.ground.x, self.ground.y - art.y) * self.texels()
     }
@@ -183,6 +190,29 @@ pub(crate) const WORKER: Cell = Cell::new((64.0, 64.0), (32.0, 56.0));
 /// against the worker's 44 - so it needs no scale of its own to read as the
 /// smaller animal.
 pub(crate) const SQUIRREL: Cell = Cell::new((64.0, 64.0), (32.0, 56.0));
+/// One frame of the banana bunch (see `assets/Banana`).
+pub(crate) const BUNCH: Cell = Cell::new((48.0, 48.0), (24.0, 36.0));
+/// One frame of the banana cart, crew and all (see `assets/BananaCart`).
+pub(crate) const CART: Cell = Cell::new((208.0, 176.0), (104.0, 126.0));
+
+/// One ground tile, in art pixels (see `assets/Ground`): a 2:1 diamond on a
+/// transparent canvas. At the shared scale it spans two board tiles each way.
+pub(crate) const GROUND_TILE: Vec2 = Vec2::new(128.0, 64.0);
+/// The packed ground atlas: eight tiles across, sixteen corner masks of four
+/// detail variants each, in mask-major order.
+const GROUND_ATLAS: Vec2 = Vec2::new(1024.0, 512.0);
+const GROUND_COLUMNS: u32 = 8;
+const GROUND_VARIANTS: u32 = 4;
+
+/// The highest row any cart cell draws on, in the cart's art pixels: the tip of
+/// the crew's tails over the load.
+///
+/// Measured off all four sheets by `the_cart_never_draws_above_its_measured_top`
+/// rather than taken from the canvas, which carries 18 rows of empty margin
+/// above it. What reads it is the clearance between a parked rank and the bins
+/// it is unloading into, and 18 rows of nothing is a metre and a half of ground
+/// the yard would be spread over for no reason.
+pub(crate) const CART_TOP_ROW: f32 = 18.0;
 
 /// The top row of the banana plant's crown, in both of its states: how far up
 /// the plant a press still means the plant. Measured off the art by
@@ -197,38 +227,30 @@ pub(crate) const PLANT_CROWN_ROW: f32 = 96.0;
 pub(crate) const WORKER_TOP_ROW: f32 = 1.0;
 /// The top of the head, in every idle frame. A hat sits here, not on the tail.
 pub(crate) const WORKER_CROWN_ROW: f32 = 14.0;
-/// The hips of a sitting monkey: how deep a rider's legs reach into a seat.
-pub(crate) const WORKER_HIP_ROW: f32 = 42.0;
-/// The middle of the hunched back, which is where a carried banana rides. The
-/// head is forward of it and the tail behind, and both are wrong places for
-/// cargo: on the head it reads as a hat, on the tail it floats.
+/// The middle of the hunched back, which is where a banana rides while the
+/// monkey stands. The head is forward of it and the tail behind, and both are
+/// wrong places for cargo: on the head it reads as a hat, on the tail it
+/// floats. A walking monkey carries it in its hand instead, drawn into the
+/// carry sheets.
 pub(crate) const WORKER_BACK: Vec2 = Vec2::new(31.0, 24.0);
 
-/// How much smaller a cart's rider is drawn than a walker.
-pub(crate) const RIDER_SCALE: f32 = 0.72;
-
-/// The banana, in world texels: one art pixel to one texel.
+/// The single banana a standing worker carries on its back, in world texels.
 ///
-/// `assets/Banana` is an icon, not part of the shared-scale set, so it cannot
-/// inherit its size from the monkey the way the plants do. A whole number of
-/// texels per art pixel is what keeps a 16-pixel sprite from crawling when it
-/// moves, and one is the only whole number that leaves it smaller than the
-/// monkey carrying it home.
-pub(crate) const BANANA_TEXELS: f32 = 16.0;
-/// And carried on a monkey's back: exactly half, so it stays on the grid.
-pub(crate) const CARRIED_BANANA_TEXELS: f32 = BANANA_TEXELS * 0.5;
-/// Frames in the banana's spin.
-pub(crate) const BANANA_FRAMES: u32 = 12;
-/// The frame the banana rests on: lying on its side, the shape it is recognised
-/// by, with no glint - the first half of the spin catches the light and a
-/// carried banana frozen on a white flash reads as a gem.
-pub(crate) const BANANA_REST_FRAME: u32 = 8;
+/// `assets/Banana/Banana.png` is the one piece of the old set still drawn: the
+/// carry walk puts a single banana in the monkey's hand, and a whole bunch on
+/// the back of a monkey that has just put one down would read as a second,
+/// bigger load. One art pixel to half a texel, the shared scale.
+pub(crate) const CARRIED_BANANA_TEXELS: f32 = 16.0 * ART_SCALE;
+/// Frames in that banana's spin, and the one it rests on: lying on its side,
+/// the shape it is recognised by, with no glint.
+const BANANA_FRAMES: u32 = 12;
+const BANANA_REST_FRAME: u32 = 8;
 
 /// A contact shadow, in world texels: a little wider than a monkey's feet and
 /// a third as deep as it is wide, which is the 2:1 ground seen from above.
 pub(crate) const SHADOW_TEXELS: Vec2 = Vec2::new(35.0 * ART_SCALE, 12.5 * ART_SCALE);
 
-/// Frames in the walk loop, and in the idle loop.
+/// Frames in each walk loop, and in the idle loop.
 const WALK_FRAMES: u32 = 12;
 const IDLE_FRAMES: u32 = 4;
 
@@ -237,42 +259,137 @@ const IDLE_FRAMES: u32 = 4;
 /// Three lengths repeating, straight from the animation manifest: the quick
 /// recoveries and the small pause as the weight transfers are the whole
 /// character of a spider monkey's gait, and averaging them out loses it. The
-/// walk is no longer *played* against the clock (see [`WALK_STRIDE_TEXELS`]),
-/// but the three are kept as the proportion of the stride each frame covers.
+/// walk is not *played* against the clock (see [`WALK_STRIDE_TEXELS`]), but
+/// the three are kept as the proportion of the stride each frame covers. All
+/// sixteen directional clips share them.
 const WALK_TIMING: [f32; 3] = [0.070, 0.060, 0.050];
 /// And each idle frame, which breathes rather than steps, in seconds.
 const IDLE_TIMING: [f32; 4] = [0.300, 0.250, 0.300, 0.250];
 
 /// How far the walk carries a monkey over one whole loop, in world texels
-/// along the ground.
+/// along the south-east diagonal the stride was measured on.
 ///
-/// Measured off the sheet: the planted foot slides about twenty art pixels
-/// down the 2:1 diagonal over the twelve frames, twenty art pixels of stride, at whatever scale the art is drawn. The
-/// first version played the loop against the clock in 0.72 s, which is 11
-/// texels a second of stepping against 27 of walking: every monkey on the board
-/// skated at two and a half times its own stride, and faster again with every
-/// Chef. The playhead is now driven by how far the monkey is *drawn* moving, so
-/// the feet grip the ground at any speed, any Chef bonus and any swarm remap.
+/// Measured off the down-right sheet: the planted foot slides about twenty art
+/// pixels down the 2:1 diagonal over the twelve frames. The playhead is driven
+/// by how far the monkey is *drawn* moving, so the feet grip the ground at any
+/// speed, any Chef bonus and any swarm remap - see [`walked_texels`] for how
+/// the other seven directions are held to the same stride.
 pub(crate) const WALK_STRIDE_TEXELS: f32 = 20.0 * ART_SCALE;
+
+/// How far a step of `ground` metres walks, in texels of the stride.
+///
+/// A stride is a length on the *ground*: the same monkey takes the same step
+/// whichever way it faces, and the eight views are projections of it. On
+/// screen the step is foreshortened - a monkey walking straight up the board
+/// covers seven tenths of the pixels one walking down the diagonal does - so
+/// measuring screen pixels would have a monkey on the north-south walk, which
+/// is the shipped route, step a third too slowly and skate. Measured as if the
+/// step were taken down the diagonal instead, which is where the stride was
+/// read off the art, so the down-right walk is unchanged to the texel.
+pub(crate) fn walked_texels(ground: Vec2) -> f32 {
+    isometric::project(Vec2::new(ground.length(), 0.0)).length()
+}
+
+/// Which of the eight directions the art is drawn in a monkey or a cart faces.
+///
+/// Screen compass, in the order the sheets' rows run: north is straight up
+/// the screen, and the diagonals follow the 2:1 ground axes rather than 45°
+/// on screen, so a monkey walking along a tile edge plays a diagonal row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Facing {
+    N,
+    NE,
+    E,
+    SE,
+    S,
+    SW,
+    W,
+    NW,
+}
+
+impl Facing {
+    /// Every facing, in sheet-row order.
+    pub(crate) const ALL: [Self; 8] = [
+        Self::N,
+        Self::NE,
+        Self::E,
+        Self::SE,
+        Self::S,
+        Self::SW,
+        Self::W,
+        Self::NW,
+    ];
+
+    /// The row of a directional sheet this facing is drawn on.
+    fn row(self) -> u32 {
+        self as u32
+    }
+
+    /// The facing for a movement on the screen, with y running up.
+    ///
+    /// The projection squashes the ground to half its height, so it is
+    /// unfolded before the angle is taken: that puts both ground axes on true
+    /// diagonals and splits the circle into eight equal sectors around them.
+    /// Taking the angle on screen instead would put a monkey walking a few
+    /// degrees off a tile edge on a cardinal row.
+    pub(crate) fn of(screen: Vec2) -> Self {
+        let unfolded = Vec2::new(screen.x, screen.y * 2.0);
+        if unfolded.length_squared() <= f32::EPSILON {
+            return Self::SE;
+        }
+        let octant = (unfolded.y.atan2(unfolded.x) / std::f32::consts::FRAC_PI_4).round() as i32;
+        match octant.rem_euclid(8) {
+            0 => Self::E,
+            1 => Self::NE,
+            2 => Self::N,
+            3 => Self::NW,
+            4 => Self::W,
+            5 => Self::SW,
+            6 => Self::S,
+            _ => Self::SE,
+        }
+    }
+
+    /// The facing for a movement on the ground, in metres.
+    pub(crate) fn of_ground(travel: Vec2) -> Self {
+        Self::of(isometric::project(travel))
+    }
+
+    /// Whether the idle, drawn once facing down-right, is mirrored for this
+    /// facing. Only the three that face left: a monkey that walked up or down
+    /// the board stops facing right, as the idle is drawn, rather than guessing.
+    pub(crate) fn mirrors_idle(self) -> bool {
+        matches!(self, Self::SW | Self::W | Self::NW)
+    }
+}
 
 /// Which loop a monkey is playing.
 ///
-/// Only two, and that is a deliberate limit rather than an oversight. The
-/// artist also supplied `rise` and `settle` transitions, but they are one-shot
-/// clips that need playback state per monkey and a rule for interrupting them;
-/// the two loops carry the reading — moving or not moving — on their own.
+/// The artist also supplied `rise` and `settle` transitions for the idle, but
+/// they are drawn facing down-right only and are one-shot clips that need a
+/// rule for interrupting them; the loops carry the reading - moving or not,
+/// and carrying or not - on their own.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Clip {
+    /// Resting on all fours, drawn facing down-right and mirrored for left.
     Idle,
+    /// Walking empty-handed, in all eight directions.
     Walk,
+    /// Walking with a banana held in one hand, in all eight directions, in
+    /// step with [`Clip::Walk`] frame for frame.
+    CarryWalk,
 }
 
 impl Clip {
     pub(crate) fn frames(self) -> u32 {
         match self {
             Self::Idle => IDLE_FRAMES,
-            Self::Walk => WALK_FRAMES,
+            Self::Walk | Self::CarryWalk => WALK_FRAMES,
         }
+    }
+
+    pub(crate) fn is_walk(self) -> bool {
+        matches!(self, Self::Walk | Self::CarryWalk)
     }
 
     /// How long the idle frame at `index` is held, in seconds.
@@ -295,6 +412,20 @@ impl Clip {
         }
         WALK_FRAMES - 1
     }
+
+    /// The atlas index for a frame of this clip in a facing, and whether the
+    /// sprite is mirrored to show it.
+    ///
+    /// The walks are never mirrored at runtime: their three left-facing rows
+    /// are the artist's own reflections, already on the sheet. Mirroring a
+    /// walk row as well would turn a monkey walking west to face east.
+    fn cell(self, facing: Facing, frame: u32) -> (usize, bool) {
+        let frame = frame % self.frames();
+        match self {
+            Self::Idle => (frame as usize, facing.mirrors_idle()),
+            Self::Walk | Self::CarryWalk => ((facing.row() * WALK_FRAMES + frame) as usize, false),
+        }
+    }
 }
 
 /// What a squirrel monkey courier is doing.
@@ -311,10 +442,7 @@ pub(crate) enum Courier {
     Carry,
 }
 
-/// Directions each courier sheet is drawn in: N, NE, E, SE, S, SW, W, NW, down
-/// the rows, in screen compass bearings.
-pub(crate) const COURIER_HEADINGS: u32 = 8;
-/// Frames across an idle row, and across a travelling one.
+/// Frames across an idle row of a courier sheet, and across a travelling one.
 const COURIER_IDLE_FRAMES: u32 = 4;
 const COURIER_TRAVEL_FRAMES: u32 = 8;
 /// How long each idle frame is held, in seconds (the manifest's 300 ms).
@@ -331,6 +459,8 @@ const COURIER_IDLE_HOLD: f32 = 0.300;
 pub(crate) const COURIER_STRIDE_TEXELS: f32 = 60.0 * ART_SCALE;
 
 impl Courier {
+    pub(crate) const ALL: [Self; 3] = [Self::Idle, Self::Dart, Self::Carry];
+
     pub(crate) fn frames(self) -> u32 {
         match self {
             Self::Idle => COURIER_IDLE_FRAMES,
@@ -343,19 +473,187 @@ impl Courier {
         COURIER_IDLE_HOLD
     }
 
-    /// Which row of the sheet a screen-space heading is drawn on.
-    ///
-    /// The rows run N, NE, E, SE, S, SW, W, NW, so this is a bearing clockwise
-    /// from up-screen in eighths of a turn. A heading of nothing keeps the row
-    /// it was given, which is what stops a courier spinning through all eight
-    /// rows in the frame it turns around.
-    pub(crate) fn heading(travel: Vec2, previous: u32) -> u32 {
-        if travel.length_squared() <= f32::EPSILON {
-            return previous % COURIER_HEADINGS;
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn path(self) -> &'static str {
+        match self {
+            Self::Idle => "Monkey/Squirrel Unpacker/squirrel-monkey-idle.png",
+            Self::Dart => "Monkey/Squirrel Unpacker/squirrel-monkey-dart.png",
+            Self::Carry => "Monkey/Squirrel Unpacker/squirrel-monkey-carry.png",
         }
-        let clockwise = std::f32::consts::FRAC_PI_2 - travel.y.atan2(travel.x);
-        let eighth = clockwise / (std::f32::consts::TAU / COURIER_HEADINGS as f32);
-        (eighth.round().rem_euclid(COURIER_HEADINGS as f32)) as u32
+    }
+
+    /// Which cell of a courier sheet a facing and a frame name.
+    ///
+    /// Never mirrored, unlike the worker's idle: the artist drew all eight
+    /// bearings of every courier clip, and the western three already *are* the
+    /// eastern three reflected with the anchor kept. Mirroring on top of that
+    /// would face a courier the wrong way on half the board.
+    fn cell(self, facing: Facing, frame: u32) -> usize {
+        (facing.row() * self.frames() + frame % self.frames()) as usize
+    }
+}
+
+/// The banana bunch's four clips (see `assets/Banana/banana-bunch.json`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Bunch {
+    /// Lying still: held in the hand, or anywhere it should not glint.
+    Still,
+    /// Growing into place with a brief squash, once, then idle.
+    Spawn,
+    /// Planted, with a slow glint along the front fruit, looping.
+    Idle,
+    /// Lifting, shrinking and leaving two flecks, once, then gone.
+    Despawn,
+}
+
+impl Bunch {
+    const ALL: [Self; 4] = [Self::Still, Self::Spawn, Self::Idle, Self::Despawn];
+
+    /// Each frame's hold, in seconds, from the manifest.
+    pub(crate) fn durations(self) -> &'static [f32] {
+        match self {
+            Self::Still => &[1.0],
+            Self::Spawn => &[0.05, 0.05, 0.05, 0.05, 0.06, 0.06, 0.07, 0.09, 0.12],
+            Self::Idle => &[0.9, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.9],
+            Self::Despawn => &[0.06, 0.05, 0.05, 0.05, 0.05, 0.06, 0.07, 0.1],
+        }
+    }
+
+    /// Whether the clip loops. Spawn and despawn are actions and hold their
+    /// last frame; the still is one frame and has nothing to loop.
+    pub(crate) fn loops(self) -> bool {
+        matches!(self, Self::Idle)
+    }
+
+    fn frames(self) -> u32 {
+        self.durations().len() as u32
+    }
+
+    fn path(self) -> &'static str {
+        match self {
+            Self::Still => "Banana/banana-bunch-still.png",
+            Self::Spawn => "Banana/banana-bunch-spawn-sheet.png",
+            Self::Idle => "Banana/banana-bunch-idle-sheet.png",
+            Self::Despawn => "Banana/banana-bunch-despawn-sheet.png",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Where a clip with per-frame holds has got to.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct Playhead {
+    pub(crate) frame: u32,
+    elapsed: f32,
+}
+
+impl Playhead {
+    /// Spend `dt` seconds on a clip whose frames hold `durations`, and say
+    /// whether a one-shot clip has finished. A one-shot holds its last frame
+    /// rather than wrapping to its first, which for the spawn would flash an
+    /// empty cell and for the despawn would bring the bunch back.
+    pub(crate) fn advance(&mut self, durations: &[f32], looping: bool, dt: f32) -> bool {
+        let last = durations.len() as u32 - 1;
+        // Capped, so a frame that arrives after a backgrounded tab is not paid
+        // out one animation frame at a time.
+        self.elapsed += dt.min(1.0);
+        loop {
+            let hold = durations[self.frame as usize];
+            if self.elapsed < hold {
+                return false;
+            }
+            if self.frame == last && !looping {
+                self.elapsed = hold;
+                return true;
+            }
+            self.elapsed -= hold;
+            self.frame = if self.frame == last {
+                0
+            } else {
+                self.frame + 1
+            };
+        }
+    }
+}
+
+/// The banana cart's four clips (see `assets/BananaCart/banana-cart.json`).
+///
+/// The sheets' seams are exact: fill starts on the empty cart's first travel
+/// frame and ends on the full cart's, and offload does the reverse, so a cart
+/// that parks on travel frame zero can go into and out of either without a
+/// pixel moving. `the_cart_clips_meet_pixel_for_pixel` holds that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CartClip {
+    /// Rolling with an empty bed, looping.
+    TravelEmpty,
+    /// Parked, bunches dropping into the bed, once.
+    Fill,
+    /// Rolling with the bed full, looping, in phase with the empty roll.
+    TravelFull,
+    /// Parked, the gate open and the bed tipping out, once.
+    Offload,
+}
+
+impl CartClip {
+    const ALL: [Self; 4] = [
+        Self::TravelEmpty,
+        Self::Fill,
+        Self::TravelFull,
+        Self::Offload,
+    ];
+
+    pub(crate) fn frames(self) -> u32 {
+        match self {
+            Self::TravelEmpty | Self::TravelFull => 12,
+            Self::Fill | Self::Offload => 24,
+        }
+    }
+
+    /// Every frame's hold, in seconds: the manifest times each clip evenly.
+    pub(crate) fn frame_seconds(self) -> f32 {
+        match self {
+            Self::TravelEmpty | Self::TravelFull => 0.080,
+            Self::Fill | Self::Offload => 0.100,
+        }
+    }
+
+    /// The whole clip, in seconds.
+    pub(crate) fn seconds(self) -> f32 {
+        self.frames() as f32 * self.frame_seconds()
+    }
+
+    fn path(self) -> &'static str {
+        match self {
+            Self::TravelEmpty => "BananaCart/banana-cart-travel_empty.png",
+            Self::Fill => "BananaCart/banana-cart-fill.png",
+            Self::TravelFull => "BananaCart/banana-cart-travel_full.png",
+            Self::Offload => "BananaCart/banana-cart-offload.png",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// The cart's four sheets, loaded the first time a cart is bought.
+///
+/// Not part of [`Art`], which loads at startup: the four are ninety megabytes
+/// of texture once decoded, for a vehicle most sessions never unlock, and a
+/// phone pays for every one of them. Held for the rest of the run once loaded,
+/// so a cart changing state never waits on a sheet.
+#[derive(Resource, Debug, Clone)]
+pub(crate) struct CartSheets([Handle<Image>; 4]);
+
+impl CartSheets {
+    pub(crate) fn load(assets: &AssetServer) -> Self {
+        Self(CartClip::ALL.map(|clip| assets.load(clip.path())))
     }
 }
 
@@ -377,20 +675,23 @@ pub(crate) struct Art {
     pub(crate) jungle: [Handle<Image>; 3],
     /// The banana plant with its bunch still on: the node workers walk to.
     pub(crate) banana_fruiting: Handle<Image>,
-    /// And with the bunch cut: the home tree, whose one banana is the loose
-    /// one lying at its foot for the player to pick up.
+    /// And with the bunch cut: the home tree, whose bunch is the loose one
+    /// lying at its foot for the player to pick up.
     pub(crate) banana_harvested: Handle<Image>,
-    worker_walk: Handle<Image>,
+    /// The packed ground tiles: see [`ground_uv`].
+    pub(crate) ground: Handle<Image>,
     worker_idle: Handle<Image>,
-    walk_layout: Handle<TextureAtlasLayout>,
+    worker_walk: Handle<Image>,
+    worker_carry: Handle<Image>,
     idle_layout: Handle<TextureAtlasLayout>,
+    walk_layout: Handle<TextureAtlasLayout>,
+    bunch: [Handle<Image>; 4],
+    bunch_layouts: [Handle<TextureAtlasLayout>; 4],
+    cart_layouts: [Handle<TextureAtlasLayout>; 4],
+    courier: [Handle<Image>; 3],
+    courier_layouts: [Handle<TextureAtlasLayout>; 3],
     banana: Handle<Image>,
     banana_layout: Handle<TextureAtlasLayout>,
-    squirrel_idle: Handle<Image>,
-    squirrel_dart: Handle<Image>,
-    squirrel_carry: Handle<Image>,
-    squirrel_idle_layout: Handle<TextureAtlasLayout>,
-    squirrel_travel_layout: Handle<TextureAtlasLayout>,
     /// A flat ellipse, generated rather than drawn: see [`Art::shadow`].
     shadow: Handle<Image>,
 }
@@ -401,13 +702,24 @@ impl Art {
         layouts: &mut Assets<TextureAtlasLayout>,
         images: &mut Assets<Image>,
     ) -> Self {
-        let mut grid = |cell: UVec2, columns: u32, rows: u32| {
+        let mut grid = |cell: Vec2, columns: u32, rows: u32| {
             layouts.add(TextureAtlasLayout::from_grid(
-                cell, columns, rows, None, None,
+                cell.as_uvec2(),
+                columns,
+                rows,
+                None,
+                None,
             ))
         };
-        let worker_cell = WORKER.canvas.as_uvec2();
-        let squirrel_cell = SQUIRREL.canvas.as_uvec2();
+        let worker = WORKER.canvas;
+        let walk_layout = grid(worker, WALK_FRAMES, Facing::ALL.len() as u32);
+        let idle_layout = grid(worker, IDLE_FRAMES, 1);
+        let bunch_layouts = Bunch::ALL.map(|clip| grid(BUNCH.canvas, clip.frames(), 1));
+        let cart_layouts =
+            CartClip::ALL.map(|clip| grid(CART.canvas, clip.frames(), Facing::ALL.len() as u32));
+        let banana_layout = grid(Vec2::splat(16.0), BANANA_FRAMES, 1);
+        let courier_layouts =
+            Courier::ALL.map(|clip| grid(SQUIRREL.canvas, clip.frames(), Facing::ALL.len() as u32));
         Self {
             town_centre: assets.load("TownCenter/town-center-structure.png"),
             town_centre_ground: assets.load("TownCenter/town-center-ground.png"),
@@ -419,17 +731,19 @@ impl Art {
             ],
             banana_fruiting: assets.load("Jungle/banana-fruiting.png"),
             banana_harvested: assets.load("Jungle/banana-harvested.png"),
-            worker_walk: assets.load("Monkey/Spider Worker/spider_monkey_walk_sheet.png"),
+            ground: assets.load("Ground/ground-atlas.png"),
             worker_idle: assets.load("Monkey/Spider Worker/spider_monkey_idle_sheet.png"),
-            walk_layout: grid(worker_cell, WALK_FRAMES, 1),
-            idle_layout: grid(worker_cell, IDLE_FRAMES, 1),
+            worker_walk: assets.load("Monkey/Spider Worker/spider_monkey_walk_8dir.png"),
+            worker_carry: assets.load("Monkey/Spider Worker/spider_monkey_carry_walk_8dir.png"),
+            idle_layout,
+            walk_layout,
+            bunch: Bunch::ALL.map(|clip| assets.load(clip.path())),
+            bunch_layouts,
+            cart_layouts,
+            courier: Courier::ALL.map(|clip| assets.load(clip.path())),
+            courier_layouts,
             banana: assets.load("Banana/Banana.png"),
-            banana_layout: grid(UVec2::splat(BANANA_TEXELS as u32), BANANA_FRAMES, 1),
-            squirrel_idle: assets.load("Monkey/Squirrel Unpacker/squirrel-monkey-idle.png"),
-            squirrel_dart: assets.load("Monkey/Squirrel Unpacker/squirrel-monkey-dart.png"),
-            squirrel_carry: assets.load("Monkey/Squirrel Unpacker/squirrel-monkey-carry.png"),
-            squirrel_idle_layout: grid(squirrel_cell, COURIER_IDLE_FRAMES, COURIER_HEADINGS),
-            squirrel_travel_layout: grid(squirrel_cell, COURIER_TRAVEL_FRAMES, COURIER_HEADINGS),
+            banana_layout,
             shadow: images.add(shadow_image()),
         }
     }
@@ -439,102 +753,134 @@ impl Art {
         match clip {
             Clip::Idle => (self.worker_idle.clone(), self.idle_layout.clone()),
             Clip::Walk => (self.worker_walk.clone(), self.walk_layout.clone()),
+            Clip::CarryWalk => (self.worker_carry.clone(), self.walk_layout.clone()),
         }
     }
 
-    /// A worker sprite on a given frame of a clip.
-    pub(crate) fn worker(&self, clip: Clip, frame: u32) -> Sprite {
+    /// A worker sprite on a given frame of a clip, facing `facing`.
+    pub(crate) fn worker(&self, clip: Clip, facing: Facing, frame: u32) -> Sprite {
         let (image, layout) = self.clip(clip);
+        let (index, flip_x) = clip.cell(facing, frame);
         Sprite {
             custom_size: Some(WORKER.size()),
+            flip_x,
+            ..Sprite::from_atlas_image(image, TextureAtlas { layout, index })
+        }
+    }
+
+    /// Put a worker sprite on a frame of a clip, facing `facing`, writing only
+    /// what changed, so a sprite already showing it is not marked changed.
+    pub(crate) fn pose(&self, sprite: &mut Mut<Sprite>, clip: Clip, facing: Facing, frame: u32) {
+        let (image, layout) = self.clip(clip);
+        let (index, flip_x) = clip.cell(facing, frame);
+        set_cell(sprite, image, layout, index);
+        if sprite.flip_x != flip_x {
+            sprite.flip_x = flip_x;
+        }
+    }
+
+    /// A squirrel monkey courier on a frame of a clip, facing `facing`.
+    pub(crate) fn courier(&self, clip: Courier, facing: Facing, frame: u32) -> Sprite {
+        Sprite {
+            custom_size: Some(SQUIRREL.size()),
             ..Sprite::from_atlas_image(
-                image,
+                self.courier[clip.index()].clone(),
                 TextureAtlas {
-                    layout,
+                    layout: self.courier_layouts[clip.index()].clone(),
+                    index: clip.cell(facing, frame),
+                },
+            )
+        }
+    }
+
+    /// Put a courier sprite on a frame of a clip, facing `facing`.
+    pub(crate) fn pose_courier(
+        &self,
+        sprite: &mut Mut<Sprite>,
+        clip: Courier,
+        facing: Facing,
+        frame: u32,
+    ) {
+        set_cell(
+            sprite,
+            self.courier[clip.index()].clone(),
+            self.courier_layouts[clip.index()].clone(),
+            clip.cell(facing, frame),
+        );
+    }
+
+    /// The banana bunch on a frame of a clip.
+    pub(crate) fn bunch(&self, clip: Bunch, frame: u32) -> Sprite {
+        Sprite {
+            custom_size: Some(BUNCH.size()),
+            ..Sprite::from_atlas_image(
+                self.bunch[clip.index()].clone(),
+                TextureAtlas {
+                    layout: self.bunch_layouts[clip.index()].clone(),
                     index: (frame % clip.frames()) as usize,
                 },
             )
         }
     }
 
-    /// A cart's rider: the same monkey, sitting still and drawn smaller so the
-    /// crew reads as cargo rather than as three more walkers.
-    pub(crate) fn rider(&self, seat: u32) -> Sprite {
-        let (image, layout) = self.clip(Clip::Idle);
-        Sprite {
-            custom_size: Some(WORKER.size() * RIDER_SCALE),
-            ..Sprite::from_atlas_image(
-                image,
-                TextureAtlas {
-                    layout,
-                    // Frozen, and on a different frame per seat, so three
-                    // riders are not one monkey drawn three times.
-                    index: (seat % Clip::Idle.frames()) as usize,
-                },
-            )
-        }
+    /// Put a bunch sprite on a frame of a clip.
+    pub(crate) fn pose_bunch(&self, sprite: &mut Mut<Sprite>, clip: Bunch, frame: u32) {
+        set_cell(
+            sprite,
+            self.bunch[clip.index()].clone(),
+            self.bunch_layouts[clip.index()].clone(),
+            (frame % clip.frames()) as usize,
+        );
     }
 
-    /// The sheet and atlas a courier clip plays out of.
-    pub(crate) fn courier_clip(
+    /// The cart on a frame of a clip, facing `facing`. Never mirrored: all
+    /// eight directions are drawn, each with its crew and cargo layered for
+    /// that view.
+    pub(crate) fn cart(
         &self,
-        clip: Courier,
-    ) -> (Handle<Image>, Handle<TextureAtlasLayout>) {
-        match clip {
-            Courier::Idle => (
-                self.squirrel_idle.clone(),
-                self.squirrel_idle_layout.clone(),
-            ),
-            Courier::Dart => (
-                self.squirrel_dart.clone(),
-                self.squirrel_travel_layout.clone(),
-            ),
-            Courier::Carry => (
-                self.squirrel_carry.clone(),
-                self.squirrel_travel_layout.clone(),
-            ),
-        }
-    }
-
-    /// Which cell of a courier sheet a heading and a frame name.
-    ///
-    /// The sheets are a grid rather than a strip - one row per screen bearing -
-    /// so an index is a row times a row length, never a bare frame. Reading one
-    /// as a strip draws a courier heading north-east while it walks south.
-    pub(crate) fn courier_cell(clip: Courier, heading: u32, frame: u32) -> usize {
-        let row = heading % COURIER_HEADINGS;
-        (row * clip.frames() + frame % clip.frames()) as usize
-    }
-
-    /// A squirrel monkey courier, on one frame of one clip, facing one of the
-    /// eight bearings its sheets are drawn in.
-    ///
-    /// No `flip_x`: the artist drew all eight, and the west three already *are*
-    /// the mirrored east three with the anchor kept. Mirroring on top of that
-    /// would face a courier the wrong way on half the board.
-    pub(crate) fn courier(&self, clip: Courier, heading: u32, frame: u32) -> Sprite {
-        let (image, layout) = self.courier_clip(clip);
+        sheets: &CartSheets,
+        clip: CartClip,
+        facing: Facing,
+        frame: u32,
+    ) -> Sprite {
         Sprite {
-            custom_size: Some(SQUIRREL.size()),
+            custom_size: Some(CART.size()),
             ..Sprite::from_atlas_image(
-                image,
+                sheets.0[clip.index()].clone(),
                 TextureAtlas {
-                    layout,
-                    index: Self::courier_cell(clip, heading, frame),
+                    layout: self.cart_layouts[clip.index()].clone(),
+                    index: cart_index(clip, facing, frame),
                 },
             )
         }
     }
 
-    /// The banana, drawn `texels` across, on a given frame of its spin.
-    pub(crate) fn banana(&self, texels: f32, frame: u32) -> Sprite {
+    /// Put a cart sprite on a frame of a clip, facing `facing`.
+    pub(crate) fn pose_cart(
+        &self,
+        sprite: &mut Mut<Sprite>,
+        sheets: &CartSheets,
+        clip: CartClip,
+        facing: Facing,
+        frame: u32,
+    ) {
+        set_cell(
+            sprite,
+            sheets.0[clip.index()].clone(),
+            self.cart_layouts[clip.index()].clone(),
+            cart_index(clip, facing, frame),
+        );
+    }
+
+    /// The single banana a standing worker carries on its back.
+    pub(crate) fn carried_banana(&self) -> Sprite {
         Sprite {
-            custom_size: Some(Vec2::splat(texels)),
+            custom_size: Some(Vec2::splat(CARRIED_BANANA_TEXELS)),
             ..Sprite::from_atlas_image(
                 self.banana.clone(),
                 TextureAtlas {
                     layout: self.banana_layout.clone(),
-                    index: (frame % BANANA_FRAMES) as usize,
+                    index: BANANA_REST_FRAME as usize,
                 },
             )
         }
@@ -542,10 +888,10 @@ impl Art {
 
     /// A flat ellipse on the ground, `size` texels across, in `color`.
     ///
-    /// Everything drawn by the artist carries its own shadow and the cast did
-    /// not, so the near-black monkeys sat on bright grass like stickers. One
-    /// white ellipse, tinted per use: a contact shadow under a walker, and a
-    /// coloured disc under a support monkey that says which role it is.
+    /// The cast's own art carries no shadow, so the near-black monkeys sat on
+    /// the ground like stickers. One white ellipse, tinted per use: a contact
+    /// shadow under a walker, and a coloured disc under a support monkey that
+    /// says which role it is.
     pub(crate) fn shadow(&self, size: Vec2, color: Color) -> Sprite {
         Sprite {
             image: self.shadow.clone(),
@@ -566,6 +912,47 @@ impl Art {
             cell.anchor(),
         )
     }
+}
+
+/// Point a sprite at one cell of one atlas, writing only what changed. Read
+/// through the shared borrow first: reaching for a field through the mutable
+/// one marks the sprite changed whether or not anything is written.
+fn set_cell(
+    sprite: &mut Mut<Sprite>,
+    image: Handle<Image>,
+    layout: Handle<TextureAtlasLayout>,
+    index: usize,
+) {
+    if sprite.image != image {
+        sprite.image = image;
+    }
+    let showing = sprite
+        .texture_atlas
+        .as_ref()
+        .is_some_and(|atlas| atlas.layout == layout && atlas.index == index);
+    if !showing {
+        sprite.texture_atlas = Some(TextureAtlas { layout, index });
+    }
+}
+
+/// A cart frame's index in its clip's sheet: one row per facing.
+fn cart_index(clip: CartClip, facing: Facing, frame: u32) -> usize {
+    (facing.row() * clip.frames() + frame % clip.frames()) as usize
+}
+
+/// Where one ground tile sits in the packed atlas, as texture coordinates:
+/// its top-left and bottom-right corners.
+///
+/// `mask` is the tile's four corners, one bit each - top 1, right 2, bottom 4,
+/// left 8 - set for dirt and clear for jungle floor; `variant` is one of four
+/// patterns of detail over the same edges.
+pub(crate) fn ground_uv(mask: u8, variant: u8) -> (Vec2, Vec2) {
+    let index = u32::from(mask) * GROUND_VARIANTS + u32::from(variant) % GROUND_VARIANTS;
+    let at = Vec2::new(
+        (index % GROUND_COLUMNS) as f32 * GROUND_TILE.x,
+        (index / GROUND_COLUMNS) as f32 * GROUND_TILE.y,
+    );
+    (at / GROUND_ATLAS, (at + GROUND_TILE) / GROUND_ATLAS)
 }
 
 /// The shadow's texture: a hard-edged ellipse, one art pixel per texel, so it
@@ -617,52 +1004,217 @@ mod tests {
         (size.x, size.y, image.data.expect("decoded PNG has pixels"))
     }
 
-    /// The opaque rows of one frame of a horizontal strip, top and bottom.
-    fn opaque_rows(sheet: &(u32, u32, Vec<u8>), frame: u32, cell: u32) -> (u32, u32) {
-        let (width, height, data) = sheet;
+    /// A shipped manifest, parsed.
+    fn manifest(path: &str) -> serde_json::Value {
+        let text = std::fs::read_to_string(format!("{}/assets/{path}", env!("CARGO_MANIFEST_DIR")))
+            .unwrap_or_else(|error| panic!("{path}: {error}"));
+        serde_json::from_str(&text).unwrap_or_else(|error| panic!("{path}: {error}"))
+    }
+
+    /// One cell of a sheet, as RGBA rows.
+    fn cell(sheet: &(u32, u32, Vec<u8>), size: UVec2, column: u32, row: u32) -> Vec<[u8; 4]> {
+        let (width, _, data) = sheet;
+        let mut pixels = Vec::with_capacity((size.x * size.y) as usize);
+        for y in row * size.y..(row + 1) * size.y {
+            for x in column * size.x..(column + 1) * size.x {
+                let at = ((y * width + x) * 4) as usize;
+                pixels.push([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+            }
+        }
+        pixels
+    }
+
+    /// The opaque rows of one cell of a sheet, top and bottom.
+    fn opaque_rows(sheet: &(u32, u32, Vec<u8>), column: u32, row: u32, size: u32) -> (u32, u32) {
+        let (width, _, data) = sheet;
         let alpha = |x: u32, y: u32| data[((y * width + x) * 4 + 3) as usize];
-        let rows: Vec<u32> = (0..*height)
-            .filter(|&y| (frame * cell..(frame + 1) * cell).any(|x| alpha(x, y) > 0))
+        let rows: Vec<u32> = (row * size..(row + 1) * size)
+            .filter(|&y| (column * size..(column + 1) * size).any(|x| alpha(x, y) > 0))
+            .map(|y| y - row * size)
             .collect();
         (*rows.first().unwrap(), *rows.last().unwrap())
     }
+
+    const WALK_SHEET: &str = "Monkey/Spider Worker/spider_monkey_walk_8dir.png";
+    const CARRY_SHEET: &str = "Monkey/Spider Worker/spider_monkey_carry_walk_8dir.png";
+    const IDLE_SHEET: &str = "Monkey/Spider Worker/spider_monkey_idle_sheet.png";
 
     #[test]
     fn every_cell_matches_the_file_it_is_drawn_from() {
         // `custom_size` stretches whatever canvas it is given, so a cell that
         // disagrees with its PNG does not fail - it draws a squashed monkey or
         // a plant whose feet are off its anchor. Nothing else would notice.
-        for (path, cell, frames) in [
-            ("Jungle/banana-fruiting.png", PLANT, 1),
-            ("Jungle/banana-harvested.png", PLANT, 1),
-            ("Jungle/jungle-broad.png", PLANT, 1),
-            ("Jungle/jungle-leaning.png", PLANT, 1),
-            ("Jungle/jungle-fern.png", PLANT, 1),
-            ("TownCenter/town-center.png", TOWN_CENTRE, 1),
-            ("TownCenter/town-center-structure.png", TOWN_CENTRE, 1),
-            ("TownCenter/town-center-ground.png", TOWN_CENTRE, 1),
-            ("TownCenter/town-center-bins.png", BANANA_BINS, 1),
-            ("TownCenter/town-center-bins.png", CART_BINS, 1),
-            (
-                "Monkey/Spider Worker/spider_monkey_walk_sheet.png",
-                WORKER,
-                WALK_FRAMES,
-            ),
-            (
-                "Monkey/Spider Worker/spider_monkey_idle_sheet.png",
-                WORKER,
-                IDLE_FRAMES,
-            ),
-        ] {
+        let mut sheets = vec![
+            ("Jungle/banana-fruiting.png", PLANT, 1, 1),
+            ("Jungle/banana-harvested.png", PLANT, 1, 1),
+            ("Jungle/jungle-broad.png", PLANT, 1, 1),
+            ("Jungle/jungle-leaning.png", PLANT, 1, 1),
+            ("Jungle/jungle-fern.png", PLANT, 1, 1),
+            ("TownCenter/town-center.png", TOWN_CENTRE, 1, 1),
+            ("TownCenter/town-center-structure.png", TOWN_CENTRE, 1, 1),
+            ("TownCenter/town-center-ground.png", TOWN_CENTRE, 1, 1),
+            ("TownCenter/town-center-bins.png", BANANA_BINS, 1, 1),
+            ("TownCenter/town-center-bins.png", CART_BINS, 1, 1),
+            (WALK_SHEET, WORKER, WALK_FRAMES, 8),
+            (CARRY_SHEET, WORKER, WALK_FRAMES, 8),
+            (IDLE_SHEET, WORKER, IDLE_FRAMES, 1),
+        ];
+        for clip in Bunch::ALL {
+            sheets.push((clip.path(), BUNCH, clip.frames(), 1));
+        }
+        for clip in CartClip::ALL {
+            sheets.push((clip.path(), CART, clip.frames(), 8));
+        }
+        for clip in Courier::ALL {
+            sheets.push((clip.path(), SQUIRREL, clip.frames(), 8));
+        }
+        for (path, cell, columns, rows) in sheets {
             let (width, height, _) = png(path);
             assert_eq!(
                 Vec2::new(width as f32, height as f32),
-                cell.canvas * Vec2::new(frames as f32, 1.0),
+                cell.canvas * Vec2::new(columns as f32, rows as f32),
                 "{path}"
             );
         }
         let (width, height, _) = png("Banana/Banana.png");
-        assert_eq!((width, height), (BANANA_TEXELS as u32 * BANANA_FRAMES, 16));
+        assert_eq!((width, height), (16 * BANANA_FRAMES, 16));
+        let (width, height, _) = png("Ground/ground-atlas.png");
+        assert_eq!(Vec2::new(width as f32, height as f32), GROUND_ATLAS);
+    }
+
+    #[test]
+    fn the_walks_play_the_manifests_directions_and_timing() {
+        // The row a facing reads is the whole of whether a monkey walks the
+        // way it is going. The manifest names every row; hold the enum's
+        // order, the sheets and the stride timing to it.
+        let walks = manifest("Monkey/Spider Worker/spider_monkey_directional_walks.json");
+        assert_eq!(walks["anchor"]["x"], 32);
+        assert_eq!(walks["anchor"]["y"], 56);
+        let names: Vec<&str> = walks["directions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap())
+            .collect();
+        let ours: Vec<String> = Facing::ALL.iter().map(|f| format!("{f:?}")).collect();
+        assert_eq!(names, ours, "the sheet's rows are in a different order");
+        let timing: Vec<f32> = walks["frameDurationMs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|ms| ms.as_f64().unwrap() as f32 / 1000.0)
+            .collect();
+        assert_eq!(timing.len(), WALK_FRAMES as usize);
+        for (frame, hold) in timing.iter().enumerate() {
+            assert!(
+                (hold - WALK_TIMING[frame % 3]).abs() < 1e-6,
+                "frame {frame}"
+            );
+        }
+        for clip in walks["clips"].as_array().unwrap() {
+            let sheet = clip["sheet"].as_str().unwrap();
+            let (state, direction) = (
+                clip["state"].as_str().unwrap(),
+                clip["direction"].as_str().unwrap(),
+            );
+            let facing = Facing::ALL
+                .into_iter()
+                .find(|f| format!("{f:?}") == direction)
+                .unwrap();
+            let ours = match state {
+                "walk" => Clip::Walk,
+                "carry_walk" => Clip::CarryWalk,
+                other => panic!("an unplayed state {other}"),
+            };
+            assert!(
+                WALK_SHEET.ends_with(sheet) == (ours == Clip::Walk),
+                "{sheet}"
+            );
+            for (frame, rect) in clip["frames"].as_array().unwrap().iter().enumerate() {
+                let (index, flip) = ours.cell(facing, frame as u32);
+                assert!(!flip, "a walk row is mirrored twice");
+                let column = index as u64 % u64::from(WALK_FRAMES);
+                let row = index as u64 / u64::from(WALK_FRAMES);
+                assert_eq!(
+                    rect["x"].as_u64().unwrap(),
+                    column * 64,
+                    "{state} {direction}"
+                );
+                assert_eq!(rect["y"].as_u64().unwrap(), row * 64, "{state} {direction}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_left_facing_walk_is_its_right_facing_twin_reflected() {
+        // Which rows are reflections is the one thing the order test cannot
+        // see - a swapped pair of names in the manifest and the sheet would
+        // still agree with each other. The pixels cannot lie: the artist's
+        // west rows are the east rows mirrored about x = 32, so check them.
+        for path in [WALK_SHEET, CARRY_SHEET] {
+            let sheet = png(path);
+            for (right, left) in [
+                (Facing::NE, Facing::NW),
+                (Facing::E, Facing::W),
+                (Facing::SE, Facing::SW),
+            ] {
+                for frame in 0..WALK_FRAMES {
+                    let a = cell(&sheet, UVec2::splat(64), frame, right.row());
+                    let b = cell(&sheet, UVec2::splat(64), frame, left.row());
+                    for y in 0..64 {
+                        for x in 0..64 {
+                            assert_eq!(
+                                a[y * 64 + x],
+                                b[y * 64 + (63 - x)],
+                                "{path} {left:?} frame {frame} is not {right:?} reflected"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_monkey_faces_the_way_it_walks_across_the_ground() {
+        // The ground axes project onto the screen diagonals, and the sums and
+        // differences of them onto the screen's own axes. A route that runs
+        // along a tile edge plays a diagonal row, not a cardinal one.
+        let cases = [
+            (Vec2::new(1.0, 0.0), Facing::SE),
+            (Vec2::new(-1.0, 0.0), Facing::NW),
+            (Vec2::new(0.0, 1.0), Facing::SW),
+            (Vec2::new(0.0, -1.0), Facing::NE),
+            (Vec2::new(1.0, 1.0), Facing::S),
+            (Vec2::new(-1.0, -1.0), Facing::N),
+            (Vec2::new(1.0, -1.0), Facing::E),
+            (Vec2::new(-1.0, 1.0), Facing::W),
+        ];
+        for (ground, facing) in cases {
+            assert_eq!(Facing::of_ground(ground), facing, "{ground}");
+            // And a walk a little off the line still reads the same way.
+            let off = Vec2::from_angle(0.3).rotate(ground);
+            assert_eq!(Facing::of_ground(off), facing, "{off}");
+        }
+        // The shipped route runs from the depot to a grove nineteen tiles
+        // across and eighteen up: straight up the board.
+        assert_eq!(Facing::of_ground(Vec2::new(-19.0, -18.0)), Facing::N);
+        assert_eq!(Facing::of_ground(Vec2::new(19.0, 18.0)), Facing::S);
+        // And standing still faces the way the idle is drawn.
+        assert_eq!(Facing::of(Vec2::ZERO), Facing::SE);
+    }
+
+    #[test]
+    fn a_step_is_the_same_length_whichever_way_it_is_taken() {
+        // The stride was read off the down-right walk, so that direction is
+        // unchanged, and every other direction takes the same step on the
+        // ground rather than the same number of pixels on the screen.
+        let down_right = Vec2::new(3.0, 0.0);
+        assert!((walked_texels(down_right) - isometric::project(down_right).length()).abs() < 1e-4);
+        for facing in 0..16 {
+            let step = Vec2::from_angle(facing as f32 * std::f32::consts::TAU / 16.0) * 3.0;
+            assert!((walked_texels(step) - walked_texels(down_right)).abs() < 1e-4);
+        }
     }
 
     #[test]
@@ -671,29 +1223,42 @@ mod tests {
         // camera's zoom floor is "a monkey is at least 44 logical pixels", the
         // support fan is measured against a monkey's width, and the swarm's
         // corridor was picked so a crowd of them fits a gap. Measured off the
-        // frames that are actually played, every one of them, rather than off
-        // a constant: the art may be redrawn, and the monkey must still come
-        // out the height the board expects.
-        let idle = png("Monkey/Spider Worker/spider_monkey_idle_sheet.png");
-        let walk = png("Monkey/Spider Worker/spider_monkey_walk_sheet.png");
+        // frames that are actually played, every one of them in every
+        // direction, rather than off a constant.
+        let idle = png(IDLE_SHEET);
         let cell = WORKER.canvas.x as u32;
-        for (sheet, frames) in [(&idle, IDLE_FRAMES), (&walk, WALK_FRAMES)] {
-            for frame in 0..frames {
-                let (top, bottom) = opaque_rows(sheet, frame, cell);
-                let drawn = (bottom + 1 - top) as f32 * ART_SCALE;
-                assert!(
-                    (26.0..=30.0).contains(&drawn),
-                    "frame {frame} draws {drawn} texels tall"
-                );
-                assert!(
-                    drawn * 2.0 >= 42.0,
-                    "at the zoom floor frame {frame} is {} px, under a thumbnail",
-                    drawn * 2.0
-                );
+        let mut frames = vec![];
+        for frame in 0..IDLE_FRAMES {
+            frames.push((&idle, frame, 0));
+        }
+        let walks = [png(WALK_SHEET), png(CARRY_SHEET)];
+        for sheet in &walks {
+            for facing in Facing::ALL {
+                for frame in 0..WALK_FRAMES {
+                    frames.push((sheet, frame, facing.row()));
+                }
             }
         }
+        for (sheet, column, row) in frames {
+            let (top, bottom) = opaque_rows(sheet, column, row, cell);
+            let drawn = (bottom + 1 - top) as f32 * ART_SCALE;
+            assert!(
+                (24.0..=30.0).contains(&drawn),
+                "row {row} frame {column} draws {drawn} texels tall"
+            );
+            assert!(
+                drawn * 2.0 >= 42.0,
+                "at the zoom floor row {row} frame {column} is {} px, under a thumbnail",
+                drawn * 2.0
+            );
+            // Every direction stands on the manifest's shared anchor row.
+            assert!(
+                bottom as f32 <= WORKER.ground.y + 2.0,
+                "row {row} frame {column} stands below the ground line at {bottom}"
+            );
+        }
         // And the rows things are placed against are where the art has them.
-        let (top, _) = opaque_rows(&idle, 0, cell);
+        let (top, _) = opaque_rows(&idle, 0, 0, cell);
         assert_eq!(top as f32, WORKER_TOP_ROW, "the tail tip moved");
         let (width, _, data) = &idle;
         let crown = (0..cell)
@@ -703,13 +1268,180 @@ mod tests {
     }
 
     #[test]
+    fn the_bunch_plays_its_manifest() {
+        let bunch = manifest("Banana/banana-bunch.json");
+        assert_eq!(bunch["anchor"]["x"], 24);
+        assert_eq!(bunch["anchor"]["y"], 36);
+        for clip in Bunch::ALL {
+            let name = format!("{clip:?}").to_lowercase();
+            let entry = &bunch["animations"][&name];
+            assert!(
+                BUNCH.canvas.x > 0.0
+                    && Bunch::path(clip).ends_with(entry["image"].as_str().unwrap())
+            );
+            assert_eq!(entry["loop"].as_bool().unwrap(), clip.loops(), "{name}");
+            let holds: Vec<f32> = entry["frames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|frame| frame["durationMs"].as_f64().unwrap() as f32 / 1000.0)
+                .collect();
+            assert_eq!(holds.len(), clip.durations().len(), "{name}");
+            for (ours, theirs) in clip.durations().iter().zip(&holds) {
+                assert!((ours - theirs).abs() < 1e-6, "{name}");
+            }
+        }
+        // And the seams the manifest promises: spawn settles on the still, the
+        // idle starts and ends on it, and the despawn leaves nothing behind.
+        let still = png(Bunch::Still.path());
+        let size = UVec2::splat(48);
+        let resting = cell(&still, size, 0, 0);
+        let spawn = png(Bunch::Spawn.path());
+        assert_eq!(cell(&spawn, size, Bunch::Spawn.frames() - 1, 0), resting);
+        let idle = png(Bunch::Idle.path());
+        assert_eq!(cell(&idle, size, 0, 0), resting);
+        assert_eq!(cell(&idle, size, Bunch::Idle.frames() - 1, 0), resting);
+        let despawn = png(Bunch::Despawn.path());
+        assert_eq!(cell(&despawn, size, 0, 0), resting);
+        assert!(
+            cell(&despawn, size, Bunch::Despawn.frames() - 1, 0)
+                .iter()
+                .all(|pixel| pixel[3] == 0),
+            "the despawn ends on a visible frame"
+        );
+    }
+
+    #[test]
+    fn a_one_shot_holds_its_last_frame_and_a_loop_wraps() {
+        let mut spawn = Playhead::default();
+        let total: f32 = Bunch::Spawn.durations().iter().sum();
+        assert!(!spawn.advance(Bunch::Spawn.durations(), false, total * 0.5));
+        let mut finished = false;
+        for _ in 0..20 {
+            finished |= spawn.advance(Bunch::Spawn.durations(), false, 0.1);
+        }
+        assert!(finished);
+        assert_eq!(spawn.frame, Bunch::Spawn.frames() - 1, "a one-shot wrapped");
+
+        let mut idle = Playhead::default();
+        let lap: f32 = Bunch::Idle.durations().iter().sum();
+        assert!((lap - 2.8).abs() < 1e-4, "the idle runs {lap} s");
+        for _ in 0..28 {
+            assert!(!idle.advance(Bunch::Idle.durations(), true, 0.1));
+        }
+        assert_eq!(idle.frame, 0, "a lap of the idle does not come back round");
+    }
+
+    #[test]
+    fn the_cart_plays_its_manifest() {
+        let cart = manifest("BananaCart/banana-cart.json");
+        assert_eq!(cart["anchor"]["x"], 104);
+        assert_eq!(cart["anchor"]["y"], 126);
+        let names: Vec<&str> = cart["directions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap())
+            .collect();
+        let ours: Vec<String> = Facing::ALL.iter().map(|f| format!("{f:?}")).collect();
+        assert_eq!(names, ours);
+        for entry in cart["clips"].as_array().unwrap() {
+            let clip = match entry["state"].as_str().unwrap() {
+                "travel_empty" => CartClip::TravelEmpty,
+                "fill" => CartClip::Fill,
+                "travel_full" => CartClip::TravelFull,
+                "offload" => CartClip::Offload,
+                other => panic!("an unplayed state {other}"),
+            };
+            assert!(clip.path().ends_with(entry["sheet"].as_str().unwrap()));
+            assert_eq!(
+                entry["loop"].as_bool().unwrap(),
+                matches!(clip, CartClip::TravelEmpty | CartClip::TravelFull)
+            );
+            let direction = entry["direction"].as_str().unwrap();
+            let facing = Facing::ALL
+                .into_iter()
+                .find(|f| format!("{f:?}") == direction)
+                .unwrap();
+            let frames = entry["frames"].as_array().unwrap();
+            assert_eq!(frames.len() as u32, clip.frames());
+            for (frame, rect) in frames.iter().enumerate() {
+                let index = cart_index(clip, facing, frame as u32) as u64;
+                let columns = u64::from(clip.frames());
+                assert_eq!(rect["x"].as_u64().unwrap(), index % columns * 208);
+                assert_eq!(rect["y"].as_u64().unwrap(), index / columns * 176);
+                let hold = rect["durationMs"].as_f64().unwrap() as f32 / 1000.0;
+                assert!((hold - clip.frame_seconds()).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn the_cart_clips_meet_pixel_for_pixel() {
+        // What lets a parked cart go into and out of its fill and offload
+        // without a pop: the one-shots begin and end on the travel loops'
+        // first frames, in every direction.
+        let sheets = CartClip::ALL.map(|clip| png(clip.path()));
+        let size = CART.canvas.as_uvec2();
+        let frame = |clip: CartClip, facing: Facing, at: u32| {
+            cell(&sheets[clip.index()], size, at, facing.row())
+        };
+        for facing in Facing::ALL {
+            let empty = frame(CartClip::TravelEmpty, facing, 0);
+            let full = frame(CartClip::TravelFull, facing, 0);
+            assert!(
+                frame(CartClip::Fill, facing, 0) == empty,
+                "{facing:?}: fill starts off"
+            );
+            assert!(
+                frame(CartClip::Fill, facing, 23) == full,
+                "{facing:?}: fill ends off"
+            );
+            assert!(
+                frame(CartClip::Offload, facing, 0) == full,
+                "{facing:?}: offload starts off"
+            );
+            assert!(
+                frame(CartClip::Offload, facing, 23) == empty,
+                "{facing:?}: offload ends off"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ground_atlas_is_read_where_its_manifest_packs_it() {
+        let ground = manifest("Ground/ground-atlas.json");
+        assert_eq!(ground["tileWidth"].as_f64().unwrap() as f32, GROUND_TILE.x);
+        assert_eq!(ground["tileHeight"].as_f64().unwrap() as f32, GROUND_TILE.y);
+        assert_eq!(ground["cornerBits"]["top"], 1);
+        assert_eq!(ground["cornerBits"]["right"], 2);
+        assert_eq!(ground["cornerBits"]["bottom"], 4);
+        assert_eq!(ground["cornerBits"]["left"], 8);
+        let tiles = ground["tiles"].as_array().unwrap();
+        assert_eq!(tiles.len(), 64);
+        for tile in tiles {
+            let mask = tile["mask"].as_u64().unwrap() as u8;
+            let variant = tile["variant"].as_u64().unwrap() as u8;
+            let (min, max) = ground_uv(mask, variant);
+            let x = tile["x"].as_f64().unwrap() as f32;
+            let y = tile["y"].as_f64().unwrap() as f32;
+            assert_eq!(
+                min * GROUND_ATLAS,
+                Vec2::new(x, y),
+                "mask {mask} variant {variant}"
+            );
+            assert_eq!(max * GROUND_ATLAS - min * GROUND_ATLAS, GROUND_TILE);
+        }
+    }
+
+    #[test]
     fn a_ground_anchor_puts_the_art_ground_on_the_transform() {
         // Bevy draws a sprite so that the point `(0.5 + anchor) * size` from
         // its bottom-left sits on the transform. The art says where its ground
         // is from the top-left. Getting that conversion wrong does not look
         // like a bug, it looks like everything hovering - so this checks the
         // geometry rather than restating the formula.
-        for cell in [WORKER, PLANT, TOWN_CENTRE] {
+        for cell in [WORKER, PLANT, TOWN_CENTRE, BUNCH, CART] {
             let size = cell.size();
             let from_bottom_left = (Vec2::splat(0.5) + cell.anchor().0) * size;
             let ground = Vec2::new(cell.ground.x, cell.canvas.y - cell.ground.y) * cell.texels();
@@ -762,10 +1494,11 @@ mod tests {
 
     #[test]
     fn the_treehouse_split_draws_exactly_the_artists_picture() {
-        // The house is drawn as two sprites - its ground paint flat under the
-        // glow and the shadows, the structure at the house's depth - exported
-        // from the master's own layers. Drawn one over the other they must be
-        // the artist's picture, pixel for pixel: nothing lost at the seam, and
+        // The house is drawn as three sprites - its ground paint flat under
+        // the glow and the shadows, the structure at the house's depth, the
+        // bins at the ground *they* stand on (D31) - exported from the
+        // master's own layers. Drawn one over another they must be the
+        // artist's picture, pixel for pixel: nothing lost at either seam, and
         // no ground-layer pixel that the artist painted *over* the house now
         // drawn under it.
         let whole = png("TownCenter/town-center.png");
@@ -782,9 +1515,9 @@ mod tests {
                     image.2[at + 3],
                 ]
             };
-            // Nearest first: the bins stand in front of the house, the house in
-            // front of its own shade. That is the order the three are drawn in,
-            // and it is the artist's own layer order.
+            // Nearest first: the bins stand in front of the house, the house
+            // in front of its own shade. That is the order the three are drawn
+            // in, and it is the artist's own layer order.
             let drawn = [&bins, &structure, &ground]
                 .into_iter()
                 .map(pixel)
@@ -824,6 +1557,32 @@ mod tests {
             }
         }
         (min, max)
+    }
+
+    #[test]
+    fn the_cart_never_draws_above_its_measured_top() {
+        // `CART_TOP_ROW` is what the cart yard's spacing is set against, so it
+        // has to be the row the art really reaches - across every clip and
+        // every facing, because a single frame that reaches higher is the one
+        // that would clip the bins.
+        // Scanned against the cart's own cell rather than through
+        // `opaque_rows`, which takes one `size` and so assumes a square cell.
+        // A cart's is 208 x 176.
+        let (cell_x, cell_y) = (CART.canvas.x as u32, CART.canvas.y as u32);
+        let mut highest = cell_y;
+        for clip in CartClip::ALL {
+            let (width, _, data) = png(clip.path());
+            let alpha = |x: u32, y: u32| data[((y * width + x) * 4 + 3) as usize];
+            for row in 0..Facing::ALL.len() as u32 {
+                for column in 0..clip.frames() {
+                    let top = (0..cell_y).find(|&y| {
+                        (0..cell_x).any(|x| alpha(column * cell_x + x, row * cell_y + y) > 0)
+                    });
+                    highest = highest.min(top.expect("every cart cell is drawn"));
+                }
+            }
+        }
+        assert_eq!(highest as f32, CART_TOP_ROW);
     }
 
     #[test]
@@ -883,35 +1642,37 @@ mod tests {
     }
 
     #[test]
-    fn every_courier_sheet_is_eight_bearings_of_the_squirrel_monkey() {
-        // The sheets are grids, not strips: one row per screen bearing. A cell
-        // size or a row count that disagrees with the file does not fail, it
-        // draws a courier facing north-east while it walks south.
-        for (path, frames) in [
-            ("Monkey/Squirrel Unpacker/squirrel-monkey-idle.png", 4),
-            ("Monkey/Squirrel Unpacker/squirrel-monkey-dart.png", 8),
-            ("Monkey/Squirrel Unpacker/squirrel-monkey-carry.png", 8),
-        ] {
-            let (width, height, _) = png(path);
-            assert_eq!(width as f32, SQUIRREL.canvas.x * frames as f32, "{path}");
-            assert_eq!(
-                height as f32,
-                SQUIRREL.canvas.y * COURIER_HEADINGS as f32,
-                "{path}"
-            );
+    fn every_courier_clip_is_eight_bearings_of_the_squirrel_monkey() {
+        // The sheets are grids, one row per facing, and they are read through
+        // the same `Facing` the workers and carts are - so a courier heading
+        // north-east while it walks south is a mis-indexed row, not a missing
+        // sheet. `every_cell_matches_the_file_it_is_drawn_from` holds the
+        // sizes; this holds the indexing and the manifest's own anchor.
+        let clips = manifest("Monkey/Squirrel Unpacker/squirrel-monkey.json");
+        assert_eq!(clips["anchor"]["x"], 32);
+        assert_eq!(clips["anchor"]["y"], 56);
+        assert_eq!(clips["cell"]["width"], 64);
+        assert_eq!(clips["cell"]["height"], 64);
+
+        for clip in Courier::ALL {
+            // Row-major, and never mirrored: the artist drew all eight.
+            for (row, facing) in Facing::ALL.into_iter().enumerate() {
+                assert_eq!(
+                    clip.cell(facing, 0),
+                    row * clip.frames() as usize,
+                    "{clip:?} {facing:?}"
+                );
+            }
+            assert_eq!(clip.cell(Facing::N, clip.frames()), 0, "{clip:?} wraps");
         }
+        assert_eq!(Courier::Carry.cell(Facing::SE, 2), 3 * 8 + 2);
+        assert_eq!(Courier::Idle.cell(Facing::E, 1), 2 * 4 + 1);
+
         // And the courier is the smaller animal at the shared scale: both cells
         // are 64 x 64 with their ground anchor on the same row, so what says
-        // "smaller" is how much less of the cell the squirrel fills. Its first
-        // cell only - the sheets are grids, and a whole-sheet scan would
-        // measure all eight bearings stacked.
-        let squirrel = png("Monkey/Squirrel Unpacker/squirrel-monkey-idle.png");
-        let top = (0..SQUIRREL.canvas.y as u32)
-            .find(|&y| {
-                (0..SQUIRREL.canvas.x as u32)
-                    .any(|x| squirrel.2[((y * squirrel.0 + x) * 4 + 3) as usize] > 0)
-            })
-            .expect("the courier's first cell is drawn");
+        // "smaller" is how much less of the cell the squirrel fills.
+        let squirrel = png(Courier::Idle.path());
+        let (top, _) = opaque_rows(&squirrel, 0, 0, SQUIRREL.canvas.x as u32);
         assert!(
             top as f32 > WORKER_TOP_ROW,
             "the courier tops out at row {top}, no lower than the worker's {WORKER_TOP_ROW}"
@@ -923,40 +1684,21 @@ mod tests {
     }
 
     #[test]
-    fn a_courier_bearing_is_read_clockwise_from_up_the_screen() {
-        // The sheets run N, NE, E, SE, S, SW, W, NW down the rows. Getting this
-        // backwards is invisible in a still and unmistakable in motion.
-        let named = [
-            (Vec2::new(0.0, 1.0), 0),
-            (Vec2::new(1.0, 1.0), 1),
-            (Vec2::new(1.0, 0.0), 2),
-            (Vec2::new(1.0, -1.0), 3),
-            (Vec2::new(0.0, -1.0), 4),
-            (Vec2::new(-1.0, -1.0), 5),
-            (Vec2::new(-1.0, 0.0), 6),
-            (Vec2::new(-1.0, 1.0), 7),
-        ];
-        for (travel, row) in named {
-            assert_eq!(Courier::heading(travel, 3), row, "{travel:?}");
-        }
-        // A courier that has stopped keeps the row it was facing rather than
-        // snapping north.
-        assert_eq!(Courier::heading(Vec2::ZERO, 5), 5);
-        // And a cell is a row of the grid, never a bare frame index.
-        assert_eq!(Art::courier_cell(Courier::Carry, 3, 2), 3 * 8 + 2);
-        assert_eq!(Art::courier_cell(Courier::Idle, 2, 1), 2 * 4 + 1);
-    }
-
-    #[test]
     fn the_treehouse_fits_the_tightest_safe_area() {
         // The deviation from the shared scale exists for one reason, so hold
         // it to that reason: its opaque art, at the zoom floor, fits the
         // 286-pixel square an 844x390 phone leaves. Raise the scale and this
         // is what says by how much it now covers the village.
-        let whole = png("TownCenter/town-center.png");
-        let (width, _, data) = &whole;
-        let (width, data) = (*width, data.clone());
-        let (min, max) = opaque_bounds(&whole);
+        let (width, height, data) = png("TownCenter/town-center.png");
+        let (mut min, mut max) = (UVec2::MAX, UVec2::ZERO);
+        for y in 0..height {
+            for x in 0..width {
+                if data[((y * width + x) * 4 + 3) as usize] > 0 {
+                    min = min.min(UVec2::new(x, y));
+                    max = max.max(UVec2::new(x, y));
+                }
+            }
+        }
         // The middle the opening view centres on is the middle of these.
         assert_eq!((min, max), (UVec2::new(63, 38), UVec2::new(574, 606)));
         assert_eq!(

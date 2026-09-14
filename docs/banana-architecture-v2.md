@@ -1221,7 +1221,9 @@ The near row fills first, so a yard fills *towards* the viewer.
 *The Unpacker is a squirrel monkey courier.* `assets/Monkey/Squirrel Unpacker` is
 a smaller animal drawn in eight screen bearings with an empty dart, a loaded
 carry and an idle, against the same 64 × 64 cell and ground line as the spider
-worker. One is drawn per Unpacker hired, and each is placed **on the line between
+worker — and read through the same `art::Facing` the workers and the carts are,
+so there is one answer in the codebase to "which way is this thing pointing"
+rather than a courier-shaped second one. One is drawn per Unpacker hired, and each is placed **on the line between
 a harvester that is unloading and the bins**, running out empty and back loaded,
 standing still through the take and the drop. Nothing about it reaches the
 economy: `M_unpack` shortens `Segment::Unload` exactly as it did, and the shuttle
@@ -1264,9 +1266,16 @@ with no harvester to help waits rather than inventing work, so at low worker
 counts the squirrels are still most of the time. The fallen bunch beside the
 third bin came across with the bins rather than staying with the house: it
 overlaps a bin's front corner, and left behind it bit a notch out of the box the
-moment the two were drawn apart. And the cart's own box is still the placeholder
-rectangle D23 left: at a whole cart's spacing the rank reads, but a flat brown
-slab with no rim is why it needed that much spacing to read at all.
+moment the two were drawn apart.
+
+The rank's four-metre spacing was set against D23's placeholder rectangle, which
+is why it needed a whole cart's width to read at all: a flat brown slab with no
+rim has no silhouette to separate. The carts are drawn vehicles now, with a crew
+and a visible load, so the spacing is looser than it strictly has to be — worth
+re-measuring in a playtest before it is taken as settled. The same change made
+the rank *taller* than the bins behind it, which is what `CART_TOP_ROW` and the
+standoff exist to keep clear of: the carts' boxes are the point of the yard, and
+a rank that hides them makes it a car park.
 
 ---
 

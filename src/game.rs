@@ -254,6 +254,7 @@ impl Plugin for PresentationPlugin {
                     support::sync_support_avatars,
                     support::sync_support_badges,
                     animate_banana,
+                    animate_collected,
                     place_held_banana,
                     sync_recentre_button,
                     // Before the two systems that consume what it produces, so
@@ -328,9 +329,22 @@ pub(crate) struct CartYardLabel;
 #[derive(Component)]
 struct Banana;
 
+/// Which of the bunch's clips the player's banana is playing, and where it has
+/// got to: see [`animate_banana`].
 #[derive(Component)]
 struct BananaAnimation {
-    timer: Timer,
+    clip: art::Bunch,
+    head: art::Playhead,
+}
+
+/// A bunch the player has just delivered, playing its despawn where it was
+/// dropped and then removed. Its own entity, so the next bunch can grow in at
+/// the home tree while this one is still leaving.
+#[derive(Component)]
+struct Collected {
+    /// Where it was dropped, in metres on the ground.
+    ground: Vec2,
+    head: art::Playhead,
 }
 
 /// A rising "+n" over the stall. Two sources, two colours, two magnitudes, so
@@ -683,7 +697,7 @@ const CART_BINS_OFFSET: Vec2 = Vec2::new(-4.0, 12.0);
 /// standoff is 31 texels of lift, and
 /// `the_cart_rank_never_hides_the_bins_it_unloads_into` is what holds the
 /// margin that leaves.
-const CART_PARK_STANDOFF: f32 = 5.5;
+const CART_PARK_STANDOFF: f32 = 6.5;
 /// And how far apart two bays are, in metres along the ground's x axis.
 ///
 /// Along a ground axis rather than across the screen, which is half the point:
@@ -1589,17 +1603,19 @@ fn setup(
         LayoutElement::HarvestHint,
     ));
 
-    // The drawn banana, spinning where it lies: the one thing on the board
+    // The drawn bunch, glinting where it lies: the one thing on the board
     // that moves for no reason but to be noticed, which is what a pickup is.
-    // Anchored at its bottom edge, so it lies *on* the ground at its feet.
+    // Anchored where the artist put its ground, so it lies *on* the ground at
+    // its feet, in its own drawn shadow.
     commands.spawn((
-        art.banana(art::BANANA_TEXELS, 0),
-        bevy::sprite::Anchor::BOTTOM_CENTER,
+        art.bunch(art::Bunch::Idle, 0),
+        art::BUNCH.anchor(),
         Transform::default(),
         Banana,
         LayoutElement::Banana,
         BananaAnimation {
-            timer: Timer::new(Duration::from_secs_f32(1.0 / 12.0), TimerMode::Repeating),
+            clip: art::Bunch::Idle,
+            head: art::Playhead::default(),
         },
     ));
     // And its shadow, which stays on the ground while the banana is carried:
@@ -1777,9 +1793,10 @@ fn apply_layout(
                 transform.scale = board_scale;
             }
             LayoutElement::Banana => {
-                // Placed by `place_held_banana`, after input. One art pixel to one board texel, at every zoom, held or not:
-                // a whole-number scale is what keeps a sixteen-pixel sprite from
-                // crawling as it moves.
+                // Placed by `place_held_banana`, after input. Drawn at the
+                // board's own scale, held or not, like every other piece of
+                // art: a bunch in the hand is the size of the bunch it was
+                // lying on the ground.
                 transform.scale = board_scale;
             }
             LayoutElement::BananaShadow => {
@@ -3218,7 +3235,10 @@ fn move_keyboard_harvest(
 /// there is exactly one path from "bananas were earned" to "the treasury says
 /// so". The interaction resets here, in the frame the player acted; the credit
 /// lands on the next fixed tick.
+#[allow(clippy::too_many_arguments)]
 fn queue_manual_settlement(
+    mut commands: Commands,
+    art: Res<art::Art>,
     frame_count: Res<FrameCount>,
     mut controller: ResMut<HarvestController>,
     mut pending: ResMut<PendingSettlement>,
@@ -3243,6 +3263,26 @@ fn queue_manual_settlement(
         });
         controller.interaction = HarvestInteraction::Idle;
         banana.translation = layout.banana_home().extend(isometric::OVERLAY_Z);
+        // The delivered bunch is collected where it was dropped - lifted,
+        // shrunk and gone - while the next grows in at the home tree.
+        let dropped = match interaction_before {
+            HarvestInteraction::Dragging { position, .. } => layout.ground(position),
+            _ => layout.town_centre(),
+        };
+        commands.spawn((
+            art.bunch(art::Bunch::Despawn, 0),
+            art::BUNCH.anchor(),
+            Transform::from_translation(
+                layout
+                    .board(dropped)
+                    .extend(isometric::stand_z(dropped, 0.0)),
+            )
+            .with_scale(Vec3::new(layout.world_scale(), layout.world_scale(), 1.0)),
+            Collected {
+                ground: dropped,
+                head: art::Playhead::default(),
+            },
+        ));
     }
     diagnostic_log!(
         frame_count,
@@ -3366,7 +3406,7 @@ fn place_held_banana(
     layout: Res<SceneLayout>,
     controller: Res<HarvestController>,
     mut banana: Single<&mut Transform, (With<Banana>, Without<BananaShadow>)>,
-    mut shadow: Single<&mut Transform, (With<BananaShadow>, Without<Banana>)>,
+    mut shadow: Single<(&mut Transform, &mut Visibility), (With<BananaShadow>, Without<Banana>)>,
 ) {
     let ground = match controller.interaction {
         // Lying where it rests, sorted with the world: in front of the plant
@@ -3391,18 +3431,78 @@ fn place_held_banana(
                 .lerp(layout.town_centre(), ease(progress))
         }
     };
-    shadow.translation = layout.board(ground).extend(isometric::MARK_Z);
+    let (at, visibility) = &mut *shadow;
+    at.translation = layout.board(ground).extend(isometric::MARK_Z);
+    // Lying, the bunch stands in the shadow the artist drew under it. The cast
+    // one marks where a *lifted* bunch would land, so it is shown only then.
+    let shown = if matches!(controller.interaction, HarvestInteraction::Idle) {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    if **visibility != shown {
+        **visibility = shown;
+    }
 }
 
+/// The player's bunch: glinting where it lies, still in the hand, and growing
+/// back into place whenever it comes home - delivered, or put back.
+///
+/// Spawn and despawn are the artist's one-shots and play once at their own
+/// pace; the idle loops. Held, it is the still, because a glint crossing a
+/// bunch that is swinging under a thumb reads as a flicker.
 fn animate_banana(
     time: Res<Time>,
+    art: Res<art::Art>,
+    controller: Res<HarvestController>,
     mut banana: Single<(&mut BananaAnimation, &mut Sprite), With<Banana>>,
 ) {
-    banana.0.timer.tick(time.delta());
-    if banana.0.timer.just_finished()
-        && let Some(atlas) = banana.1.texture_atlas.as_mut()
-    {
-        atlas.index = (atlas.index + 1) % art::BANANA_FRAMES as usize;
+    let (animation, sprite) = &mut *banana;
+    let lying = matches!(controller.interaction, HarvestInteraction::Idle);
+    let wanted = match (lying, animation.clip) {
+        (false, _) => art::Bunch::Still,
+        (true, art::Bunch::Still) => art::Bunch::Spawn,
+        (true, clip) => clip,
+    };
+    if animation.clip != wanted {
+        animation.clip = wanted;
+        animation.head = art::Playhead::default();
+    }
+    let clip = animation.clip;
+    let finished = animation
+        .head
+        .advance(clip.durations(), clip.loops(), time.delta_secs());
+    if finished && clip == art::Bunch::Spawn {
+        animation.clip = art::Bunch::Idle;
+        animation.head = art::Playhead::default();
+    }
+    art.pose_bunch(sprite, animation.clip, animation.head.frame);
+}
+
+/// Play every delivered bunch's despawn where it was dropped, and remove it
+/// once it has gone. Placed every frame from the ground it was dropped on, so
+/// it stays there through a pan or a pinch.
+fn animate_collected(
+    mut commands: Commands,
+    time: Res<Time>,
+    art: Res<art::Art>,
+    layout: Res<SceneLayout>,
+    mut bunches: Query<(Entity, &mut Collected, &mut Transform, &mut Sprite)>,
+) {
+    let scale = Vec3::new(layout.world_scale(), layout.world_scale(), 1.0);
+    for (entity, mut collected, mut transform, mut sprite) in &mut bunches {
+        let ground = collected.ground;
+        transform.translation = layout.board(ground).extend(isometric::stand_z(ground, 0.0));
+        transform.scale = scale;
+        let clip = art::Bunch::Despawn;
+        if collected
+            .head
+            .advance(clip.durations(), clip.loops(), time.delta_secs())
+        {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        art.pose_bunch(&mut sprite, clip, collected.head.frame);
     }
 }
 

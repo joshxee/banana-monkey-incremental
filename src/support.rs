@@ -21,7 +21,7 @@
 use bevy::prelude::*;
 
 use crate::{
-    art::{self, Art, Clip, Courier},
+    art::{self, Art, Clip, Courier, Facing},
     domain::{
         HarvestCycle, SUPPORT_MEAL_PERIOD, SUPPORT_PHASE_STRIDE, Segment, Staff, SupportCycle,
         SupportRole,
@@ -399,39 +399,39 @@ pub(crate) fn sync_support_avatars(
         let station = layout.support_point(avatar.role, slot_offset(avatar.slot));
         let mut point = station;
 
-        // Walking out of the bins to the station, on the walk loop, its feet
-        // gripping the ground the same way a harvester's do; then standing.
+        // Which side of the monkey its head is on, for the props below.
+        let mut heading_left = sprite.flip_x;
+
+        // Walking out of the bins to the station, on the walk row for the way
+        // it is going, its feet gripping the ground the same way a
+        // harvester's do; then standing.
         if let Some(mut arriving) = arriving {
             arriving.0 += time.delta_secs();
             let from = layout.town_centre();
             let t = (arriving.0 / ARRIVE_SECONDS).clamp(0.0, 1.0);
             point = from.lerp(station, t * t * (3.0 - 2.0 * t));
-            let (clip, frame, flip) = if t < 1.0 {
+            let (clip, frame, facing) = if t < 1.0 {
                 // Seeded per slot, so a fan hired together does not step in
                 // lockstep - the formation read `Playing::starting` avoids.
-                let stride = isometric::project(point - from).length() / art::WALK_STRIDE_TEXELS
+                let stride = art::walked_texels(point - from) / art::WALK_STRIDE_TEXELS
                     + avatar.slot as f32 * 0.618_034;
-                let facing_left = isometric::project(station - from).x < 0.0;
-                (Clip::Walk, Clip::walk_frame(stride), facing_left)
+                (
+                    Clip::Walk,
+                    Clip::walk_frame(stride),
+                    Facing::of_ground(station - from),
+                )
             } else {
                 commands.entity(entity).remove::<Arriving>();
-                (Clip::Idle, avatar.slot as u32 % Clip::Idle.frames(), false)
+                (
+                    Clip::Idle,
+                    avatar.slot as u32 % Clip::Idle.frames(),
+                    Facing::SE,
+                )
             };
-            let (image, sheet) = art.clip(clip);
-            if sprite.image != image {
-                sprite.image = image;
-            }
-            if let Some(atlas) = sprite.texture_atlas.as_mut() {
-                if atlas.layout != sheet {
-                    atlas.layout = sheet;
-                }
-                if atlas.index != frame as usize {
-                    atlas.index = frame as usize;
-                }
-            }
-            if sprite.flip_x != flip {
-                sprite.flip_x = flip;
-            }
+            art.pose(&mut sprite, clip, facing, frame);
+            // A walk is never mirrored - its left-facing rows are drawn - so
+            // the head's side comes from the facing rather than the flip.
+            heading_left = facing.mirrors_idle();
         }
 
         // No lift: the art carries its own ground anchor, so the ground
@@ -479,7 +479,7 @@ pub(crate) fn sync_support_avatars(
             sprite.color = monkey;
         }
 
-        let facing = if sprite.flip_x { -1.0 } else { 1.0 };
+        let facing = if heading_left { -1.0 } else { 1.0 };
         for child in children.into_iter().flatten() {
             if let Ok((role_box, mut at)) = boxes.get_mut(*child) {
                 let x = role_box.base_x * facing;
@@ -539,7 +539,7 @@ fn spawn_avatar(
     // frame is the slot's own, so a fan of three is not one pose repeated.
     let mut spawned = commands.spawn((
         SupportAvatar { role, slot },
-        art.worker(Clip::Idle, slot as u32),
+        art.worker(Clip::Idle, Facing::SE, slot as u32),
         art::WORKER.anchor(),
         Transform::from_scale(Vec3::new(scale, scale, 1.0)),
     ));
@@ -758,7 +758,7 @@ pub(crate) struct CourierAvatar {
 #[derive(Component, Debug)]
 pub(crate) struct CourierPlaying {
     clip: Courier,
-    heading: u32,
+    facing: Facing,
     frame: u32,
     elapsed: f32,
     stride: f32,
@@ -783,7 +783,11 @@ impl CourierPlaying {
     /// Advance the playhead by one frame, having been drawn `step` texels along
     /// the board.
     fn advance(&mut self, step: Vec2, delta: f32) {
-        self.heading = Courier::heading(step, self.heading);
+        // A courier that has stopped keeps the way it was facing, rather than
+        // snapping north on the frame it pauses to take or to drop.
+        if step.length_squared() > f32::EPSILON {
+            self.facing = Facing::of(step);
+        }
         match self.clip {
             Courier::Idle => {
                 // Capped before the loop spends it, exactly as `animate_workers`
@@ -807,17 +811,15 @@ impl CourierPlaying {
     /// Stand still, facing the viewer.
     ///
     /// Squared up rather than left on whatever bearing the last run ended on.
-    /// The sheets are drawn in eight directions and half of them are a grey back
-    /// on green grass; a rank of couriers waiting at the boxes should be looking
-    /// out of the screen, the way the spawn already sets them.
+    /// All eight directions are drawn and half of them are a grey back on green
+    /// grass; a rank of couriers waiting at the boxes should be looking out of
+    /// the screen - and `Facing::SE` is the facing every other standing monkey
+    /// in the scene waits on.
     fn wait(&mut self) {
         self.clip = Courier::Idle;
-        self.heading = COURIER_FACING_VIEWER;
+        self.facing = Facing::SE;
     }
 }
-
-/// The sheet row that faces the viewer: south, the fourth of N, NE, E, SE, S.
-const COURIER_FACING_VIEWER: u32 = 4;
 
 /// How many monkeys of a role the scene draws before the count moves to a badge.
 pub(crate) fn drawn_for(role: SupportRole, layout: &SceneLayout) -> usize {
@@ -983,28 +985,17 @@ pub(crate) fn sync_couriers(
             }
         };
 
-        // The bearing comes from the ground actually covered, projected: the
-        // sheets are drawn in screen compass directions, so a ground heading
-        // read straight off would face a courier up a diagonal it is not on.
+        // The facing comes from the ground actually covered, projected, which
+        // is what `Facing::of` wants: the sheets are drawn in screen compass
+        // directions, so a ground heading read straight off would face a
+        // courier up a diagonal it is not on.
         if let Some(last) = playing.last {
             let step = isometric::project(point - last);
             playing.advance(step, time.delta_secs());
         }
         playing.last = Some(point);
 
-        let (image, sheet) = art.courier_clip(playing.clip);
-        if sprite.image != image {
-            sprite.image = image;
-        }
-        let cell = Art::courier_cell(playing.clip, playing.heading, playing.frame);
-        if let Some(atlas) = sprite.texture_atlas.as_mut() {
-            if atlas.layout != sheet {
-                atlas.layout = sheet;
-            }
-            if atlas.index != cell {
-                atlas.index = cell;
-            }
-        }
+        art.pose_courier(&mut sprite, playing.clip, playing.facing, playing.frame);
 
         transform.translation = layout.board_snapped(point, 0.0).extend(isometric::stand_z(
             point,
@@ -1059,7 +1050,7 @@ fn spawn_courier(commands: &mut Commands, art: &Art, layout: &SceneLayout, index
             CourierAvatar { index },
             CourierPlaying {
                 clip: Courier::Idle,
-                heading: COURIER_FACING_VIEWER,
+                facing: Facing::SE,
                 frame: index as u32 % Courier::Idle.frames(),
                 elapsed: 0.0,
                 stride: (index as f32 * 0.618_034).fract(),
@@ -1067,7 +1058,7 @@ fn spawn_courier(commands: &mut Commands, art: &Art, layout: &SceneLayout, index
                 serving: None,
                 run: 0.0,
             },
-            art.courier(Courier::Idle, COURIER_FACING_VIEWER, index as u32),
+            art.courier(Courier::Idle, Facing::SE, index as u32),
             art::SQUIRREL.anchor(),
             Transform::from_translation(
                 layout
