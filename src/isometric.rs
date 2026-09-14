@@ -133,40 +133,43 @@ pub(crate) const NUDGE_STEP: f32 = 0.0005;
 pub(crate) const BOARD_SKY: Color = Color::srgb(0.83, 0.93, 0.84);
 
 // The jungle's depths are canopy seen from above and stay flat; its edge is
-// drawn with the jungle plants, which is what has to read as a barrier. And the
-// village is the brightest ground on the board: the clearing used to be, which
-// pulled the eye into an empty corner and away from the only place anything
-// happens.
+// drawn with the jungle plants, which is what has to read as a barrier. The
+// open ground is the artist's tiles (see `ground_tile_mesh`).
 const JUNGLE_CANOPY: Color = Color::srgb(0.16, 0.34, 0.19);
-const PATH: Color = Color::srgb(0.84, 0.73, 0.51);
-const TOWN: Color = Color::srgb(0.64, 0.79, 0.46);
-const CLEARING: Color = Color::srgb(0.60, 0.71, 0.43);
 
-/// The delivery point, trodden into bare earth.
-///
-/// The town centre used to draw *nothing*. Every delivery in the game lands on
-/// it, the hand-harvest drag ends on it, and a new player opening the game was
-/// shown a flat green lawn with the word VILLAGE floating over it and asked to
-/// drag a banana onto the label. The treehouse's bins stand on it now (D30), but
-/// its ground is still what the drop target is measured from, edge to edge.
-///
-/// Painted into the ground mesh rather than built as a prop, which is what
-/// makes it free: it is the tile colour of nine tiles, so it costs no draw
-/// call, no sorting, and above all no *span* - it sits exactly at the point the
-/// board is aimed at, so it cannot push anything else off the screen.
-const DEPOT_PAD: Color = Color::srgb(0.77, 0.66, 0.50);
-/// Grass scuffed by traffic, so the pad has an edge rather than a border.
-const DEPOT_EDGE: Color = Color::srgb(0.71, 0.73, 0.48);
-
-/// How far the trodden ground reaches from the delivery point, in tiles.
-const DEPOT_RADIUS: i32 = 1;
-/// And how far the scuffing around it reaches. The standing ring is sized
-/// against this, so the pad contains the crowd that gathers on it.
+/// How far the depot reaches from the delivery point, in tiles. The standing
+/// ring is sized against this, so the depot contains the crowd that gathers on
+/// it, and the trodden plaza drawn round the bins covers all of it.
 pub(crate) const DEPOT_EDGE_REACH: i32 = 2;
-/// The drop target, in metres either side of the delivery point: exactly the
-/// ground the depot has trodden bare and scuffed, so what the player sees as the
-/// depot is what accepts the banana, edge to edge.
+/// The drop target, in metres either side of the delivery point: the depot's
+/// reach, which the plaza and the glow mark, so what the player sees as the
+/// depot is what accepts the banana.
 pub(crate) const DEPOT_REACH_METRES: f32 = (DEPOT_EDGE_REACH as f32 + 0.5) * METRE;
+
+/// The drawn ground tiles: over the flat underlay, under the treehouse's shade
+/// and everything else laid on the ground.
+const GROUND_TILE_Z: f32 = -0.95;
+
+/// Board tiles per ground tile, each way. The ground art is drawn at the shared
+/// scale like everything standing on it, and at that scale one of its 128 x 64
+/// diamonds is exactly two board tiles across.
+const GROUND_SPAN: i32 = 2;
+
+/// How far the plaza reaches, in metres along either ground axis, from the
+/// ground vertex nearest the delivery point.
+///
+/// Measured from a vertex rather than from the delivery point, so the plaza is
+/// square on the vertex grid; measured from the point, which sits a metre off
+/// the grid, it fell flush with the drop target on the side nearest the viewer.
+/// Two ground tiles each way puts every tile the target touches wholly on dirt.
+const PLAZA_METRES: f32 = 8.0;
+
+/// How near the worked route a ground vertex is trodden to dirt, in metres.
+///
+/// A little over half the diagonal of one ground tile (2.83 m), so wherever the
+/// walk crosses a tile at least one of its corners is dirt, and the trail never
+/// breaks into islands. Any narrower and a diagonal route leaves gaps.
+const TRAIL_METRES: f32 = 3.0;
 
 #[derive(Component)]
 pub(crate) struct WorldRoot;
@@ -254,61 +257,80 @@ fn diamond(tile: Tile) -> [Vec2; 4] {
     ]
 }
 
-fn terrain_colour(terrain: Terrain) -> Color {
-    match terrain {
-        Terrain::Jungle => JUNGLE_CANOPY,
-        Terrain::Path => PATH,
-        Terrain::Town => TOWN,
-        Terrain::Grove => CLEARING,
-    }
-}
-
-/// The colour of one tile of ground, with the depot trodden into it.
+/// The ground under a board tile, in flat colour: canopy where nothing is
+/// drawn over it, and the drawn material's own base colour where a ground tile
+/// is.
 ///
-/// Only walkable ground is trodden: a depot painted over the jungle wall would
-/// put bare earth up the side of a three-metre hedge.
-fn ground_colour(map: &Map, tile: Tile) -> Color {
-    let terrain = map.terrain(tile);
-    if !terrain.passable() {
-        return terrain_colour(terrain);
+/// The underlay only shows through where the tiles do not, which by design is
+/// nowhere - but a float's worth of rounding at a seam, at a zoom the player
+/// pinched to, can leave a pixel uncovered, and that pixel should be the
+/// ground it is a hole in rather than a dark green speck in the village.
+fn underlay_colour(map: &Map, trodden: &Trodden, tile: Tile) -> Color {
+    if !drawn(map, tile) {
+        return JUNGLE_CANOPY;
     }
-    let centre = map.town_centre();
-    let reach = (tile.x - centre.x).abs().max((tile.y - centre.y).abs());
-    if reach <= DEPOT_RADIUS {
-        DEPOT_PAD
-    } else if reach <= DEPOT_EDGE_REACH {
-        DEPOT_EDGE
+    // A board tile touches exactly one ground vertex: the corner of its ground
+    // tile it shares.
+    let vertex = IVec2::new(
+        (tile.x + 1).div_euclid(GROUND_SPAN),
+        (tile.y + 1).div_euclid(GROUND_SPAN),
+    );
+    if trodden.dirt(vertex) {
+        art::GROUND_DIRT
     } else {
-        terrain_colour(terrain)
+        art::GROUND_FLOOR
     }
 }
 
-/// A mesh under construction, in projected space with per-vertex colour.
+/// A mesh under construction, in projected space, with per-vertex colour or
+/// texture coordinates.
 ///
-/// Vertex colours are what let the entire ground plane be one draw call:
-/// `ColorMaterial` multiplies by them, so four and a half thousand tiles of
-/// four different terrains need one mesh and one material rather than one
+/// Either is what lets a whole ground plane be one draw call: `ColorMaterial`
+/// multiplies by the vertex colour and samples its texture at the UVs, so four
+/// and a half thousand tiles need one mesh and one material rather than one
 /// entity each.
 #[derive(Default)]
 struct MeshBuilder {
     positions: Vec<[f32; 3]>,
     colours: Vec<[f32; 4]>,
+    uvs: Vec<[f32; 2]>,
     indices: Vec<u32>,
 }
 
 impl MeshBuilder {
     fn quad(&mut self, corners: [Vec2; 4], colour: Color) {
-        let base = self.positions.len() as u32;
         let rgba = colour.to_linear().to_f32_array();
+        self.colours.extend([rgba; 4]);
+        self.corners(corners);
+    }
+
+    /// A quad showing the texture between `uv.0` (its top-left) and `uv.1`,
+    /// for corners given top-left, top-right, bottom-right, bottom-left.
+    fn textured(&mut self, corners: [Vec2; 4], (min, max): (Vec2, Vec2)) {
+        self.uvs.extend([
+            [min.x, min.y],
+            [max.x, min.y],
+            [max.x, max.y],
+            [min.x, max.y],
+        ]);
+        self.corners(corners);
+    }
+
+    fn corners(&mut self, corners: [Vec2; 4]) {
+        let base = self.positions.len() as u32;
         for corner in corners {
             self.positions.push([corner.x, corner.y, 0.0]);
-            self.colours.push(rgba);
         }
         self.indices
             .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
     fn build(self) -> Mesh {
+        // Every vertex gets a colour or none does, and the same for texture
+        // coordinates: a builder that mixed `quad` and `textured` would make a
+        // mesh with attributes shorter than its positions.
+        debug_assert!(self.colours.is_empty() || self.colours.len() == self.positions.len());
+        debug_assert!(self.uvs.is_empty() || self.uvs.len() == self.positions.len());
         // Both worlds, not `RENDER_WORLD` alone: that path *moves* the vertex
         // data out of the main-world asset, so the mesh can never be extracted
         // again. A backgrounded mobile tab that loses its WebGL context would
@@ -318,27 +340,48 @@ impl MeshBuilder {
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
         );
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colours);
+        if !self.colours.is_empty() {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colours);
+        }
+        if !self.uvs.is_empty() {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs);
+        }
         mesh.insert_indices(Indices::U32(self.indices));
         mesh
     }
 }
 
-/// The whole ground plane, as one mesh.
+/// The whole ground plane in flat colour, as one mesh: the canopy, and the
+/// underlay beneath the drawn ground.
 ///
 /// Flat, so nothing on it can occlude anything else and it needs no sorting of
 /// its own; it simply sits under everything at [`GROUND_Z`]. An entity per tile
 /// would be four and a half thousand sprites to cull and sort every frame for a
 /// surface that never changes and cannot cover a monkey.
-fn ground_mesh(map: &Map) -> Mesh {
+fn ground_mesh(map: &Map, trodden: &Trodden) -> Mesh {
     let mut builder = MeshBuilder::default();
     for y in 0..map.height() {
         for x in 0..map.width() {
             let tile = Tile::new(x, y);
-            builder.quad(diamond(tile), ground_colour(map, tile));
+            builder.quad(diamond(tile), underlay_colour(map, trodden, tile));
         }
     }
     builder.build()
+}
+
+/// Whether a tile has ground a monkey could stand on beside it.
+fn touches_open(map: &Map, tile: Tile) -> bool {
+    (-1..=1).any(|dy| {
+        (-1..=1).any(|dx| {
+            (dx != 0 || dy != 0) && map.terrain(Tile::new(tile.x + dx, tile.y + dy)).passable()
+        })
+    })
+}
+
+/// Whether a board tile has drawn ground over it: open ground, and the jungle's
+/// edge, where the plants stand on floor rather than floating over canopy.
+fn drawn(map: &Map, tile: Tile) -> bool {
+    map.terrain(tile).passable() || touches_open(map, tile)
 }
 
 /// The jungle tiles that show the player a wall.
@@ -352,20 +395,201 @@ fn wall_tiles(map: &Map) -> Vec<Tile> {
     for y in 0..map.height() {
         for x in 0..map.width() {
             let tile = Tile::new(x, y);
-            if map.terrain(tile).passable() {
-                continue;
-            }
-            let touches_open = (-1..=1).any(|dy| {
-                (-1..=1).any(|dx| {
-                    (dx != 0 || dy != 0) && map.terrain(Tile::new(x + dx, y + dy)).passable()
-                })
-            });
-            if touches_open {
+            if !map.terrain(tile).passable() && touches_open(map, tile) {
                 tiles.push(tile);
             }
         }
     }
     tiles
+}
+
+/// Where the ground is trodden to dirt: which ground vertices are dirt rather
+/// than the jungle's sage floor.
+///
+/// Dirt is where monkeys walk - the ring path, the plaza round the bins and the
+/// worked route between the depot and its grove - and everything else open is
+/// floor. The artist drew clay for the town, but a forty-tile town of clay with
+/// the same few marks on it reads as a brown sheet ruled into squares; worn
+/// into trails it says where the work happens, and the dark monkeys read on
+/// both materials.
+///
+/// Decided at *vertices*, never per tile. A ground tile is chosen by its four
+/// corners, and one shared grid of corners is what guarantees neighbouring
+/// tiles agree on the edge between them; tiles chosen one at a time do not
+/// (see `assets/Ground/README.md`).
+struct Trodden {
+    columns: i32,
+    rows: i32,
+    dirt: Vec<bool>,
+}
+
+impl Trodden {
+    fn of(map: &Map) -> Self {
+        // One more vertex than there are ground tiles each way: the far
+        // corners of the last row and column.
+        let columns = (map.width() + GROUND_SPAN - 1) / GROUND_SPAN + 1;
+        let rows = (map.height() + GROUND_SPAN - 1) / GROUND_SPAN + 1;
+        let route: Vec<Vec2> = map
+            .reference_route()
+            .points()
+            .iter()
+            .map(|point| Vec2::new(point.x as f32, point.y as f32))
+            .collect();
+        let step = GROUND_SPAN as f32 * METRE;
+        let depot = (tile_centre(map.town_centre()) / step).round() * step;
+        let mut dirt = Vec::with_capacity((columns * rows) as usize);
+        for j in 0..rows {
+            for i in 0..columns {
+                let at = IVec2::new(i, j).as_vec2() * (GROUND_SPAN as f32 * METRE);
+                let (x, y) = (i * GROUND_SPAN, j * GROUND_SPAN);
+                // The four board tiles meeting at the vertex.
+                let around = [(x - 1, y - 1), (x, y - 1), (x - 1, y), (x, y)]
+                    .map(|(x, y)| map.terrain(Tile::new(x, y)));
+                // Half the tiles at a vertex. The ring path is two tiles wide,
+                // so on two of its sides it straddles one row of vertices and
+                // on the other two it touches two: a narrower path on the far
+                // sides of the town than on the near ones, which is the parity
+                // of a two-tile strip on a two-tile grid.
+                let path = around.iter().filter(|t| **t == Terrain::Path).count() >= 2;
+                let open = around.iter().filter(|t| t.passable()).count() >= 2;
+                let plaza = (at - depot).abs().max_element() <= PLAZA_METRES;
+                let trail = route
+                    .windows(2)
+                    .any(|leg| distance_to_leg(at, leg[0], leg[1]) <= TRAIL_METRES);
+                dirt.push(path || (open && (plaza || trail)));
+            }
+        }
+        Self {
+            columns,
+            rows,
+            dirt,
+        }
+    }
+
+    /// Whether a ground vertex is dirt. Off the grid is floor.
+    fn dirt(&self, vertex: IVec2) -> bool {
+        (0..self.columns).contains(&vertex.x)
+            && (0..self.rows).contains(&vertex.y)
+            && self.dirt[(vertex.y * self.columns + vertex.x) as usize]
+    }
+}
+
+/// How far a ground position is from one straight leg of a route, in metres.
+fn distance_to_leg(at: Vec2, from: Vec2, to: Vec2) -> f32 {
+    let span = to - from;
+    let along = if span.length_squared() > 0.0 {
+        ((at - from).dot(span) / span.length_squared()).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    at.distance(from + span * along)
+}
+
+/// One drawn ground tile: where it sits in the ground grid, which of the
+/// sixteen corner combinations it is, and which of its four detail variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GroundTile {
+    at: IVec2,
+    mask: u8,
+    variant: u8,
+}
+
+/// The drawn ground tiles: every one with open ground or the jungle's edge
+/// under it. Past that is canopy, which the flat mesh already shows.
+fn ground_tiles(map: &Map, trodden: &Trodden) -> Vec<GroundTile> {
+    let columns = (map.width() + GROUND_SPAN - 1) / GROUND_SPAN;
+    let rows = (map.height() + GROUND_SPAN - 1) / GROUND_SPAN;
+    let mut tiles = Vec::new();
+    for j in 0..rows {
+        for i in 0..columns {
+            let shown = (0..GROUND_SPAN).any(|dy| {
+                (0..GROUND_SPAN)
+                    .any(|dx| drawn(map, Tile::new(i * GROUND_SPAN + dx, j * GROUND_SPAN + dy)))
+            });
+            if !shown {
+                continue;
+            }
+            // Top, right, bottom, left: the manifest's bits 1, 2, 4 and 8.
+            let corners = [
+                IVec2::new(i, j),
+                IVec2::new(i + 1, j),
+                IVec2::new(i + 1, j + 1),
+                IVec2::new(i, j + 1),
+            ];
+            let mask = corners
+                .into_iter()
+                .enumerate()
+                .filter(|&(_, corner)| trodden.dirt(corner))
+                .fold(0u8, |mask, (bit, _)| mask | 1 << bit);
+            tiles.push(GroundTile {
+                at: IVec2::new(i, j),
+                mask,
+                variant: ground_variant(IVec2::new(i, j)),
+            });
+        }
+    }
+    tiles
+}
+
+/// Which detail variant a ground tile shows: hashed from its place, for the
+/// reason the jungle's planting is - the same ground every time the game
+/// opens, with no sequence the eye can lock onto. All four share their edges,
+/// so any choice joins its neighbours.
+///
+/// Two tiles in three are the quiet variant 0. Every marked variant puts its
+/// marks at the same place in its diamond, so marked tiles always sit on the
+/// ground grid, and an even split - three tiles in four marked - ruled the
+/// open ground into a lattice of repeated scuffs.
+fn ground_variant(at: IVec2) -> u8 {
+    let mut bits =
+        (at.x as u32).wrapping_mul(0x27D4_EB2F) ^ (at.y as u32).wrapping_mul(0x1656_67B1);
+    bits ^= bits >> 15;
+    bits = bits.wrapping_mul(0x846C_A68B);
+    bits ^= bits >> 16;
+    match bits % 9 {
+        0..=5 => 0,
+        marked => (marked - 5) as u8,
+    }
+}
+
+/// Texture coordinates pulled a hair inside their atlas cell.
+///
+/// The packed atlas has no gutters, and a tile's diamond touches its cell's
+/// edge at its four corners. Sampled exactly on the boundary, a fragment at a
+/// pinched zoom can read the neighbouring cell's corner pixel - a different
+/// mask - and, masked at the same depth, overwrite the tile beside it. A ten
+/// thousandth of the atlas is a tenth of an art pixel: no visible shift.
+fn inset((min, max): (Vec2, Vec2)) -> (Vec2, Vec2) {
+    const INSET: f32 = 1e-4;
+    (min + INSET, max - INSET)
+}
+
+/// The drawn ground, as one textured mesh.
+///
+/// One quad per tile, the whole 128 x 64 canvas of each, its transparent
+/// corners discarded by an alpha mask: the artist's tiles join edge to edge on
+/// their opaque pixels, which a diamond cut through the edge pixels would not
+/// promise. Placed by the manifest's rule - a tile's top corner on its top
+/// vertex - which is `project` at two board tiles a step, so the art's pixel
+/// grid is the board's texel grid and every tile lands on whole texels.
+fn ground_tile_mesh(map: &Map, trodden: &Trodden) -> Mesh {
+    let size = art::GROUND_TILE * art::ART_SCALE;
+    let mut builder = MeshBuilder::default();
+    for tile in ground_tiles(map, trodden) {
+        let top = project(tile.at.as_vec2() * GROUND_SPAN as f32 * METRE);
+        let (left, right) = (top.x - size.x * 0.5, top.x + size.x * 0.5);
+        let (upper, lower) = (top.y, top.y - size.y);
+        builder.textured(
+            [
+                Vec2::new(left, upper),
+                Vec2::new(right, upper),
+                Vec2::new(right, lower),
+                Vec2::new(left, lower),
+            ],
+            inset(art::ground_uv(tile.mask, tile.variant)),
+        );
+    }
+    builder.build()
 }
 
 /// Where the treehouse's ground anchor stands, in metres: wherever puts its
@@ -425,14 +649,28 @@ pub(crate) fn spawn_world(
     // One material for every baked surface: the colour lives in the vertices.
     let painted = materials.add(ColorMaterial::from(Color::WHITE));
     let plant = art::PLANT;
+    let trodden = Trodden::of(map);
 
     commands
         .spawn((WorldRoot, Transform::default(), Visibility::default()))
         .with_children(|root| {
             root.spawn((
-                Mesh2d(meshes.add(ground_mesh(map))),
+                Mesh2d(meshes.add(ground_mesh(map, &trodden))),
                 MeshMaterial2d(painted.clone()),
                 Transform::from_xyz(0.0, 0.0, GROUND_Z),
+            ));
+            // The drawn ground over it. Masked rather than blended: the art has
+            // binary alpha, and a mask writes depth like the opaque underlay
+            // does, so nothing about the layering changes.
+            root.spawn((
+                Mesh2d(meshes.add(ground_tile_mesh(map, &trodden))),
+                MeshMaterial2d(materials.add(ColorMaterial {
+                    color: Color::WHITE,
+                    texture: Some(art.ground.clone()),
+                    alpha_mode: bevy::sprite_render::AlphaMode2d::Mask(0.5),
+                    ..default()
+                })),
+                Transform::from_xyz(0.0, 0.0, GROUND_TILE_Z),
             ));
 
             // Anything with height is its own entity, anchored at the ground it
@@ -597,36 +835,156 @@ mod tests {
         assert!(stand_z(stall, 0.0) < stand_z(centre, 0.0));
     }
 
+    /// The drawn ground tile a board tile lies under.
+    fn under(tiles: &[GroundTile], tile: Tile) -> Option<GroundTile> {
+        let at = IVec2::new(
+            tile.x.div_euclid(GROUND_SPAN),
+            tile.y.div_euclid(GROUND_SPAN),
+        );
+        tiles.iter().find(|t| t.at == at).copied()
+    }
+
     #[test]
-    fn the_delivery_point_is_visible_ground_rather_than_bare_lawn() {
+    fn a_ground_tile_covers_exactly_two_board_tiles_each_way() {
+        // Drawn at the shared scale, a ground diamond must be exactly the
+        // board's diamond over GROUND_SPAN tiles, or the tiles gap or overlap
+        // at every seam - and its corners must land on whole texels, or the
+        // art's pixels stop lining up with everything standing on it.
+        let size = art::GROUND_TILE * art::ART_SCALE;
+        let span = GROUND_SPAN as f32 * METRE;
+        let right = project(Vec2::new(span, 0.0));
+        let left = project(Vec2::new(0.0, span));
+        let bottom = project(Vec2::splat(span));
+        assert_eq!(size.x, right.x - left.x);
+        assert_eq!(size.y, -bottom.y);
+        assert_eq!(size, size.round());
+        // And the mesh the tiles build is one quad for each of them.
+        let map = crate::map::start();
+        let trodden = Trodden::of(map);
+        let quads = ground_tiles(map, &trodden).len();
+        assert_eq!(ground_tile_mesh(map, &trodden).count_vertices(), quads * 4);
+    }
+
+    #[test]
+    fn neighbouring_ground_tiles_agree_on_every_corner_they_share() {
+        let map = crate::map::start();
+        let tiles = ground_tiles(map, &Trodden::of(map));
+        let at = |i: i32, j: i32| tiles.iter().find(|t| t.at == IVec2::new(i, j));
+        let bit = |tile: &GroundTile, bit: u8| tile.mask & bit != 0;
+        for tile in &tiles {
+            let IVec2 { x: i, y: j } = tile.at;
+            // Along i: my right is its top, my bottom its left.
+            if let Some(next) = at(i + 1, j) {
+                assert_eq!(bit(tile, 2), bit(next, 1), "{:?}", tile.at);
+                assert_eq!(bit(tile, 4), bit(next, 8), "{:?}", tile.at);
+            }
+            // Along j: my left is its top, my bottom its right.
+            if let Some(next) = at(i, j + 1) {
+                assert_eq!(bit(tile, 8), bit(next, 1), "{:?}", tile.at);
+                assert_eq!(bit(tile, 4), bit(next, 2), "{:?}", tile.at);
+            }
+            assert!(tile.variant < 4);
+        }
+    }
+
+    #[test]
+    fn the_depot_and_the_walk_are_trodden_and_the_rest_is_floor() {
         // A new player is asked to drag a banana to the town centre. Before the
         // depot was trodden in, the town centre drew nothing at all - the same
         // green as the forty tiles around it - so the drag's target was a word.
         let map = crate::map::start();
+        let trodden = Trodden::of(map);
+        let tiles = ground_tiles(map, &trodden);
         let centre = map.town_centre();
-        assert_eq!(ground_colour(map, centre), DEPOT_PAD);
-        assert_ne!(ground_colour(map, centre), terrain_colour(Terrain::Town));
-        // With an edge, so it reads as worn rather than as a painted rectangle.
-        let edge = Tile::new(centre.x + DEPOT_EDGE_REACH, centre.y);
-        assert_eq!(ground_colour(map, edge), DEPOT_EDGE);
-        // And it stops: the town is still the town a few tiles out.
-        let away = Tile::new(centre.x + DEPOT_EDGE_REACH + 1, centre.y);
-        assert_eq!(ground_colour(map, away), terrain_colour(map.terrain(away)));
-        // It never climbs the jungle wall, which is not ground anyone treads.
+        let depot = under(&tiles, centre).expect("the depot has ground");
+        assert_eq!(depot.mask, 15, "the delivery point stands on dirt");
+        // The whole drop target is on the plaza, out to its edge, wholly dirt.
+        let reach = DEPOT_EDGE_REACH;
+        for dy in -reach..=reach {
+            for dx in -reach..=reach {
+                let tile = Tile::new(centre.x + dx, centre.y + dy);
+                assert_eq!(
+                    under(&tiles, tile).unwrap().mask,
+                    15,
+                    "{tile:?} is off the plaza"
+                );
+            }
+        }
+        // The walk to the grove is dirt the whole way: every metre of it has
+        // a trodden corner beside it.
+        let route = map.reference_route();
+        for step in 0..=200 {
+            let at = route.sample(f64::from(step) / 200.0).at;
+            let tile = Tile::containing(at);
+            assert_ne!(
+                under(&tiles, tile).unwrap().mask,
+                0,
+                "the trail breaks at {tile:?}"
+            );
+        }
+        // The ring path is dirt too: one row of vertices on its far sides,
+        // two - a whole tile of dirt - on its near ones.
+        for tile in [Tile::new(30, 13), Tile::new(30, 14), Tile::new(14, 30)] {
+            assert_ne!(under(&tiles, tile).unwrap().mask, 0, "{tile:?}");
+        }
+        for tile in [Tile::new(30, 54), Tile::new(54, 30)] {
+            assert_eq!(under(&tiles, tile).unwrap().mask, 15, "{tile:?}");
+        }
+        // And the rest of the town, the groves and the jungle edge are floor:
+        // the far corner of the town from the walk, the southern grove.
+        assert_eq!(under(&tiles, Tile::new(20, 50)).unwrap().mask, 0);
+        assert_eq!(under(&tiles, map.groves()[1].tile).unwrap().mask, 0);
+        // The underlay under a drawn tile is that ground's colour, never the
+        // canopy showing through a seam.
+        assert_eq!(underlay_colour(map, &trodden, centre), art::GROUND_DIRT);
+        assert_eq!(
+            underlay_colour(map, &trodden, Tile::new(20, 50)),
+            art::GROUND_FLOOR
+        );
+        assert_eq!(
+            underlay_colour(map, &trodden, Tile::new(0, 0)),
+            JUNGLE_CANOPY
+        );
+    }
+
+    #[test]
+    fn all_open_ground_and_the_jungle_edge_are_drawn_and_the_depths_are_not() {
+        let map = crate::map::start();
+        let tiles = ground_tiles(map, &Trodden::of(map));
         for y in 0..map.height() {
             for x in 0..map.width() {
                 let tile = Tile::new(x, y);
-                if !map.terrain(tile).passable() {
-                    assert_eq!(ground_colour(map, tile), terrain_colour(map.terrain(tile)));
+                if drawn(map, tile) {
+                    assert!(
+                        under(&tiles, tile).is_some(),
+                        "{tile:?} is open and undrawn"
+                    );
                 }
             }
         }
+        assert!(
+            under(&tiles, Tile::new(0, 0)).is_none(),
+            "the canopy is drawn over"
+        );
+    }
+
+    #[test]
+    fn most_ground_is_quiet_and_every_variant_is_used() {
+        let mut counts = [0u32; 4];
+        for j in 0..40 {
+            for i in 0..40 {
+                counts[ground_variant(IVec2::new(i, j)) as usize] += 1;
+            }
+        }
+        let quiet = counts[0] as f32 / 1600.0;
+        assert!((0.6..0.73).contains(&quiet), "{counts:?}");
+        assert!(counts[1..].iter().all(|&n| n > 100), "{counts:?}");
     }
 
     #[test]
     fn the_ground_plane_is_one_quad_per_tile() {
         let map = Map::parse("@.*\n...").expect("parses");
-        let mesh = ground_mesh(&map);
+        let mesh = ground_mesh(&map, &Trodden::of(&map));
         assert_eq!(mesh.count_vertices(), 6 * 4);
     }
 

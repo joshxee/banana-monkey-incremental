@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Baboon anatomy rebuild</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#25382f;color:#f1f6f0;font:16px/1.5 system-ui,sans-serif}main{max-width:1120px;margin:auto;padding:24px}h1{font-size:28px;margin:0}h2{font-size:20px;margin-top:28px}p{color:#bbc3d0}a{color:#fdd179}figure{margin:0}figcaption{font-size:14px;color:#bbc3d0;margin-top:8px}.references{display:flex;gap:20px;flex-wrap:wrap}.references img{height:290px;max-width:100%;object-fit:contain}.art{image-rendering:pixelated;background:#a4c5af}.scroll{overflow:auto}.comparison{display:block;width:928px;height:320px}.controls{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin:16px 0}input{accent-color:#fdd179;width:240px}button{padding:8px 16px;border:1px solid #6c81a1;border-radius:5px;background:#405273;color:#f1f6f0;cursor:pointer}button[aria-pressed=true]{background:#fdd179;color:#3d3333}#kitchen{position:relative;width:496px;height:392px;transform-origin:0 0}#space{width:992px;height:784px}.station{position:absolute;width:224px;height:176px;image-rendering:pixelated}output{color:#fdd179}#scene{background:#a4c5af}
+</style>
+<main>
+<h1>Baboon anatomy rebuild</h1>
+<p>The animal comes first. Compare the bare baboon with the supplied photographs, then judge the chef pose. <a href="animation-review.html">Review the revised shading, four angles and animations</a>.</p>
+<div class="references">
+<figure><img src="../../../../docs/references/baboon/profile-user.png" alt="User-supplied baboon profile: brow, long downward nose bridge and heavy jaw"><figcaption>Face reference</figcaption></figure>
+<figure><img src="../../../../docs/references/baboon/standing-user.png" alt="User-supplied standing baboon with heavy shoulders, bent knees and a trailing tail"><figcaption>Standing reference</figcaption></figure>
+</div>
+<h2>Same pixel scale</h2>
+<div class="scroll"><img class="art comparison" src="anatomy-and-chef-4x.png" alt="Spider Worker, unclothed baboon, chef baboon, all enlarged four times"></div>
+<p>Left to right: Spider Worker · unclothed baboon · chef. Each source pixel is enlarged equally to 4×.</p>
+<details><summary>View at native scale</summary><img class="art" src="anatomy-and-chef-native.png" width="232" height="80" alt="Same character comparison at native pixel scale"></details>
+<h2>Three chefs at each grill</h2>
+<div class="controls"><label for="count">Chefs</label><input id="count" type="range" min="0" max="12" value="12"><output id="status" for="count" aria-live="polite"></output><button type="button" data-zoom="1" aria-pressed="false">1×</button><button type="button" data-zoom="2" aria-pressed="true">2×</button></div>
+<div class="scroll" id="scene"><div id="space"><div id="kitchen" role="img"></div></div></div>
+<p>Static asset review. <a href="README.md">Files, reference notes and rebuild command</a> · <a href="baboon-chef.json">Placement metadata</a></p>
+</main>
+<script>
+const count=document.querySelector('#count'),status=document.querySelector('#status'),kitchen=document.querySelector('#kitchen'),space=document.querySelector('#space');
+const stations=[[20,8],[252,8],[20,192],[252,192]].map(([x,y])=>{const im=document.createElement('img');im.className='station';im.style.left=x+'px';im.style.top=y+'px';kitchen.append(im);return im});
+function render(){const n=Math.min(12,Math.max(0,Number(count.value))),grills=Math.ceil(n/3);status.textContent=`${n} chefs · ${grills} grills`;kitchen.setAttribute('aria-label',`${n} baboon chefs around ${grills} grills`);stations.forEach((im,i)=>{const c=Math.min(3,Math.max(0,n-i*3));im.hidden=c===0;im.src=`grill-${c}-chefs.png`;im.alt=`Grill ${i+1}, ${c} chefs`})}
+function zoom(n){kitchen.style.transform=`scale(${n})`;space.style.width=496*n+'px';space.style.height=392*n+'px';document.querySelectorAll('[data-zoom]').forEach(b=>b.setAttribute('aria-pressed',String(Number(b.dataset.zoom)===n)))}
+count.addEventListener('input',render);document.querySelectorAll('[data-zoom]').forEach(b=>b.addEventListener('click',()=>zoom(Number(b.dataset.zoom))));render();zoom(2);
+</script>
+</html>

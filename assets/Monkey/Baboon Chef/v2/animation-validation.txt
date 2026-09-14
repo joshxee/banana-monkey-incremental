@@ -1,0 +1,1 @@
+PASS: 128 frames, 8 loops, source character palette, binary alpha, clear margins, fixed leg layers, static first poses, exact loop endpoints, saved master/atlas pixels and frame durations.

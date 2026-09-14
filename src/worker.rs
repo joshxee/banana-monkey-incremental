@@ -909,7 +909,7 @@ pub fn dress_actors(
 }
 
 /// What `animate_workers` touches on a worker's children.
-type CarriedView<'a> = (Mut<'a, Transform>, Mut<'a, Visibility>);
+type CarriedView<'a> = (Mut<'a, Transform>, Mut<'a, Visibility>, Mut<'a, Sprite>);
 
 #[allow(clippy::type_complexity)]
 pub fn animate_workers(
@@ -928,8 +928,10 @@ pub fn animate_workers(
     mut carried: Query<CarriedView, (With<CarriedBanana>, Without<Worker>, Without<Shadow>)>,
     mut shadows: Query<&mut Transform, (With<Shadow>, Without<Worker>, Without<CarriedBanana>)>,
 ) {
-    // Where the banana rides, relative to the feet, for a monkey facing right.
-    let back = art::WORKER.offset_of(art::WORKER_BACK);
+    // Where the banana's middle rides, relative to the feet, facing either
+    // way: its registration point on the middle of the back. The sprite is
+    // centred, so it is placed by its middle, which is off that point.
+    let (right, left) = art::carried_banana_middles();
 
     for (cycle, transform, mut playing, mut sprite, children) in &mut workers {
         let segment = cycle.segment();
@@ -969,9 +971,8 @@ pub fn animate_workers(
         // placed against the art has to be mirrored by hand. The art is not
         // symmetric - head forward, tail back - and an unmirrored banana on a
         // monkey facing left rides on its tail.
-        let facing = if sprite.flip_x { -1.0 } else { 1.0 };
         for child in children.iter() {
-            if let Ok((mut at, mut visibility)) = carried.get_mut(child) {
+            if let Ok((mut at, mut visibility, mut banana)) = carried.get_mut(child) {
                 // Held through the snack too: that banana is the meal, and
                 // seeing it is what connects the counter's dip to the monkey
                 // that caused it. Only while standing: walking, it is in the
@@ -984,9 +985,14 @@ pub fn animate_workers(
                 if *visibility != shown {
                     *visibility = shown;
                 }
-                let place = Vec3::new(back.x * facing, back.y, 0.2);
+                let middle = if sprite.flip_x { left } else { right };
+                let place = middle.extend(0.2);
                 if at.translation != place {
                     at.translation = place;
+                }
+                // Mirrored with its monkey, about its registration point.
+                if banana.flip_x != sprite.flip_x {
+                    banana.flip_x = sprite.flip_x;
                 }
             }
             if let Ok(mut at) = shadows.get_mut(child) {
