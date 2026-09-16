@@ -163,6 +163,17 @@ Specs read `window.__BANANA_MONKEY_TEST_STATE__`, a JSON export the game
 refreshes every frame (`sync_web_test_state` in `src/game.rs`). A spec that
 needs a state seeds it with `?scenario=` rather than grinding to it.
 
+`save.spec.ts` is the exception that seeds localStorage directly, because what
+it covers *is* the storage: that a save from an older or a newer build still
+opens (D32), that an unreadable one is quarantined rather than overwritten, and
+that an absence is measured from the timestamp in the save and banked exactly
+once (D33). A payload with `saved_at_ms` set to `Date.now() - 2 * 3600 * 1000`
+is a two-hour absence, and one under a minute old is a reload. `src/domain.rs`
+pins what an absence is worth; these specs pin that the clock survives a page
+load. There are three save slots, all under the same `save-v1` namespace:
+`save-v1`, `save-v1.backup` and `save-v1.quarantine`. Clear all three when
+seeding, or a leftover quarantine from a previous spec changes the outcome.
+
 `npm run test:e2e:fast` is the desktop project alone. The full matrix with the
 emulated-mobile projects runs in CI. Two things to know before blaming a spec:
 

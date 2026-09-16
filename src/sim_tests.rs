@@ -9,9 +9,9 @@ use bevy::prelude::*;
 
 use crate::{
     domain::{
-        CART_CREW, Carts, Committed, CycleSpec, EconomySnapshot, FedStaff, Multipliers, Research,
-        Segment, Staff, SupportRole, Treasury, UnitKind, Workforce, cart_price, cycle_time, meal,
-        spendable, work_time,
+        CART_CREW, CART_PAYLOAD, Carts, Committed, CycleSpec, EconomySnapshot, FedStaff,
+        Multipliers, Research, SIM_HZ, SUPPORT_MEAL_PERIOD, Segment, Staff, SupportRole, Treasury,
+        UnitKind, Workforce, cart_price, cycle_time, meal, spendable, work_time,
     },
     game::DeliveryKind,
     headless::Headless,
@@ -808,4 +808,170 @@ fn restart_returns_the_world_to_nothing_mid_flight() {
     assert_eq!(sim.count::<Worker>(), 1);
     assert_eq!(sim.count::<RestoredCycle>(), 0);
     assert_eq!(sim.walking()[0].segment(), Segment::ToGrove);
+}
+
+/// D32: an import replaces the run in flight, through the same door a restart
+/// goes through.
+///
+/// The contract is that *nothing* of the old run is left standing. A leftover
+/// avatar would keep harvesting into the imported treasury, which is the exact
+/// way a "restore my backup" button turns into a duplication bug.
+#[test]
+fn an_imported_run_replaces_the_one_in_flight() {
+    let mut sim = Headless::scenario("late-game");
+    sim.ticks(500);
+    assert!(sim.count::<Worker>() > 0);
+
+    let imported = SavedRun {
+        treasury: Treasury::from_saved(640.0).unwrap(),
+        workforce: Workforce::from_saved(6).unwrap(),
+        staff: Staff::from_saved(1, 0, 0).unwrap(),
+        research: Research::from_saved(61.0).unwrap(),
+        carts: Carts::from_saved(1, 3).unwrap(),
+    };
+    sim.harvest(1);
+    sim.install(imported);
+    sim.tick();
+
+    assert_eq!(sim.treasury(), 640.0, "the queued harvest went with it");
+    assert_eq!(sim.resource::<Workforce>(), imported.workforce);
+    assert_eq!(sim.resource::<Staff>(), imported.staff);
+    assert_eq!(sim.resource::<Research>(), imported.research);
+    assert_eq!(sim.resource::<Carts>(), imported.carts);
+    let _ = sim.settled();
+
+    // Six hired, three of them aboard the cart, so three walk.
+    sim.tick();
+    assert_eq!(sim.count::<Worker>(), 3);
+    assert_eq!(sim.count::<Cart>(), 1);
+    assert_eq!(sim.count::<SupportUnit>(), 1);
+
+    // And they arrive the way a loaded save's do: scattered along the route,
+    // not lined up at the stall. Fresh hires all share one phase and so are
+    // identical to each other; restored ones are drawn independently. Asserted
+    // this way rather than by counting `RestoredCycle`, which is shed the
+    // moment a unit reaches `ToGrove` - two fifths of the cycle - and so is
+    // gone from some of them before the spawn tick ends.
+    let walking = sim.walking();
+    assert!(
+        walking.windows(2).any(|pair| pair[0] != pair[1]),
+        "an import scatters its monkeys instead of hiring them fresh"
+    );
+    // Which is the whole point: the balance is the imported one to the banana.
+    // A unit placed at the stall would bank a full delivery for a trip nobody
+    // walked, and an import would be a way to print bananas.
+    assert_eq!(sim.treasury(), 640.0);
+    assert!(sim.settled().is_empty(), "nothing was paid for arriving");
+}
+
+/// D33: the closed form must never pay more than the tick would have.
+///
+/// This is the contract that matters for offline progress, and its absence is
+/// how a three-orders-of-magnitude over-payment got written in the first place:
+/// every other test compares `offline_yield` against `EconomySnapshot::project`,
+/// which is the expression it is *built from*, so they agreed with each other
+/// and with nothing else. The simulation is the only independent oracle there
+/// is, and 600 s of it is 12,000 ticks - a millisecond here.
+///
+/// The slack is one cycle's payload per harvester. At `AtStall` every harvester
+/// sets out together, so at an arbitrary cut-off each one is holding up to a
+/// full undelivered load that the steady-state rate has already counted. That
+/// is a property of where the clock was stopped, not of the model.
+#[test]
+fn an_absence_never_pays_more_than_the_simulation_would_have() {
+    let camp = |bananas: f64, workers: u32, staff: Staff, carts: Carts| SavedRun {
+        treasury: Treasury::from_saved(bananas).unwrap(),
+        workforce: Workforce::from_saved(workers).unwrap(),
+        staff,
+        carts,
+        ..SavedRun::default()
+    };
+    let none = Staff::default();
+    let runs = [
+        // Solvent: the plain case, and the one the readout promises.
+        camp(100.0, 6, none, Carts::default()),
+        camp(
+            400.0,
+            6,
+            Staff::from_saved(1, 0, 0).unwrap(),
+            Carts::default(),
+        ),
+        // Insolvent: a research push that cannot make payroll all night. The
+        // case the fixed point exists for, and the one that was 1000x out.
+        camp(
+            100.0,
+            6,
+            Staff::from_saved(1, 1, 2).unwrap(),
+            Carts::default(),
+        ),
+        camp(
+            50.0,
+            6,
+            Staff::from_saved(0, 0, 4).unwrap(),
+            Carts::default(),
+        ),
+        // Support with nothing to fund it at all.
+        camp(
+            60.0,
+            0,
+            Staff::from_saved(0, 0, 3).unwrap(),
+            Carts::default(),
+        ),
+        // And a crewed cart, whose payload dwarfs a walker's.
+        camp(500.0, 9, none, Carts::from_saved(3, 9).unwrap()),
+    ];
+
+    const SECONDS: f64 = 600.0;
+    for run in runs {
+        let mut sim = Headless::from_run(run, Placement::AtStall);
+        sim.ticks((SECONDS * SIM_HZ) as u32);
+        let lived_bananas = sim.treasury();
+        let lived_research = sim.resource::<Research>().points();
+
+        let Some(earned) = crate::domain::offline_yield(run, SECONDS) else {
+            continue;
+        };
+        let mut banked = run;
+        banked.credit_offline(earned);
+
+        let in_flight = run.workforce.count().saturating_sub(run.carts.crewed()) as f64 * PAYLOAD
+            + run.carts.running() as f64 * CART_PAYLOAD;
+        assert!(
+            banked.treasury.bananas() <= lived_bananas + in_flight,
+            "offline banked {} where the tick reached {} (slack {in_flight}) for {run:?}",
+            banked.treasury.bananas(),
+            lived_bananas,
+        );
+        // Research gets one meal period of slack, for the same reason the
+        // bananas get one payload. The closed form puts the moment the camp
+        // stops making payroll where the treasury crosses zero; the tick puts
+        // it where the *larder* - the treasury less the meals harvesters have
+        // already reserved - can no longer cover a whole meal, which is up to
+        // one `SUPPORT_MEAL_PERIOD` earlier and lands in lumps rather than
+        // continuously. Measured, that is under 1%.
+        let fed = FedStaff {
+            chefs: run.staff.count(SupportRole::Chef),
+            unpackers: run.staff.count(SupportRole::Unpacker),
+            technologists: run.staff.count(SupportRole::Technologist),
+        };
+        let a_meal_late =
+            crate::domain::research_per_sec(fed, crate::domain::multipliers_for(fed, run.research))
+                * SUPPORT_MEAL_PERIOD;
+        assert!(
+            banked.research.points() <= lived_research + a_meal_late,
+            "offline researched {} where the tick reached {} (slack {a_meal_late}) for {run:?}",
+            banked.research.points(),
+            lived_research,
+        );
+        // And it is not merely safe by paying nothing: a solvent camp has to
+        // come back with most of what it would have earned.
+        if !earned.starved() {
+            assert!(
+                banked.treasury.bananas() >= lived_bananas - in_flight,
+                "offline banked {} where the tick reached {} for {run:?}",
+                banked.treasury.bananas(),
+                lived_bananas,
+            );
+        }
+    }
 }

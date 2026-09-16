@@ -19,8 +19,9 @@
 use bevy::prelude::*;
 
 use crate::{
-    domain::{Carts, Research, Staff, Treasury, Workforce},
-    persistence::{SaveMode, SavedRun},
+    domain::{Carts, Research, Staff, Treasury, Workforce, offline_yield},
+    game::WelcomeBack,
+    persistence::{Recovery, SaveMode, SavedRun},
     worker::{RestoreCarts, RestoreWorkers},
 };
 
@@ -45,6 +46,14 @@ pub struct Scenario {
     pub summary: &'static str,
     pub run: SavedRun,
     pub placement: Placement,
+    /// The panel that greets a returning player, if this scenario is about it.
+    ///
+    /// Carried here because it is otherwise unreachable from `./play`: the
+    /// greeting is computed at launch from the timestamp in a real save, and a
+    /// scenario has no save. Without this the only way to look at the most
+    /// player-visible screen in the save feature is to hand-edit
+    /// `saved_at_ms` on disk, which is not a playtest anybody will run.
+    pub greeting: Option<WelcomeBack>,
 }
 
 impl Scenario {
@@ -54,6 +63,9 @@ impl Scenario {
     pub fn install(&self, app: &mut App) {
         install(app, self.run, self.placement);
         app.insert_resource(SaveMode::Off);
+        if let Some(greeting) = self.greeting {
+            app.insert_resource(greeting);
+        }
     }
 }
 
@@ -111,6 +123,7 @@ pub fn all() -> Vec<Scenario> {
             }
             .run(),
             placement: Placement::Restored { seed: Some(11) },
+            greeting: None,
         },
         Scenario {
             name: "fresh",
@@ -118,6 +131,7 @@ pub fn all() -> Vec<Scenario> {
                       four hand-harvests should light the WORKER button",
             run: Seed::default().run(),
             placement: Placement::AtStall,
+            greeting: None,
         },
         Scenario {
             name: "one-worker",
@@ -130,6 +144,7 @@ pub fn all() -> Vec<Scenario> {
             }
             .run(),
             placement: Placement::AtStall,
+            greeting: None,
         },
         Scenario {
             name: "crew",
@@ -142,6 +157,7 @@ pub fn all() -> Vec<Scenario> {
             }
             .run(),
             placement: Placement::Restored { seed: Some(7) },
+            greeting: None,
         },
         Scenario {
             name: "support",
@@ -158,6 +174,7 @@ pub fn all() -> Vec<Scenario> {
             }
             .run(),
             placement: Placement::Restored { seed: Some(11) },
+            greeting: None,
         },
         Scenario {
             name: "starving",
@@ -170,6 +187,7 @@ pub fn all() -> Vec<Scenario> {
             }
             .run(),
             placement: Placement::AtStall,
+            greeting: None,
         },
         Scenario {
             name: "overspent",
@@ -184,6 +202,7 @@ pub fn all() -> Vec<Scenario> {
             }
             .run(),
             placement: Placement::Restored { seed: Some(19) },
+            greeting: None,
         },
         Scenario {
             name: "first-cart",
@@ -198,6 +217,7 @@ pub fn all() -> Vec<Scenario> {
             }
             .run(),
             placement: Placement::Restored { seed: Some(23) },
+            greeting: None,
         },
         Scenario {
             name: "cart-boarding",
@@ -214,6 +234,7 @@ pub fn all() -> Vec<Scenario> {
             }
             .run(),
             placement: Placement::Restored { seed: Some(3) },
+            greeting: None,
         },
         Scenario {
             name: "cart-running",
@@ -230,6 +251,7 @@ pub fn all() -> Vec<Scenario> {
             }
             .run(),
             placement: Placement::AtStall,
+            greeting: None,
         },
         Scenario {
             name: "rotation",
@@ -246,6 +268,7 @@ pub fn all() -> Vec<Scenario> {
             }
             .run(),
             placement: Placement::Restored { seed: Some(29) },
+            greeting: None,
         },
         Scenario {
             name: "late-game",
@@ -263,6 +286,7 @@ pub fn all() -> Vec<Scenario> {
             }
             .run(),
             placement: Placement::Restored { seed: Some(42) },
+            greeting: None,
         },
         Scenario {
             name: "first-drag",
@@ -271,6 +295,7 @@ pub fn all() -> Vec<Scenario> {
                       where it goes within five seconds, without touching anything",
             run: Seed::default().run(),
             placement: Placement::Restored { seed: Some(1) },
+            greeting: None,
         },
         Scenario {
             name: "cohort",
@@ -293,6 +318,7 @@ pub fn all() -> Vec<Scenario> {
             // `Restored`, which hands out random phases - the one placement
             // under which a cohort is invisible.
             placement: Placement::AtStall,
+            greeting: None,
         },
         Scenario {
             name: "swarm",
@@ -311,6 +337,7 @@ pub fn all() -> Vec<Scenario> {
             }
             .run(),
             placement: Placement::Restored { seed: Some(61) },
+            greeting: None,
         },
         Scenario {
             name: "survey",
@@ -330,6 +357,7 @@ pub fn all() -> Vec<Scenario> {
             }
             .run(),
             placement: Placement::Restored { seed: Some(37) },
+            greeting: None,
         },
         Scenario {
             name: "rich",
@@ -341,8 +369,90 @@ pub fn all() -> Vec<Scenario> {
             }
             .run(),
             placement: Placement::AtStall,
+            greeting: None,
+        },
+        // ── the panel a returning player is greeted by ──
+        //
+        // Four states of one screen, because it is otherwise unreachable from
+        // `./play`: the greeting is computed from the timestamp in a real save,
+        // so without these the only way to look at it is to hand-edit a file.
+        Scenario {
+            name: "returning",
+            summary: "six hours away on a camp that pays for itself: the ledger should read \
+                      in one pass, with no apology under it",
+            run: solvent_camp(),
+            placement: Placement::Restored { seed: Some(11) },
+            greeting: returning(solvent_camp(), 6.0 * 3_600.0),
+        },
+        Scenario {
+            name: "returning-starved",
+            summary: "eight hours away on a research push that cannot make payroll: the \
+                      footnote should read as advice, not a scolding, and name only \
+                      monkeys this camp has",
+            run: pushing_camp(),
+            placement: Placement::Restored { seed: Some(12) },
+            greeting: returning(pushing_camp(), 8.0 * 3_600.0),
+        },
+        Scenario {
+            name: "returning-capped",
+            summary: "three days away against an eight-hour cap: the cap should be \
+                      explained beside the duration it contradicts, not in small print",
+            run: solvent_camp(),
+            placement: Placement::Restored { seed: Some(13) },
+            greeting: returning(solvent_camp(), 3.0 * 24.0 * 3_600.0),
+        },
+        Scenario {
+            name: "save-lost",
+            summary: "the save could not be read: the headline should carry the bad news \
+                      rather than greeting over it, and the panel should say the old save \
+                      was set aside",
+            run: SavedRun::default(),
+            placement: Placement::AtStall,
+            greeting: Some(WelcomeBack {
+                earned: None,
+                recovery: Some(Recovery::Quarantined { kept: true }),
+                staff_and_harvesters: (false, false),
+            }),
         },
     ]
+}
+
+/// A camp that pays for itself: one chef against six walkers.
+fn solvent_camp() -> SavedRun {
+    Seed {
+        bananas: 400.0,
+        workers: 6,
+        chefs: 1,
+        ..Seed::default()
+    }
+    .run()
+}
+
+/// A camp deliberately running at a loss to buy research, which is the state
+/// the starved stretch of D33 exists for.
+fn pushing_camp() -> SavedRun {
+    Seed {
+        bananas: 100.0,
+        workers: 6,
+        chefs: 1,
+        unpackers: 1,
+        technologists: 2,
+        ..Seed::default()
+    }
+    .run()
+}
+
+/// A camp as it would be found after `away` seconds with the tab shut.
+fn returning(run: SavedRun, away_seconds: f64) -> Option<WelcomeBack> {
+    let earned = offline_yield(run, away_seconds);
+    Some(WelcomeBack {
+        earned,
+        recovery: None,
+        staff_and_harvesters: (
+            run.staff.total() > 0,
+            run.workforce.count() > run.carts.crewed() || run.carts.running() > 0,
+        ),
+    })
 }
 
 pub fn named(name: &str) -> Option<Scenario> {

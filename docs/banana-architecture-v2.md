@@ -1578,3 +1578,163 @@ therefore 0.2 bananas/sec, not 1.2, and the whitepaper's six-Technologist ending
 is an artifact of the oracle's `technologist_npv` still crediting cart-unlock
 option value after the cart is already unlocked. Under a population cap it is one
 monkey not harvesting, which is a much smaller version of the same problem.
+
+**D32 — The save format is additive, and never overwrites what it cannot read.**
+*(Save increment.)*
+
+The game ships to playtesters several times a week, so the schema moves under
+runs that are in progress. The first version of this module answered that with a
+chain of numbered schemas and a `From` impl per step: every new field cost a
+migration, and a payload whose version was not on the list was discarded and then
+overwritten by the first autosave. That is a correct design for a format that
+changes twice a year and the wrong one for a format that changes on Tuesday.
+
+**Every field but `version` deserialises with a default, and unknown fields are
+ignored.** Those two halves make a format change a non-event in both directions:
+a save written before a field existed arrives with that field at its default, and
+a save written *after* this build was compiled arrives with the fields this build
+knows and the rest dropped. Adding a number to the save is now a one-line change
+with no migration and no version bump. `version` keeps no default, because a
+payload without one is not ours — another game's storage key, a truncated file —
+and reading that as an empty run would be worse than refusing it.
+
+The cost is real and accepted: a mistyped field name reads as a default rather
+than as an error. It is the right trade only because of the second half. Note
+what the promise does *not* cover: a field whose **type** changes fails the whole
+parse and is quarantined, so a rename-plus-retype is still a migration.
+
+**A pasted run is held to a stricter standard than a save slot.** The same
+defaults mean `{"version":4}` restores as a valid empty run — correct for a file
+we wrote and truncated, and catastrophic for text a player pasted, where it
+would report success and zero their progress. `import` therefore also requires
+the payload to name at least one part of a run. A save slot is ours; a clipboard
+is anyone's.
+
+**Nothing unreadable is ever overwritten.** A payload this build cannot use is
+copied aside before the game is allowed to save over it, and the save that *was*
+loaded is copied to a backup slot once per launch. A newer build's save is kept
+too, even though it loads: it loads *lossily*, and the fields this build cannot
+represent would otherwise be gone the moment the player earned a banana.
+
+The two accidents get **separate slots**, and opposite rules. An unreadable
+payload is keep-*first*, because a second bad load is usually a consequence of
+the first and the earlier payload is the one that still had the run in it. A
+newer build's payload is keep-*newest*, because it is read by going forward to
+that build rather than back. One shared slot let a months-old corrupt save
+occupy the space protecting the run a player made yesterday — at which point the
+downgraded run was written over the original on the next autosave and the
+guarantee above quietly did not hold.
+
+Whether the payload actually reached its slot is reported back and shown to the
+player, because the panel tells them their save was set aside rather than
+deleted, and promising a playtester a save that was in fact dropped is worse
+than the loss itself.
+
+Together these mean a bad build can cost a playtester a session and never a run —
+and that "it broke after the update" comes with the bytes attached. The save
+carries the build that wrote it for the same reason.
+
+**A run can also leave the machine.** COPY MY RUN and LOAD A RUN move the run as
+the same JSON, and an import is installed through the same request `RESTART GAME`
+uses, so it cannot leave a stale avatar harvesting into the new treasury. Loading
+asks first, and shows both runs while it asks: replacing a run is as destructive
+as resetting one, and the pasted text might not even be the save the player
+meant.
+
+*The exchange is platform-split, and the browser is the reason.* `bevy_clipboard`
+goes through `navigator.clipboard` on wasm, which is wrong here three times over.
+The web-sys binding is generated without `catch`, so in an insecure context —
+a phone on the LAN opening `http://<ip>:5173`, the documented touch-playtest
+route — `undefined.readText()` throws straight through the wasm frame and kills
+the run. Inside an itch.io iframe the object exists but the permissions policy
+rejects both promises. And `set_text` returns `Ok` the moment it spawns the
+write, so a rejection reaches the player as "SAVE COPIED". The web therefore uses
+a modal instead: it works in an iframe, works without a secure context, cannot
+throw, and tells the truth — and it shows the player the text, which is the point
+when the whole feature exists so they can send a run in. The desktop keeps the
+system clipboard, where the operation is synchronous and honest.
+
+**D33 — Time away is paid in closed form, at the rate the readout promised.**
+*(Save increment.)*
+
+Eight hours is 576,000 ticks of a schedule that wants entities, so the absence is
+integrated rather than simulated: `EconomySnapshot::project` is already the
+steady-state rate the HUD shows, and paying an absence from anything else would
+make that readout a lie.
+
+**The cap is eight hours.** Not a punishment — what keeps the first session back
+playable. Uncapped, a fortnight away returns a balance that clears every price on
+the ladder at once and leaves nothing to buy. Eight hours is a night asleep,
+which is the absence a player most wants paid, and short enough that returning
+daily still beats returning weekly. Under a minute is a reload, not an absence,
+and raises nothing.
+
+**The absence is paid in two stretches, because a camp that cannot make payroll
+starves rather than stops.** While the treasury lasts, everyone is fed and the
+rate is the one on the readout. When it runs out, the camp does not stop and it
+does not simply shed its support staff either — and getting that second stretch
+wrong is the single most expensive mistake available here.
+
+*The mistake, recorded because it shipped in the first draft of this decision.*
+The obvious model is that unpaid support goes idle, so by D4/D19 it draws no
+wage and lends no multiplier, leaving the harvesters walking and their whole
+surplus banked as profit. That is wrong, because **starvation is not absorbing**:
+`SupportCycle::advance` parks a hungry monkey's clock at zero and feeds it again
+on the very next tick the larder can afford, and the harvesters keep refilling
+that larder. The live camp therefore spends its entire harvest surplus on
+support wages for ever, with the treasury pinned near zero. Banking that surplus
+instead over-paid by up to three orders of magnitude — 11,673 bananas where the
+tick reaches 10 — and made the dominant play *spend down to nothing on support
+and close the tab*, which beat playing by about sevenfold. Ten technologists
+cost 127 bananas of offline income against a 57,600-banana online wage bill:
+support was being charged at 0.22% of its price.
+
+*What is modelled instead.* The starved stretch is a fixed point, not a
+constant: the largest prefix of the staff — in `SupportRole::FEEDING_ORDER`, the
+order the shared larder actually feeds them — that pays for itself, blended with
+the next one along so the net comes out at exactly zero. The surplus leaves as
+wages and comes back as research, which is what the live economy does with it.
+The prefix is searched rather than solved because net is not monotonic in the
+count: an early chef earns more than it eats and a late technologist does not.
+
+Three under-estimates remain. Two are in the direction of paying less, and the
+third is bounded and not farmable:
+
+- Research earned during the absence does not raise the tech multiplier that the
+  absence is paid at, so a long night compounds nothing.
+- Once starved, the camp never climbs back to feeding *everyone*. Live it would
+  oscillate — feed, drain, starve, recover — and settle a little above this.
+- Harvesters are paid at their steady-state rate, while a restored one forfeits
+  the partial cycle it is dropped into (`RestoredCycle` zeroes its terms). This
+  one is an **over**-estimate, bounded by half a cycle's net per harvester per
+  launch — about 3.5 bananas a monkey, 80 a cart — and it cannot be farmed,
+  because a reload loses more in-flight progress than it credits.
+
+*Measured, on six workers, a chef, an unpacker and two technologists with 100
+banked over two hours:* the camp runs dry after 1,007 s, banks **0 bananas** and
+buys **13,026 research**. Those figures are pinned by
+`the_documented_overnight_figures_still_hold` rather than carried in this prose,
+because the first draft of this section quoted numbers that no longer
+reproduced.
+
+*The contract that matters.* `an_absence_never_pays_more_than_the_simulation_would_have`
+in `src/sim_tests.rs` runs each camp headless for 600 s and asserts the closed
+form credits no more than the tick did. Its absence is exactly how the
+over-payment above shipped: every other test compared `offline_yield` against
+`EconomySnapshot::project`, which is the expression it is *built from*, so they
+agreed with each other and with nothing else. The simulation is the only
+independent oracle there is.
+
+*Two things this deliberately does not defend against.* The save is plaintext
+and player-editable by design (D32), and PASTE SAVE is a door into it, so
+advancing the system clock to collect the cap repeatedly is not a new attack
+surface and is not guarded. And because `max_delta` is capped, a tab left open
+but backgrounded earns almost nothing across eight hours while the same tab
+closed earns the full cap — minimising the window is strictly worse than closing
+it, which is odd but harmless.
+
+**The absence reaches the save slot before it reaches the player.** It is
+measured from the timestamp *in the save*, so a credited run that is not written
+back immediately is an absence that pays out again on every reload, for ever. The
+credit is applied only once the write has succeeded; a failed write costs the
+player nothing, because the absence is still on the clock for next time.

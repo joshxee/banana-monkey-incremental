@@ -6,9 +6,9 @@ use crate::{
     art,
     domain::{
         BANANAS_PER_HARVEST, Carts, Committed, CycleSpec, CycleTerms, EconomySnapshot,
-        EconomyState, FedStaff, HarvestCycle, Multipliers, Research, SIM_HZ, Staff, SupportCycle,
-        SupportRole, Treasury, UnitKind, Workforce, cart_crew_shortfall, multipliers_for,
-        plan_hire, research_per_sec, restart_run,
+        EconomyState, FedStaff, HarvestCycle, Multipliers, OfflineYield, Research, SIM_HZ,
+        SavedRun, Staff, SupportCycle, SupportRole, Treasury, UnitKind, Workforce,
+        cart_crew_shortfall, install_run, multipliers_for, plan_hire, research_per_sec,
     },
     hud,
     isometric::{self, Footprint},
@@ -181,7 +181,14 @@ impl Plugin for PresentationPlugin {
             .init_resource::<DiagnosticPointerTrace>()
             .init_resource::<Launch>()
             .init_resource::<persistence::SaveMode>()
-            .add_systems(Startup, (setup, apply_launch_speed))
+            .init_resource::<WelcomeBack>()
+            .init_resource::<SaveTransfer>()
+            .init_resource::<PendingImport>()
+            // Written and read only by the presentation, so it lives with the
+            // presentation - `SimulationPlugin` is the half that has to run
+            // with no window.
+            .init_resource::<SaveNotice>()
+            .add_systems(Startup, (setup, apply_launch_speed, greet_returning_player))
             .configure_sets(
                 Update,
                 (
@@ -226,6 +233,8 @@ impl Plugin for PresentationPlugin {
                     hud::scroll_store,
                     move_keyboard_harvest,
                     queue_manual_settlement,
+                    // After `handle_menu`, which is what fills its request.
+                    handle_save_transfer,
                 )
                     .chain()
                     .in_set(Present::Input),
@@ -261,6 +270,9 @@ impl Plugin for PresentationPlugin {
                     hud::sync_shop_tabs,
                     hud::sync_shop_new,
                     hud::sync_info,
+                    hud::sync_welcome,
+                    hud::sync_save_notice,
+                    hud::sync_import_confirm,
                 )
                     .in_set(Present::Render),
             )
@@ -268,6 +280,16 @@ impl Plugin for PresentationPlugin {
                 Update,
                 (persist_changes, sync_web_test_state).in_set(Present::Export),
             );
+    }
+}
+
+/// Raise the greeting, if the launch had anything to say.
+///
+/// A `Startup` system rather than something `main` sets, because `MenuState`
+/// belongs to the presentation and a headless run has no menu to open.
+fn greet_returning_player(welcome: Res<WelcomeBack>, mut menu: ResMut<MenuState>) {
+    if welcome.has_news() {
+        *menu = MenuState::Welcome;
     }
 }
 
@@ -504,12 +526,32 @@ pub(crate) enum ButtonAction {
     Restart,
     ConfirmRestart,
     CancelRestart,
+    /// Hand the run to the player as text they can keep. The playtest lifeline:
+    /// a build that eats a save can be undone from a paste, and a run that
+    /// misbehaves can be sent in rather than described.
+    ExportSave,
+    ImportSave,
+    DismissWelcome,
+    ConfirmImport,
+    CancelImport,
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
 struct MenuPanels<'w> {
     info_open: ResMut<'w, hud::InfoOpen>,
     active_tab: ResMut<'w, hud::ActiveShopTab>,
+}
+
+/// Everything the two save buttons touch, in one parameter.
+///
+/// Bundled because `handle_menu` is at Bevy's sixteen-parameter cap and these
+/// three are one concern: a run on its way out to the player, or on its way
+/// back in, and the line that reports which.
+#[derive(bevy::ecs::system::SystemParam)]
+struct SaveButtons<'w> {
+    transfer: ResMut<'w, SaveTransfer>,
+    pending: ResMut<'w, PendingImport>,
+    notice: ResMut<'w, SaveNotice>,
 }
 
 impl ButtonAction {
@@ -524,11 +566,18 @@ impl ButtonAction {
             | ButtonAction::Info(_)
             | ButtonAction::PreviousShopTab
             | ButtonAction::NextShopTab => menu == MenuState::Closed,
-            ButtonAction::Resume | ButtonAction::Restart => menu == MenuState::Open,
+            ButtonAction::Resume
+            | ButtonAction::Restart
+            | ButtonAction::ExportSave
+            | ButtonAction::ImportSave => menu == MenuState::Open,
             #[cfg(target_arch = "wasm32")]
             ButtonAction::Diagnostics => menu == MenuState::Open,
             ButtonAction::ConfirmRestart | ButtonAction::CancelRestart => {
                 menu == MenuState::ConfirmRestart
+            }
+            ButtonAction::DismissWelcome => menu == MenuState::Welcome,
+            ButtonAction::ConfirmImport | ButtonAction::CancelImport => {
+                menu == MenuState::ConfirmImport
             }
         }
     }
@@ -1569,8 +1618,73 @@ pub(crate) struct Settled {
 #[derive(Resource, Debug, Default)]
 pub(crate) struct HireRequests(pub(crate) Vec<UnitKind>);
 
+/// The run to install on the next tick, if any.
+///
+/// A restart and an import are the same request with a different payload:
+/// `Some(SavedRun::default())` wipes, `Some(imported)` replaces. They share one
+/// path because they need the identical fan-out - reset the resources, clear
+/// the placement budgets, despawn every avatar - and two of those would drift.
 #[derive(Resource, Debug, Default)]
-pub(crate) struct RestartRequest(pub(crate) bool);
+pub(crate) struct RestartRequest(pub(crate) Option<SavedRun>);
+
+/// What the last session left behind, for the panel that greets the player.
+///
+/// Inserted by `main` before the plugins, so it is the launch's answer and not
+/// something the presentation can recompute. A scenario run gets the default -
+/// it was never away.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+pub(crate) struct WelcomeBack {
+    pub(crate) earned: Option<OfflineYield>,
+    pub(crate) recovery: Option<persistence::Recovery>,
+    /// Whether the camp had any support staff, and any harvesters, when it was
+    /// left. Carried rather than looked up, because the panel describes the run
+    /// *as it was saved* and by the time it is read the credited run has
+    /// already replaced it.
+    pub(crate) staff_and_harvesters: (bool, bool),
+}
+
+impl WelcomeBack {
+    /// Whether there is anything worth interrupting the player for.
+    pub(crate) fn has_news(self) -> bool {
+        self.earned.is_some() || self.recovery.is_some()
+    }
+}
+
+/// The result of the last export or import, for the line under those buttons.
+///
+/// A resource rather than a return value because the clipboard is the one part
+/// of this feature the game cannot see the far side of: the player needs to be
+/// told whether the text got where it was going.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SaveNotice(pub(crate) Option<Notice>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Notice {
+    Exported,
+    Imported,
+    /// The text reached the game and was not a run. Kept distinct from
+    /// [`Notice::ClipboardUnavailable`] because the two send the player looking
+    /// in completely different places.
+    ImportRejected,
+    ClipboardUnavailable,
+}
+
+impl Notice {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            // On the desktop the run really is on the clipboard. On the web the
+            // player copied it out of a box themselves, so the game says what
+            // it knows rather than claiming to have done it for them.
+            #[cfg(not(target_arch = "wasm32"))]
+            Notice::Exported => "SAVE COPIED",
+            #[cfg(target_arch = "wasm32")]
+            Notice::Exported => "SAVE HANDED OVER",
+            Notice::Imported => "SAVE LOADED",
+            Notice::ImportRejected => "THAT TEXT WAS NOT A RUN",
+            Notice::ClipboardUnavailable => "COULD NOT REACH THE CLIPBOARD",
+        }
+    }
+}
 
 #[derive(Resource, Debug)]
 struct PersistenceDirty {
@@ -1755,6 +1869,13 @@ pub(crate) enum MenuState {
     Closed,
     Open,
     ConfirmRestart,
+    /// The panel that greets a returning player. Opens by itself at launch,
+    /// and only when [`WelcomeBack::has_news`] - a player who reloaded ten
+    /// seconds ago is not a returning player and must not be stopped.
+    Welcome,
+    /// A pasted run, waiting to be confirmed. `RESTART GAME` asks before it
+    /// wipes a run and pasting is no less destructive, so it asks too.
+    ConfirmImport,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2155,11 +2276,12 @@ fn apply_restart(
     vehicles: Query<Entity, With<Cart>>,
     mut restarted: MessageWriter<Restarted>,
 ) {
-    if !std::mem::take(&mut request.0) {
+    let Some(run) = std::mem::take(&mut request.0) else {
         return;
-    }
+    };
 
-    restart_run(
+    install_run(
+        run,
         &mut treasury,
         &mut workforce,
         &mut carts,
@@ -2167,8 +2289,13 @@ fn apply_restart(
         &mut research,
     );
     let (restored, restored_carts, next_lane) = &mut placement;
-    restored.clear();
-    restored_carts.clear();
+    // An imported run arrives the way a loaded one does: its harvesters are
+    // dropped somewhere on the route and pay nothing for the partial trip. A
+    // restart installs an empty run, so both budgets come out at zero and this
+    // is the `clear()` it always was.
+    let pool = run.workforce.count().saturating_sub(run.carts.crewed());
+    **restored = worker::RestoreWorkers::new(pool);
+    **restored_carts = worker::RestoreCarts::new(run.carts.running());
     next_lane.restart();
     queue.entries.clear();
     requests.0.clear();
@@ -2666,6 +2793,7 @@ fn handle_menu(
     mut ui_touch: ResMut<UiTouchGesture>,
     mut menu: ResMut<MenuState>,
     mut restart: ResMut<RestartRequest>,
+    mut save: SaveButtons,
     mut hire_requests: ResMut<HireRequests>,
     mut panels: MenuPanels,
     mut pointer_guard: ResMut<PointerGuard>,
@@ -2688,8 +2816,11 @@ fn handle_menu(
     } else if keys.just_pressed(KeyCode::Escape) {
         requested = Some(match *menu {
             MenuState::Closed => MenuState::Open,
-            MenuState::Open => MenuState::Closed,
-            MenuState::ConfirmRestart => MenuState::Open,
+            // Escape dismisses the greeting rather than opening the menu
+            // behind it: it is a panel to read and close, not one to go back
+            // from.
+            MenuState::Open | MenuState::Welcome => MenuState::Closed,
+            MenuState::ConfirmRestart | MenuState::ConfirmImport => MenuState::Open,
         });
     }
     if *menu == MenuState::Closed && keys.just_pressed(KeyCode::ArrowLeft) {
@@ -2797,13 +2928,38 @@ fn handle_menu(
             ButtonAction::Restart if *menu == MenuState::Open => {
                 requested = Some(MenuState::ConfirmRestart);
             }
+            ButtonAction::DismissWelcome if *menu == MenuState::Welcome => {
+                requested = Some(MenuState::Closed);
+            }
+            ButtonAction::ExportSave if *menu == MenuState::Open => {
+                save.transfer.0 = Some(Transfer::Export);
+            }
+            ButtonAction::ImportSave if *menu == MenuState::Open => {
+                save.transfer.0 = Some(Transfer::Import);
+            }
             ButtonAction::ConfirmRestart if *menu == MenuState::ConfirmRestart => {
                 harvest.drop_everything(&layout);
                 harvest.feedback.success = None;
-                restart.0 = true;
+                restart.0 = Some(SavedRun::default());
                 requested = Some(MenuState::Closed);
             }
             ButtonAction::CancelRestart if *menu == MenuState::ConfirmRestart => {
+                requested = Some(MenuState::Open);
+            }
+            ButtonAction::ConfirmImport if *menu == MenuState::ConfirmImport => {
+                if let Some(run) = save.pending.0.take() {
+                    harvest.drop_everything(&layout);
+                    harvest.feedback.success = None;
+                    restart.0 = Some(run);
+                    save.notice.0 = Some(Notice::Imported);
+                }
+                // Back to the menu rather than out of it, so the player reads
+                // the confirmation instead of watching the game change behind a
+                // panel that has already vanished.
+                requested = Some(MenuState::Open);
+            }
+            ButtonAction::CancelImport if *menu == MenuState::ConfirmImport => {
+                save.pending.0 = None;
                 requested = Some(MenuState::Open);
             }
             _ => handled = false,
@@ -2825,6 +2981,15 @@ fn handle_menu(
                 true
             }
             MenuState::ConfirmRestart if dismissal.outside_panel(hud::MenuView::Restart, at) => {
+                requested = Some(MenuState::Open);
+                true
+            }
+            MenuState::Welcome if dismissal.outside_panel(hud::MenuView::Welcome, at) => {
+                requested = Some(MenuState::Closed);
+                true
+            }
+            MenuState::ConfirmImport if dismissal.outside_panel(hud::MenuView::Import, at) => {
+                save.pending.0 = None;
                 requested = Some(MenuState::Open);
                 true
             }
@@ -2851,6 +3016,12 @@ fn handle_menu(
     if let Some(next) = requested {
         if next != MenuState::Closed {
             harvest.drop_everything(&layout);
+        }
+        // Opening the menu clears the last report. Without this, a "SAVE
+        // COPIED" from nine o'clock is still sitting there at three, implying
+        // something just happened.
+        if next == MenuState::Open && *menu == MenuState::Closed {
+            save.notice.0 = None;
         }
         *menu = next;
     }
@@ -3681,6 +3852,161 @@ fn cancel_harvest(controller: &mut HarvestController, pending: &mut PendingSettl
 
 // ────────────────────────────────────────────────────────── presentation
 
+/// A press of EXPORT or IMPORT, waiting for the clipboard.
+///
+/// A request resource for the same reason [`RecentreRequest`] is one:
+/// `handle_menu` owns every button and is already at the size where one more
+/// concern is one too many.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct SaveTransfer(pub(crate) Option<Transfer>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Transfer {
+    Export,
+    Import,
+}
+
+/// A run that has been pasted and parsed, waiting for the player to confirm it.
+///
+/// Held rather than installed on the spot. `RESTART GAME` asks before it wipes
+/// a run, and pasting is every bit as destructive - more so, because the text
+/// might not be the run the player meant.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct PendingImport(pub(crate) Option<SavedRun>);
+
+/// Move a run between the player's clipboard and the game.
+///
+/// This is the feature's whole reason for existing while the build churns: a
+/// playtester can take a copy of their run before they update, hand a broken
+/// one over to be looked at, and put either one back. The game's own save slots
+/// cannot leave the machine; a line of text can.
+#[allow(clippy::too_many_arguments)]
+fn handle_save_transfer(
+    mut request: ResMut<SaveTransfer>,
+    mut clipboard: ResMut<bevy::clipboard::Clipboard>,
+    mut pending: ResMut<PendingImport>,
+    mut notice: ResMut<SaveNotice>,
+    mut menu: ResMut<MenuState>,
+    treasury: Res<Treasury>,
+    workforce: Res<Workforce>,
+    staff: Res<Staff>,
+    research: Res<Research>,
+    carts: Res<Carts>,
+) {
+    let Some(transfer) = request.0.take() else {
+        return;
+    };
+    let clipboard = clipboard.as_mut();
+
+    notice.0 = match transfer {
+        Transfer::Export => {
+            let text = persistence::export(SavedRun {
+                treasury: *treasury,
+                workforce: *workforce,
+                staff: *staff,
+                research: *research,
+                carts: *carts,
+            });
+            match save_exchange::copy_out(clipboard, text) {
+                Ok(true) => Some(Notice::Exported),
+                // The player closed the box without taking it. Not a failure,
+                // and not worth a message either.
+                Ok(false) => None,
+                Err(error) => {
+                    bevy::log::warn!("Could not hand over the save: {error}");
+                    Some(Notice::ClipboardUnavailable)
+                }
+            }
+        }
+        Transfer::Import => match save_exchange::paste_in(clipboard) {
+            Ok(Some(text)) => match persistence::import(&text) {
+                Some(run) => {
+                    pending.0 = Some(run);
+                    *menu = MenuState::ConfirmImport;
+                    None
+                }
+                None => Some(Notice::ImportRejected),
+            },
+            Ok(None) => None,
+            Err(error) => {
+                // Distinct from a bad paste on purpose. On the web a blocked or
+                // dismissed clipboard is the *likeliest* outcome, and telling
+                // the player their save text is corrupt when the game never got
+                // to look at it sends them hunting the wrong bug.
+                bevy::log::warn!("Could not read a save from the player: {error}");
+                Some(Notice::ClipboardUnavailable)
+            }
+        },
+    };
+}
+
+/// Handing a line of text to the player, and taking one back.
+///
+/// Split by platform because the browser cannot do what the desktop does.
+/// `bevy_clipboard`'s wasm path goes through `navigator.clipboard`, and that is
+/// wrong here three times over: the binding is generated without `catch`, so in
+/// an insecure context - a phone on the LAN opening `http://<ip>:5173`, which is
+/// the documented touch-playtest route - `undefined.readText()` throws straight
+/// through the wasm frame and kills the run. Inside an itch.io iframe the
+/// object exists but the permissions policy rejects both promises. And
+/// `set_text` returns `Ok` the moment it spawns the write, so a rejection is
+/// reported to the player as success.
+///
+/// A modal is not as slick as a one-press copy, but it works in an iframe, works
+/// without a secure context, cannot throw, and tells the truth - and it shows
+/// the player the text, which is the point when the whole feature exists so they
+/// can send a run in.
+#[cfg(target_arch = "wasm32")]
+mod save_exchange {
+    use bevy::clipboard::Clipboard;
+
+    /// `Ok(true)` if the player took the text, `Ok(false)` if they dismissed
+    /// the box.
+    pub fn copy_out(_clipboard: &mut Clipboard, text: String) -> Result<bool, String> {
+        window()?
+            .prompt_with_message_and_default(
+                "Here is your run. Copy it and keep it somewhere safe.",
+                &text,
+            )
+            .map(|taken| taken.is_some())
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    pub fn paste_in(_clipboard: &mut Clipboard) -> Result<Option<String>, String> {
+        window()?
+            .prompt_with_message_and_default("Paste a run here to load it.", "")
+            .map(|pasted| pasted.filter(|text| !text.trim().is_empty()))
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    fn window() -> Result<web_sys::Window, String> {
+        web_sys::window().ok_or_else(|| "browser window is unavailable".to_string())
+    }
+}
+
+/// On the desktop the system clipboard is synchronous and honest, so it is used
+/// directly.
+#[cfg(not(target_arch = "wasm32"))]
+mod save_exchange {
+    use bevy::clipboard::Clipboard;
+
+    pub fn copy_out(clipboard: &mut Clipboard, text: String) -> Result<bool, String> {
+        clipboard
+            .set_text(text)
+            .map(|()| true)
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    pub fn paste_in(clipboard: &mut Clipboard) -> Result<Option<String>, String> {
+        clipboard
+            .fetch_text()
+            .poll_result()
+            .ok_or_else(|| "the clipboard did not answer".to_string())?
+            .map(|text| Some(text).filter(|text| !text.trim().is_empty()))
+            .map_err(|error| format!("{error:?}"))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn persist_changes(
     time: Res<Time>,
@@ -4298,6 +4624,11 @@ struct TestButtons {
     restart: TestPoint,
     confirm_restart: TestPoint,
     cancel_restart: TestPoint,
+    export_save: TestPoint,
+    import_save: TestPoint,
+    dismiss_welcome: TestPoint,
+    confirm_import: TestPoint,
+    cancel_import: TestPoint,
 }
 
 /// One support role's state, as the e2e suite sees it.
@@ -4444,7 +4775,7 @@ fn sync_web_test_state(
 
     // One slot per button, so four hire buttons cannot collapse onto each
     // other and leave the suite clicking whichever row happened to be last.
-    let mut button_centers = [Vec2::ZERO; 13];
+    let mut button_centers = [Vec2::ZERO; 18];
     for (action, node, transform) in &buttons {
         let index = match action {
             ButtonAction::OpenMenu => 0,
@@ -4463,6 +4794,11 @@ fn sync_web_test_state(
             ButtonAction::Hire(UnitKind::Cart) => 10,
             ButtonAction::PreviousShopTab => 11,
             ButtonAction::NextShopTab => 12,
+            ButtonAction::ExportSave => 13,
+            ButtonAction::ImportSave => 14,
+            ButtonAction::DismissWelcome => 15,
+            ButtonAction::ConfirmImport => 16,
+            ButtonAction::CancelImport => 17,
         };
         button_centers[index] = transform.translation * node.inverse_scale_factor;
     }
@@ -4498,6 +4834,8 @@ fn sync_web_test_state(
             MenuState::Closed => "closed",
             MenuState::Open => "open",
             MenuState::ConfirmRestart => "confirm-restart",
+            MenuState::Welcome => "welcome",
+            MenuState::ConfirmImport => "confirm-import",
         },
         viewport: point(Vec2::new(primary_window.width(), primary_window.height())),
         active_touches: touches.iter().count(),
@@ -4594,6 +4932,11 @@ fn sync_web_test_state(
             restart: point(button_centers[7]),
             confirm_restart: point(button_centers[8]),
             cancel_restart: point(button_centers[9]),
+            export_save: point(button_centers[13]),
+            import_save: point(button_centers[14]),
+            dismiss_welcome: point(button_centers[15]),
+            confirm_import: point(button_centers[16]),
+            cancel_import: point(button_centers[17]),
         },
     };
 

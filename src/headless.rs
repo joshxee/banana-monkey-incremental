@@ -160,7 +160,12 @@ impl Headless {
 
     /// Confirm a restart, as the menu does. Applied on the next tick.
     pub(crate) fn restart(&mut self) {
-        self.app.world_mut().resource_mut::<RestartRequest>().0 = true;
+        self.install(SavedRun::default());
+    }
+
+    /// Replace the run in flight, as an imported save does.
+    pub(crate) fn install(&mut self, run: SavedRun) {
+        self.app.world_mut().resource_mut::<RestartRequest>().0 = Some(run);
     }
 
     /// A resource to change before stepping, for the few contracts that need

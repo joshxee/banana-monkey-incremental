@@ -25,10 +25,13 @@ use bevy_flair::prelude::*;
 use crate::{
     domain::{
         CART_TECH_REQUIREMENT, Carts, Committed, CycleSpec, EconomySnapshot, EconomyState,
-        FedStaff, Multipliers, RESEARCH_PER_TECHNOLOGIST, Research, SUPPORT_MEAL_PERIOD, Segment,
-        Staff, SupportRole, Treasury, UnitKind, Workforce, cycle_time, plan_hire,
+        FedStaff, Multipliers, RESEARCH_PER_TECHNOLOGIST, Research, SUPPORT_MEAL_PERIOD, SavedRun,
+        Segment, Staff, SupportRole, Treasury, UnitKind, Workforce, cycle_time, plan_hire,
     },
-    game::{ButtonAction, Feedback, MenuState, SceneLayout, UiTouchGesture},
+    game::{
+        ButtonAction, Feedback, MenuState, SaveNotice, SceneLayout, UiTouchGesture, WelcomeBack,
+    },
+    persistence,
 };
 
 /// Every HUD root loads the same stylesheet. `AssetServer::load` caches by
@@ -362,7 +365,42 @@ pub(crate) enum MenuView {
     Scrim,
     Main,
     Restart,
+    Welcome,
+    Import,
 }
+
+/// The line of the import sheet that says what is about to happen.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImportLine {
+    /// What the pasted text holds.
+    Incoming,
+    /// What it would replace.
+    Outgoing,
+}
+
+/// The line of the greeting that is filled in at runtime.
+///
+/// One marker per line rather than one block of text, because the ledger has to
+/// stay in columns: a single `Text` with tabs in it re-wraps differently at
+/// every font size the responsive HUD picks.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WelcomeLine {
+    /// The headline. Dynamic, because this panel greets a returning player and
+    /// also breaks the news that a save did not open.
+    Title,
+    /// "You were away 6h 12m."
+    Away,
+    Harvested,
+    Wages,
+    Net,
+    Research,
+    /// Why the absence was cut short, or what happened to an unreadable save.
+    Footnote,
+}
+
+/// The line under EXPORT/IMPORT that says what the last press did.
+#[derive(Component)]
+pub(crate) struct SaveNoticeText;
 
 pub(crate) fn setup_hud(commands: &mut Commands, asset_server: &AssetServer) {
     commands
@@ -1079,6 +1117,18 @@ pub(crate) fn setup_menu(commands: &mut Commands, asset_server: &AssetServer) {
                         ClassList::new("menu-body"),
                         TextLayout::justify(Justify::Center),
                     ));
+                    // Said before they leave, not after they come back. A cap
+                    // a player meets for the first time in a "you were away"
+                    // panel reads as a bug or a punishment; the same cap, known
+                    // in advance, is a rule - and this is also the only thing
+                    // that tells them the game is worth reopening tomorrow.
+                    panel.spawn((
+                        Text::new("Your camp keeps working while the game is
+closed, for up to 8 hours."),
+                        TextFont::from_font_size(17.0),
+                        ClassList::new("menu-subtitle"),
+                        TextLayout::justify(Justify::Center),
+                    ));
                     panel.spawn(menu_button_row()).with_children(|row| {
                         row.spawn(row_menu_button(ButtonAction::Resume, "emphasized"))
                             .with_child(menu_button_text("RESUME"));
@@ -1086,9 +1136,107 @@ pub(crate) fn setup_menu(commands: &mut Commands, asset_server: &AssetServer) {
                         row.spawn(row_menu_button(ButtonAction::Diagnostics, "secondary"))
                             .with_child(menu_button_text("INPUT LOGS"));
                     });
+                    // Deliberately not a matched pair. Copying is safe and
+                    // loading replaces the run; two identical buttons side by
+                    // side invited a mis-tap on the one that cannot be undone,
+                    // directly above the button that *does* ask first.
+                    panel
+                        .spawn(menu_button(ButtonAction::ExportSave, "secondary"))
+                        .with_child(menu_button_text("COPY MY RUN"));
+                    panel
+                        .spawn(menu_button(ButtonAction::ImportSave, ""))
+                        .with_child(menu_button_text("LOAD A RUN"));
                     panel
                         .spawn(menu_button(ButtonAction::Restart, ""))
                         .with_child(menu_button_text("RESTART GAME"));
+                    // Last, and not between the buttons: appearing for the
+                    // first time between them shifted RESTART GAME up under a
+                    // finger that was already on its way down. Empty until a
+                    // press, and not laid out until then.
+                    panel.spawn((
+                        Text::new(""),
+                        TextFont::from_font_size(17.0),
+                        ClassList::new("menu-subtitle"),
+                        TextLayout::justify(Justify::Center),
+                        Node {
+                            display: Display::None,
+                            ..default()
+                        },
+                        SaveNoticeText,
+                    ));
+                });
+
+            scrim
+                .spawn((
+                    Node {
+                        display: Display::None,
+                        ..menu_panel_node()
+                    },
+                    ClassList::new("menu-panel"),
+                    MenuView::Welcome,
+                ))
+                .with_children(|panel| {
+                    panel.spawn((
+                        Text::new("WELCOME BACK"),
+                        TextFont::from_font_size(30.0),
+                        ClassList::new("menu-title"),
+                        WelcomeLine::Title,
+                    ));
+                    panel.spawn((
+                        Text::new(""),
+                        TextFont::from_font_size(19.0),
+                        ClassList::new("menu-subtitle"),
+                        TextLayout::justify(Justify::Center),
+                        WelcomeLine::Away,
+                    ));
+                    // Gross, wages and the net they make, then research under
+                    // the rule because it is a different currency and not one
+                    // of the terms.
+                    for line in [
+                        WelcomeLine::Harvested,
+                        WelcomeLine::Wages,
+                        WelcomeLine::Net,
+                        WelcomeLine::Research,
+                    ] {
+                        panel.spawn((
+                            Text::new(""),
+                            // The net is the answer the player came for, so it
+                            // is not the same weight as the terms above it.
+                            TextFont::from_font_size(if line == WelcomeLine::Net {
+                                22.0
+                            } else {
+                                19.0
+                            }),
+                            ClassList::new(if line == WelcomeLine::Net {
+                                "menu-title"
+                            } else {
+                                "menu-body"
+                            }),
+                            TextLayout::justify(Justify::Center),
+                            Node {
+                                display: Display::None,
+                                ..default()
+                            },
+                            line,
+                        ));
+                    }
+                    panel.spawn((
+                        Text::new(""),
+                        // The footnote is the only line here that teaches, so
+                        // it is body type rather than the build-stamp size it
+                        // used to share with nothing.
+                        TextFont::from_font_size(18.0),
+                        ClassList::new("menu-subtitle"),
+                        TextLayout::justify(Justify::Center),
+                        Node {
+                            display: Display::None,
+                            ..default()
+                        },
+                        WelcomeLine::Footnote,
+                    ));
+                    panel
+                        .spawn(menu_button(ButtonAction::DismissWelcome, "emphasized"))
+                        .with_child(menu_button_text("BACK TO WORK"));
                 });
 
             scrim
@@ -1117,6 +1265,48 @@ pub(crate) fn setup_menu(commands: &mut Commands, asset_server: &AssetServer) {
                         .with_child(menu_button_text("RESET RUN"));
                     panel
                         .spawn(menu_button(ButtonAction::CancelRestart, ""))
+                        .with_child(menu_button_text("CANCEL"));
+                });
+
+            scrim
+                .spawn((
+                    Node {
+                        display: Display::None,
+                        ..menu_panel_node()
+                    },
+                    ClassList::new("menu-panel"),
+                    MenuView::Import,
+                ))
+                .with_children(|panel| {
+                    panel.spawn((
+                        Text::new("LOAD PASTED RUN?"),
+                        TextFont::from_font_size(28.0),
+                        ClassList::new("menu-title"),
+                    ));
+                    // Both runs, because the question is not only "are you
+                    // sure" but "is this the right save": a player restoring a
+                    // backup has no other way to tell one blob of text from
+                    // another before it lands.
+                    for line in [ImportLine::Incoming, ImportLine::Outgoing] {
+                        panel.spawn((
+                            Text::new(""),
+                            TextFont::from_font_size(19.0),
+                            ClassList::new("menu-body"),
+                            TextLayout::justify(Justify::Center),
+                            line,
+                        ));
+                    }
+                    panel.spawn((
+                        Text::new("This cannot be undone."),
+                        TextFont::from_font_size(19.0),
+                        ClassList::new("menu-body"),
+                        TextLayout::justify(Justify::Center),
+                    ));
+                    panel
+                        .spawn(menu_button(ButtonAction::ConfirmImport, ""))
+                        .with_child(menu_button_text("LOAD RUN"));
+                    panel
+                        .spawn(menu_button(ButtonAction::CancelImport, ""))
                         .with_child(menu_button_text("CANCEL"));
                 });
         });
@@ -1459,6 +1649,8 @@ pub fn sync_menu_visibility(menu: Res<MenuState>, mut views: Query<(&MenuView, &
             MenuView::Scrim if *menu != MenuState::Closed => Display::Flex,
             MenuView::Main if *menu == MenuState::Open => Display::Flex,
             MenuView::Restart if *menu == MenuState::ConfirmRestart => Display::Flex,
+            MenuView::Welcome if *menu == MenuState::Welcome => Display::Flex,
+            MenuView::Import if *menu == MenuState::ConfirmImport => Display::Flex,
             _ => Display::None,
         };
         // Guarded like every other UI write. `DerefMut` marks `Node` changed
@@ -1466,6 +1658,275 @@ pub fn sync_menu_visibility(menu: Res<MenuState>, mut views: Query<(&MenuView, &
         // unconditionally re-solved that whole subtree every frame, menu open
         // or not.
         set_if_changed(&mut node.display, display);
+    }
+}
+
+/// Fill in the greeting. Runs on change rather than every frame: the numbers
+/// are decided at launch and an import is the only other thing that moves them.
+pub fn sync_welcome(
+    welcome: Res<WelcomeBack>,
+    mut lines: Query<(&WelcomeLine, &mut Text, &mut Node)>,
+) {
+    if !welcome.is_changed() {
+        return;
+    }
+
+    for (line, mut text, mut node) in &mut lines {
+        let content = match (line, welcome.earned) {
+            (WelcomeLine::Title, _) => welcome_title(*welcome).to_string(),
+            // The cap belongs next to the duration it contradicts. In the
+            // footnote it was three rows from the number it explains and set in
+            // the smallest type on the panel, which is how a rule comes to read
+            // as a bug.
+            (WelcomeLine::Away, Some(earned)) if earned.truncated() => format!(
+                "You were away {}. The camp pays for {} of it.",
+                spell_duration(earned.away_seconds),
+                spell_duration(earned.paid_seconds)
+            ),
+            (WelcomeLine::Away, Some(earned)) => {
+                format!("You were away {}.", spell_duration(earned.away_seconds))
+            }
+            // No absence to report, so the panel is only up because the save
+            // needed rescuing, and the title has already said so.
+            (WelcomeLine::Away, None) => welcome_recovery_summary(*welcome).to_string(),
+            (WelcomeLine::Harvested, Some(earned)) => {
+                format!("Harvested  {}", signed_bananas(earned.gross))
+            }
+            (WelcomeLine::Wages, Some(earned)) => {
+                format!("Wages  {}", signed_bananas(-earned.wages))
+            }
+            // Below the net, and carrying its unit. A four-row column of
+            // bananas reads as a sum, and research points are not one of the
+            // terms: sitting between Wages and Net it broke the arithmetic the
+            // other three rows are doing.
+            (WelcomeLine::Research, Some(earned)) => {
+                format!("Research  {} pts", signed_bananas(earned.research))
+            }
+            (WelcomeLine::Net, Some(earned)) => format!("Net  {}", signed_bananas(earned.net())),
+            (WelcomeLine::Footnote, _) => welcome_footnote(*welcome),
+            (_, None) => String::new(),
+        };
+
+        // A zero row is a row that teaches nothing. Research especially: most
+        // runs have no technologists, and a permanent "Research +0" would put
+        // a number on screen whose only job is to be ignored.
+        let wanted = if content.is_empty()
+            || matches!(line, WelcomeLine::Research)
+                && welcome.earned.is_some_and(|earned| earned.research <= 0.0)
+        {
+            Display::None
+        } else {
+            Display::Flex
+        };
+        set_if_changed(&mut node.display, wanted);
+        if wanted != Display::None {
+            set_if_changed(&mut text.0, content);
+        }
+    }
+}
+
+/// The headline carries the news, and the worst news is not a greeting.
+///
+/// "WELCOME BACK" over "this build could not read your last run" puts the
+/// friendliest words in the game on top of the only screen a player might be
+/// upset by, and leaves the actual loss in sixteen-point small print below.
+fn welcome_title(welcome: WelcomeBack) -> &'static str {
+    match welcome.recovery {
+        Some(persistence::Recovery::Quarantined { .. }) => "YOUR SAVE DID NOT OPEN",
+        Some(persistence::Recovery::FromNewerBuild { .. }) => "OLDER BUILD",
+        None => "WELCOME BACK",
+    }
+}
+
+/// What the title means, for the launch that has no absence to report.
+fn welcome_recovery_summary(welcome: WelcomeBack) -> &'static str {
+    match welcome.recovery {
+        Some(persistence::Recovery::Quarantined { .. }) => {
+            "This build could not read your last run, so you are starting fresh."
+        }
+        Some(persistence::Recovery::FromNewerBuild { .. }) => {
+            "This save was written by a newer build of the game."
+        }
+        None => "",
+    }
+}
+
+/// The small print: what became of a save this build could not read, and why a
+/// camp that was working stopped.
+fn welcome_footnote(welcome: WelcomeBack) -> String {
+    // Written as unbroken literals on purpose. A `\` line continuation here
+    // reads correctly in source and does not survive the file: the escape is
+    // flattened away and its indentation is left behind *inside* the string, so
+    // the panel renders a fourteen-space hole mid-sentence. Nothing in the type
+    // system or the linter catches it, which is why
+    // `no_player_facing_string_has_a_gap_in_it` exists below.
+    let mut notes = Vec::new();
+    // `kept` is load-bearing, not decoration. Telling a playtester their run
+    // has been set aside when the slot was already full - or when the write
+    // failed - is a worse outcome than the loss, because they will clear their
+    // storage on the strength of it.
+    match welcome.recovery {
+        Some(persistence::Recovery::Quarantined { kept: true }) => notes.push(
+            "The old save has been set aside rather than deleted. Send it in rather than clearing it."
+                .to_string(),
+        ),
+        Some(persistence::Recovery::Quarantined { kept: false }) => notes.push(
+            "It could not be set aside, so it is not being held for you."
+                .to_string(),
+        ),
+        Some(persistence::Recovery::FromNewerBuild { kept: true }) => notes.push(
+            "The original has been kept untouched. Update the game to pick it up again."
+                .to_string(),
+        ),
+        Some(persistence::Recovery::FromNewerBuild { kept: false }) => notes.push(
+            "The original could not be kept, so play on here only if you are willing to lose what the newer build added."
+                .to_string(),
+        ),
+        None => {}
+    }
+    if let Some(earned) = welcome.earned {
+        // The one line here that teaches: the camp did not stop, it ran out of
+        // money. Naming the units the player hired, rather than "support
+        // staff", and saying what it cost is what turns it from a status
+        // message into the reason to bank more before leaving.
+        if earned.starved() {
+            let worked = earned.paid_seconds - earned.starved_seconds;
+            notes.push(format!(
+                "The camp ran out of bananas after {}. {} Leave more in the bank and the whole night pays.",
+                spell_duration(worked),
+                who_downed_tools(welcome)
+            ));
+        }
+    }
+    notes.join("\n\n")
+}
+
+/// Describe the run waiting to be loaded, and the one it would replace.
+pub fn sync_import_confirm(
+    pending: Res<crate::game::PendingImport>,
+    treasury: Res<Treasury>,
+    workforce: Res<Workforce>,
+    carts: Res<Carts>,
+    mut lines: Query<(&ImportLine, &mut Text)>,
+) {
+    let Some(incoming) = pending.0 else {
+        return;
+    };
+    if !pending.is_changed() {
+        return;
+    }
+    for (line, mut text) in &mut lines {
+        let content = match line {
+            ImportLine::Incoming => format!("Pasted: {}", describe_run(incoming)),
+            ImportLine::Outgoing => format!(
+                "Replaces: {}",
+                describe_run(SavedRun {
+                    treasury: *treasury,
+                    workforce: *workforce,
+                    carts: *carts,
+                    ..SavedRun::default()
+                })
+            ),
+        };
+        set_if_changed(&mut text.0, content);
+    }
+}
+
+/// A run in one line, in the nouns the player bought.
+fn describe_run(run: SavedRun) -> String {
+    let monkeys = run.workforce.count();
+    let bananas = signed_bananas(run.treasury.bananas());
+    let bananas = bananas
+        .strip_prefix('+')
+        .unwrap_or(bananas.as_str())
+        .to_string();
+    match run.carts.owned() {
+        0 => format!("{monkeys} monkeys, {bananas} bananas"),
+        carts => format!("{monkeys} monkeys, {carts} carts, {bananas} bananas"),
+    }
+}
+
+/// Name the monkeys that stopped, and only the ones the camp actually has.
+///
+/// A camp of three technologists and no harvesters is reachable in ordinary
+/// play - hand-harvest, buy a researcher, close the tab - and a sentence about
+/// chefs and unpackers walking off the job names three groups that do not
+/// exist. The panel has to describe the player's camp, not a typical one.
+fn who_downed_tools(welcome: WelcomeBack) -> &'static str {
+    match welcome.staff_and_harvesters {
+        (false, _) => "",
+        (true, true) => {
+            "Your support monkeys downed tools; the harvesters kept walking without them."
+        }
+        // Nobody left to carry them, so the camp really did stop.
+        (true, false) => {
+            "Your support monkeys downed tools, and nobody was harvesting to pay them."
+        }
+    }
+}
+
+/// Say what the last COPY MY RUN or LOAD A RUN did.
+pub fn sync_save_notice(
+    notice: Res<SaveNotice>,
+    mut labels: Query<(&mut Text, &mut Node), With<SaveNoticeText>>,
+) {
+    if !notice.is_changed() {
+        return;
+    }
+    for (mut text, mut node) in &mut labels {
+        let display = if notice.0.is_some() {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        set_if_changed(&mut node.display, display);
+        if let Some(notice) = notice.0 {
+            set_if_changed(&mut text.0, notice.message().to_string());
+        }
+    }
+}
+
+/// A count of bananas with its sign, grouped in threes.
+///
+/// Whole bananas, unlike the live counter's one decimal: an absence is measured
+/// in thousands, and a tenth of a banana on the end of five figures is noise
+/// dressed as precision.
+fn signed_bananas(value: f64) -> String {
+    let rounded = value.abs().round();
+    // A bill too small to show must not read as income. `+0` for a wage row
+    // turns up on exactly the smallest camps, which are the newest players.
+    if rounded == 0.0 {
+        return "0".to_string();
+    }
+    let sign = if value < 0.0 { '-' } else { '+' };
+    let digits = format!("{rounded:.0}");
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    grouped.push(sign);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
+/// A stretch of time as a player would say it: the two largest units that
+/// apply, and never more. "6h 12m", not "6h 12m 41s".
+fn spell_duration(seconds: f64) -> String {
+    let total = seconds.max(0.0) as u64;
+    let (days, hours, minutes) = (
+        total / 86_400,
+        (total % 86_400) / 3_600,
+        (total % 3_600) / 60,
+    );
+    match (days, hours, minutes) {
+        (0, 0, 0) => format!("{total}s"),
+        (0, 0, m) => format!("{m}m"),
+        (0, h, 0) => format!("{h}h"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, 0, _) => format!("{d}d"),
+        (d, h, _) => format!("{d}d {h}h"),
     }
 }
 
@@ -1861,6 +2322,191 @@ pub fn sync_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{OfflineYield, SavedRun, Staff, Workforce, offline_yield};
+
+    fn welcome(
+        earned: Option<OfflineYield>,
+        recovery: Option<persistence::Recovery>,
+    ) -> WelcomeBack {
+        WelcomeBack {
+            earned,
+            recovery,
+            staff_and_harvesters: (true, true),
+        }
+    }
+
+    fn overnight(workers: u32, staff: Staff, bananas: f64, away: f64) -> OfflineYield {
+        offline_yield(
+            SavedRun {
+                treasury: Treasury::from_saved(bananas).unwrap(),
+                workforce: Workforce::from_saved(workers).unwrap(),
+                staff,
+                ..SavedRun::default()
+            },
+            away,
+        )
+        .expect("an absence worth reporting")
+    }
+
+    /// A `\` line continuation inside a string literal reads correctly in
+    /// source and does not survive this file: the escape is flattened and its
+    /// indentation is left behind *inside* the string. Nothing in the compiler
+    /// or the linter notices, and the result is a fourteen-space hole in the
+    /// middle of a sentence on the panel a playtester is most likely to
+    /// screenshot. So the strings are asserted rather than trusted.
+    #[test]
+    fn no_player_facing_string_has_a_gap_in_it() {
+        let day = 24.0 * 3_600.0;
+        let cases = [
+            welcome(
+                Some(overnight(
+                    6,
+                    Staff::from_saved(1, 0, 0).unwrap(),
+                    400.0,
+                    3_600.0,
+                )),
+                None,
+            ),
+            // Starved, capped, and both recovery kinds: every branch that can
+            // reach the panel contributes a sentence.
+            welcome(
+                Some(overnight(
+                    6,
+                    Staff::from_saved(1, 1, 2).unwrap(),
+                    100.0,
+                    3.0 * day,
+                )),
+                None,
+            ),
+            // Both recovery kinds, and both answers to "was it actually
+            // kept" - four sentences that only ever reach a player who is
+            // already having a bad day.
+            welcome(
+                None,
+                Some(persistence::Recovery::Quarantined { kept: true }),
+            ),
+            welcome(
+                None,
+                Some(persistence::Recovery::Quarantined { kept: false }),
+            ),
+            welcome(
+                None,
+                Some(persistence::Recovery::FromNewerBuild { kept: true }),
+            ),
+            welcome(
+                None,
+                Some(persistence::Recovery::FromNewerBuild { kept: false }),
+            ),
+        ];
+
+        for case in cases {
+            let mut lines = vec![
+                welcome_title(case).to_string(),
+                welcome_recovery_summary(case).to_string(),
+                welcome_footnote(case),
+            ];
+            if let Some(earned) = case.earned {
+                lines.push(spell_duration(earned.away_seconds));
+                lines.push(signed_bananas(earned.net()));
+            }
+            for line in lines {
+                assert!(
+                    !line.contains("  "),
+                    "a player-facing string has a gap in it: {line:?}"
+                );
+                assert!(
+                    !line.contains(
+                        " 
+"
+                    ) && !line.contains(
+                        "
+ "
+                    ),
+                    "a player-facing string has a stray space at a line break: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_panel_only_names_monkeys_the_camp_actually_had() {
+        // A camp of researchers and no harvesters is reachable in ordinary
+        // play: hand-harvest, buy a technologist, close the tab. Telling that
+        // player their harvesters kept walking describes somebody else's camp.
+        let starved = overnight(0, Staff::from_saved(0, 0, 3).unwrap(), 60.0, 8.0 * 3_600.0);
+        assert!(starved.starved());
+
+        let researchers_only = WelcomeBack {
+            earned: Some(starved),
+            recovery: None,
+            staff_and_harvesters: (true, false),
+        };
+        let note = welcome_footnote(researchers_only);
+        assert!(!note.contains("harvesters kept walking"), "{note}");
+        assert!(note.contains("nobody was harvesting"), "{note}");
+
+        let staffed_camp = WelcomeBack {
+            staff_and_harvesters: (true, true),
+            ..researchers_only
+        };
+        assert!(
+            welcome_footnote(staffed_camp).contains("harvesters kept walking"),
+            "a camp with harvesters is told they carried on"
+        );
+    }
+
+    #[test]
+    fn the_headline_carries_the_news_rather_than_greeting_over_it() {
+        // A lost run must not arrive under the friendliest words in the game.
+        assert_eq!(
+            welcome_title(welcome(
+                None,
+                Some(persistence::Recovery::Quarantined { kept: true })
+            )),
+            "YOUR SAVE DID NOT OPEN"
+        );
+        assert_eq!(welcome_title(welcome(None, None)), "WELCOME BACK");
+        // And the headline's claim is made good by the line under it.
+        assert!(
+            welcome_recovery_summary(welcome(
+                None,
+                Some(persistence::Recovery::Quarantined { kept: true })
+            ))
+            .contains("starting fresh")
+        );
+    }
+
+    #[test]
+    fn the_cap_is_explained_beside_the_duration_it_contradicts() {
+        // Three days away against an eight-hour cap. A player told only "you
+        // were away 3d" and then handed eight hours of bananas reads the
+        // difference as a bug.
+        let capped = overnight(6, Staff::default(), 400.0, 3.0 * 24.0 * 3_600.0);
+        assert!(capped.truncated());
+        assert_eq!(spell_duration(capped.away_seconds), "3d");
+        assert_eq!(spell_duration(capped.paid_seconds), "8h");
+    }
+
+    #[test]
+    fn a_count_of_bananas_is_grouped_and_never_a_signed_zero() {
+        assert_eq!(signed_bananas(14_208.4), "+14,208");
+        assert_eq!(signed_bananas(-2_455.0), "-2,455");
+        assert_eq!(signed_bananas(942.0), "+942");
+        // A wage bill too small to show must not read as income. It appears on
+        // exactly the smallest camps, which are the newest players.
+        assert_eq!(signed_bananas(-0.2), "0");
+        assert_eq!(signed_bananas(0.0), "0");
+        assert_eq!(signed_bananas(-0.9), "-1");
+    }
+
+    #[test]
+    fn a_stretch_of_time_is_spelled_in_at_most_two_units() {
+        assert_eq!(spell_duration(6.0 * 3_600.0 + 12.0 * 60.0 + 41.0), "6h 12m");
+        assert_eq!(spell_duration(8.0 * 3_600.0), "8h");
+        assert_eq!(spell_duration(45.0 * 60.0), "45m");
+        assert_eq!(spell_duration(3.0 * 86_400.0 + 4.0 * 3_600.0), "3d 4h");
+        assert_eq!(spell_duration(-5.0), "0s");
+    }
 
     #[test]
     fn the_banner_stays_centred_and_fits_at_every_viewport() {

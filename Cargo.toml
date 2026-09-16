@@ -1,6 +1,6 @@
 [package]
 name = "banana-monkey-incremental"
-version = "0.2.0"
+version = "0.5.0"
 edition = "2024"
 
 [features]
@@ -10,7 +10,10 @@ edition = "2024"
 test-hooks = []
 
 [dependencies]
-bevy = "0.19.1"
+# `system_clipboard` is what makes COPY SAVE reach the desktop's real clipboard.
+# Without it `bevy_clipboard` falls back to an in-process buffer, and the button
+# would appear to work while putting the run somewhere no player can paste from.
+bevy = { version = "0.19.1", features = ["system_clipboard"] }
 bevy_flair = "0.8.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -689,10 +689,6 @@ impl Staff {
         };
         *slot = (*slot + 1).min(MAX_SUPPORT);
     }
-
-    pub fn restart(&mut self) {
-        *self = Self::default();
-    }
 }
 
 /// How many of each role are currently fed, and therefore working.
@@ -863,10 +859,6 @@ impl Treasury {
         );
         self.bananas = (self.bananas - amount).max(0.0);
     }
-
-    pub fn restart(&mut self) {
-        self.bananas = 0.0;
-    }
 }
 
 pub fn is_valid_banana_count(value: f64) -> bool {
@@ -915,26 +907,39 @@ impl Workforce {
     pub fn hire(&mut self) {
         self.hired = (self.hired + 1).min(MAX_WORKERS);
     }
-
-    pub fn restart(&mut self) {
-        self.hired = 0;
-    }
 }
 
-/// Reset every piece of run state together, so they cannot drift apart. Every
-/// new resource that survives a run belongs here and nowhere else.
-pub fn restart_run(
+/// Put a run into the live resources, all of them together so they cannot
+/// drift apart. Every new resource that survives a run belongs here and
+/// nowhere else.
+///
+/// Restarting and importing are the same operation with a different run: a
+/// restart installs [`SavedRun::default`], an import installs the pasted one.
+/// Keeping them one function is what stops an import from being a restart that
+/// forgot a field.
+pub fn install_run(
+    run: SavedRun,
     treasury: &mut Treasury,
     workforce: &mut Workforce,
     carts: &mut Carts,
     staff: &mut Staff,
     research: &mut Research,
 ) {
-    treasury.restart();
-    workforce.restart();
-    carts.restart();
-    staff.restart();
-    research.restart();
+    // Destructured rather than assigned field by field: adding a sixth thing to
+    // `SavedRun` then fails to compile *here*, at the one place that has to
+    // know about it, instead of silently not being installed by an import.
+    let SavedRun {
+        treasury: saved_treasury,
+        workforce: saved_workforce,
+        carts: saved_carts,
+        staff: saved_staff,
+        research: saved_research,
+    } = run;
+    *treasury = saved_treasury;
+    *workforce = saved_workforce;
+    *carts = saved_carts;
+    *staff = saved_staff;
+    *research = saved_research;
 }
 
 // ──────────────────────────────────────────────────────────────── economy
@@ -1018,6 +1023,289 @@ pub fn spendable(treasury: Treasury, committed: f64) -> f64 {
     (treasury.bananas() - committed).max(0.0)
 }
 
+// ────────────────────────────────────────────────────────── the saved run
+
+/// Everything a run carries between sessions: the economy's state, with no
+/// presentation and no in-flight cycle phase.
+///
+/// It lives here rather than in `persistence` because it is not a file format -
+/// it is the economy's state, and [`offline_yield`] is economy math that needs
+/// all of it. `persistence` re-exports it, and owns the JSON on either side.
+///
+/// Worker cycle phase is deliberately absent: restored workers receive a random
+/// phase because this format does not claim to preserve in-flight simulation
+/// progress. Their first partial cycle is presentation-only, so placement
+/// cannot create income or wages.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct SavedRun {
+    pub treasury: Treasury,
+    pub workforce: Workforce,
+    pub staff: Staff,
+    pub research: Research,
+    pub carts: Carts,
+}
+
+impl SavedRun {
+    /// Which support monkeys are working. Offline there is no larder and no
+    /// shift clock, so the projection has to assume every hire is fed; the
+    /// solvency clamp in [`offline_yield`] is what stops that assumption
+    /// spending bananas the run does not have.
+    fn all_fed(self) -> FedStaff {
+        FedStaff {
+            chefs: self.staff.count(SupportRole::Chef),
+            unpackers: self.staff.count(SupportRole::Unpacker),
+            technologists: self.staff.count(SupportRole::Technologist),
+        }
+    }
+
+    /// Bank an absence. Gross first, then wages: the treasury is structurally
+    /// non-negative, and charging a bill before the delivery that funds it is
+    /// exactly the overdraft `Treasury::charge` asserts against.
+    pub fn credit_offline(&mut self, earned: OfflineYield) {
+        // The clamp below makes `charge`'s own assertion vacuous, so this is
+        // the only thing left that would catch a future unit whose wage the
+        // projection computes differently from the tick that charges it.
+        debug_assert!(
+            earned.wages <= self.treasury.bananas() + earned.gross + 1e-6,
+            "an absence billed {} against {} available",
+            earned.wages,
+            self.treasury.bananas() + earned.gross
+        );
+        self.treasury.credit(earned.gross);
+        // `paid_seconds` already guarantees the wages are covered; the clamp is
+        // against float residue on that equality, not against a design hole.
+        self.treasury
+            .charge(earned.wages.min(self.treasury.bananas()));
+        self.research.credit(earned.research);
+    }
+}
+
+// ─────────────────────────────────────────────────────────── time away
+
+/// The longest absence a run is paid for.
+///
+/// A cap is not a punishment, it is what keeps the first session back
+/// *playable*: uncapped, a fortnight away hands back a balance that skips every
+/// price on the ladder at once and leaves nothing to buy. Eight hours is a night
+/// asleep - the absence a player is most likely to want paid - and it is short
+/// enough that returning daily still beats returning weekly.
+pub const OFFLINE_CAP_SECONDS: f64 = 8.0 * 60.0 * 60.0;
+
+/// Below this, an absence is a reload.
+///
+/// Every tab refresh, every new build a playtester picks up, and every crash
+/// recovery comes back through the same path as a night away. Without a floor
+/// they would each raise a "while you were away" panel reporting four seconds
+/// and nine bananas, and the panel would stop meaning anything.
+pub const OFFLINE_MIN_SECONDS: f64 = 60.0;
+
+/// What an absence earned. Gross and wages stay separate for the same reason
+/// [`EconomySnapshot`] keeps them separate on the readout (I4): a player who is
+/// handed one net number cannot tell a quiet camp from an expensive one.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct OfflineYield {
+    /// Real seconds since the save was written.
+    pub away_seconds: f64,
+    /// Seconds simulated: `away_seconds` after [`OFFLINE_CAP_SECONDS`].
+    pub paid_seconds: f64,
+    /// How much of `paid_seconds` the support staff spent unpaid, having run
+    /// the treasury dry. Reported rather than hidden, because it is the single
+    /// most useful thing a returning player can be told: it is the difference
+    /// between a camp that was working and one that downed tools at midnight.
+    pub starved_seconds: f64,
+    pub gross: f64,
+    pub wages: f64,
+    pub research: f64,
+}
+
+impl OfflineYield {
+    pub fn net(self) -> f64 {
+        self.gross - self.wages
+    }
+
+    /// The absence was longer than the run was paid for, so the cap cut it
+    /// short. Worth saying out loud: a player who is not told reads a cap as a
+    /// bug.
+    pub fn truncated(self) -> bool {
+        self.away_seconds > self.paid_seconds + 1e-9
+    }
+
+    /// The camp could not make payroll for the whole absence.
+    pub fn starved(self) -> bool {
+        self.starved_seconds > 1e-9
+    }
+}
+
+/// What `away_seconds` of absence earns a run, in closed form.
+///
+/// Closed form rather than simulated: eight hours is 576,000 ticks of a
+/// schedule that wants entities, and the projection the HUD already shows the
+/// player (`EconomySnapshot`) is the same steady-state rate, so paying the
+/// absence from anything else would make the readout a lie.
+///
+/// The absence is paid in at most two stretches, because a camp that cannot
+/// make payroll does not stop - it starves, which is a different rate rather
+/// than no rate:
+///
+/// 1. **Staffed.** Everyone is fed, at the rate the readout was showing. If the
+///    net rate is negative this lasts exactly as long as the treasury does.
+/// 2. **Starved.** The support staff go unpaid, so by D4 they stop drawing
+///    wages *and* stop contributing their multipliers. What is left is the
+///    walking pool and the carts, which fund their own meals out of the
+///    deliveries that earn them and so can never go under. Research stops,
+///    because only a fed Technologist produces it.
+///
+/// Two stretches rather than one matter more than they look: a mid-game camp
+/// pushing research runs at a deliberate loss, and paying it only until the
+/// treasury empties turned an eight-hour night into seventeen minutes of
+/// progress. The live simulation would have starved the researchers and kept
+/// every monkey walking.
+///
+/// Three deliberate under-estimates remain, all of them in the direction of
+/// paying less, and none able to take something a player already had:
+///
+/// - Research earned during the absence does not raise the tech multiplier that
+///   the absence is paid at, so a long night compounds nothing.
+/// - Harvesters are paid at their steady-state rate, ignoring the partial cycle
+///   a restore drops them into.
+/// - Once starved, the support staff are never re-hired by the recovering
+///   treasury. Live, the camp would oscillate - feed, drain, starve, recover -
+///   and settle above this. Modelling that limit cycle would be a second
+///   economy to keep in step with the first.
+///
+/// `None` for an absence too short to be one.
+pub fn offline_yield(run: SavedRun, away_seconds: f64) -> Option<OfflineYield> {
+    if !away_seconds.is_finite() || away_seconds < OFFLINE_MIN_SECONDS {
+        return None;
+    }
+    // An empty camp has nothing to report. Without this a player who left with
+    // nothing hired comes back to a panel whose every row reads zero, which
+    // teaches them the panel is noise before they ever see a real one.
+    if run.workforce.count() == 0 && run.staff.total() == 0 {
+        return None;
+    }
+
+    let rate_at = |fed: FedStaff| {
+        let multipliers = multipliers_for(fed, run.research);
+        (
+            EconomySnapshot::project(
+                run.workforce.count(),
+                run.carts,
+                run.staff,
+                fed,
+                multipliers,
+            ),
+            research_per_sec(fed, multipliers),
+        )
+    };
+
+    let (staffed, researching) = rate_at(run.all_fed());
+
+    let capped = away_seconds.min(OFFLINE_CAP_SECONDS);
+    let staffed_seconds = if staffed.net_per_sec >= 0.0 {
+        capped
+    } else {
+        // Linear drain, so the moment the treasury reaches zero is exact.
+        capped.min(run.treasury.bananas() / -staffed.net_per_sec)
+    }
+    .clamp(0.0, capped);
+    let starved_seconds = capped - staffed_seconds;
+    let hungry = hungry_equilibrium(run, &rate_at);
+
+    Some(OfflineYield {
+        away_seconds,
+        paid_seconds: capped,
+        starved_seconds,
+        gross: staffed.gross_per_sec * staffed_seconds + hungry.gross_per_sec * starved_seconds,
+        wages: staffed.wages_per_sec * staffed_seconds + hungry.wages_per_sec * starved_seconds,
+        research: researching * staffed_seconds + hungry.research_per_sec * starved_seconds,
+    })
+}
+
+/// The rate a camp settles at once it cannot make payroll.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct Hungry {
+    gross_per_sec: f64,
+    wages_per_sec: f64,
+    research_per_sec: f64,
+}
+
+/// Where a camp that has run out of bananas actually ends up.
+///
+/// The obvious answer - nobody on support is fed, so nobody is paid and nobody
+/// contributes a multiplier - is wrong, and wrong in the player's favour by up
+/// to three orders of magnitude. Starvation is not absorbing:
+/// [`SupportCycle::advance`] parks `remaining` at zero and eats again on the
+/// very next tick the larder can afford it, and the harvesters keep refilling
+/// that larder. So the camp does not stop paying its support - it pays as many
+/// of them as the harvest will carry, for ever, with the treasury pinned near
+/// zero. Banking the harvesters' surplus as profit instead made closing the tab
+/// strictly better than playing, by about sevenfold.
+///
+/// So the starved stretch is a fixed point, not a constant: the largest prefix
+/// of the staff - in [`SupportRole::FEEDING_ORDER`], the order the shared larder
+/// actually feeds them - that pays for itself, blended with the next one along
+/// so the net comes out at exactly zero. The surplus leaves as wages and comes
+/// back as research, which is what the live economy does with it.
+fn hungry_equilibrium(
+    run: SavedRun,
+    rate_at: &impl Fn(FedStaff) -> (EconomySnapshot, f64),
+) -> Hungry {
+    let total = run.staff.total();
+    // The largest prefix the harvest can carry. Searched rather than solved:
+    // net is not monotonic in the count, because an early chef earns more than
+    // it eats and a late technologist does not.
+    let mut sustained = 0;
+    for count in 1..=total {
+        if rate_at(fed_prefix(run.staff, count)).0.net_per_sec >= 0.0 {
+            sustained = count;
+        }
+    }
+
+    let (under, under_research) = rate_at(fed_prefix(run.staff, sustained));
+    if sustained == total {
+        // Everyone is affordable, so there is no starved stretch to describe.
+        return Hungry {
+            gross_per_sec: under.gross_per_sec,
+            wages_per_sec: under.wages_per_sec,
+            research_per_sec: under_research,
+        };
+    }
+
+    // One more than the camp can carry, so this one is underwater by
+    // construction and the blend below is a duty cycle between the two.
+    let (over, over_research) = rate_at(fed_prefix(run.staff, sustained + 1));
+    let span = under.net_per_sec - over.net_per_sec;
+    let share = if span > 0.0 {
+        (under.net_per_sec / span).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let blend = |low: f64, high: f64| low * (1.0 - share) + high * share;
+
+    Hungry {
+        gross_per_sec: blend(under.gross_per_sec, over.gross_per_sec),
+        wages_per_sec: blend(under.wages_per_sec, over.wages_per_sec),
+        research_per_sec: blend(under_research, over_research),
+    }
+}
+
+/// The first `count` support monkeys, in the order the larder feeds them.
+fn fed_prefix(staff: Staff, count: u32) -> FedStaff {
+    let mut remaining = count;
+    let mut fed = FedStaff::default();
+    for role in SupportRole::FEEDING_ORDER {
+        let take = remaining.min(staff.count(role));
+        remaining -= take;
+        match role {
+            SupportRole::Chef => fed.chefs = take,
+            SupportRole::Unpacker => fed.unpackers = take,
+            SupportRole::Technologist => fed.technologists = take,
+        }
+    }
+    fed
+}
+
 /// Carts owned, and how many monkeys are aboard them.
 ///
 /// D8 and D17 are both deleted here. A cart is crewed by exactly three monkeys
@@ -1073,10 +1361,6 @@ impl Carts {
     pub fn board(&mut self) {
         self.crewed = (self.crewed + 1).min(self.owned * CART_CREW);
     }
-
-    pub fn restart(&mut self) {
-        *self = Self::default();
-    }
 }
 
 /// Cumulative research, and the levels it has bought.
@@ -1128,10 +1412,6 @@ impl Research {
     pub fn credit(&mut self, amount: f64) {
         debug_assert!(amount.is_finite() && amount >= 0.0);
         self.points = (self.points + amount).min(MAX_SAFE_BANANAS);
-    }
-
-    pub fn restart(&mut self) {
-        self.points = 0.0;
     }
 }
 
@@ -1862,27 +2142,334 @@ mod tests {
     }
 
     #[test]
-    fn restart_clears_every_piece_of_run_state_together() {
+    fn installing_a_run_moves_every_piece_of_state_together() {
         let mut treasury = Treasury::from_saved(12.0).unwrap();
         let mut workforce = Workforce::from_saved(4).unwrap();
-
         let mut staff = Staff::from_saved(2, 3, 1).unwrap();
         let mut research = Research::from_saved(500.0).unwrap();
         let mut carts = Carts::from_saved(2, 6).unwrap();
 
-        restart_run(
+        // A restart is the default run, and it has to clear all five.
+        install_run(
+            SavedRun::default(),
             &mut treasury,
             &mut workforce,
             &mut carts,
             &mut staff,
             &mut research,
         );
-
         assert_eq!(treasury, Treasury::default());
         assert_eq!(workforce, Workforce::default());
         assert_eq!(staff, Staff::default());
         assert_eq!(research, Research::default());
         assert_eq!(carts, Carts::default());
+
+        // An import is any other run, and it has to land all five. A field
+        // this function forgets is a field an import silently drops.
+        let imported = SavedRun {
+            treasury: Treasury::from_saved(99.5).unwrap(),
+            workforce: Workforce::from_saved(9).unwrap(),
+            staff: Staff::from_saved(1, 2, 3).unwrap(),
+            research: Research::from_saved(61.0).unwrap(),
+            carts: Carts::from_saved(3, 9).unwrap(),
+        };
+        install_run(
+            imported,
+            &mut treasury,
+            &mut workforce,
+            &mut carts,
+            &mut staff,
+            &mut research,
+        );
+        assert_eq!(
+            SavedRun {
+                treasury,
+                workforce,
+                staff,
+                research,
+                carts
+            },
+            imported
+        );
+    }
+
+    // ─────────────────────────────────────────── time away
+
+    fn camp(bananas: f64, workers: u32, staff: Staff) -> SavedRun {
+        SavedRun {
+            treasury: Treasury::from_saved(bananas).unwrap(),
+            workforce: Workforce::from_saved(workers).unwrap(),
+            staff,
+            ..SavedRun::default()
+        }
+    }
+
+    #[test]
+    fn a_reload_is_not_an_absence() {
+        let run = camp(100.0, 4, Staff::default());
+
+        assert_eq!(offline_yield(run, 0.0), None);
+        assert_eq!(offline_yield(run, OFFLINE_MIN_SECONDS - 0.001), None);
+        assert!(offline_yield(run, OFFLINE_MIN_SECONDS).is_some());
+        // A clock that produced nonsense pays nothing rather than everything.
+        assert_eq!(offline_yield(run, f64::NAN), None);
+        assert_eq!(offline_yield(run, f64::INFINITY), None);
+    }
+
+    #[test]
+    fn an_empty_camp_has_nothing_to_report() {
+        // Bananas in the bank are not production. Without this the panel opens
+        // on a ledger of zeros and teaches the player to dismiss it unread.
+        assert_eq!(
+            offline_yield(camp(500.0, 0, Staff::default()), 3600.0),
+            None
+        );
+    }
+
+    #[test]
+    fn an_absence_pays_exactly_the_rate_the_readout_promised() {
+        // The contract that makes the feature honest: the "+n/min" the player
+        // watched before they closed the tab is the rate they are paid at.
+        let run = camp(1_000.0, 6, Staff::from_saved(1, 1, 0).unwrap());
+        let hour = offline_yield(run, 3_600.0).unwrap();
+
+        let fed = FedStaff {
+            chefs: 1,
+            unpackers: 1,
+            technologists: 0,
+        };
+        let readout = EconomySnapshot::project(
+            6,
+            Carts::default(),
+            Staff::from_saved(1, 1, 0).unwrap(),
+            fed,
+            multipliers_for(fed, Research::default()),
+        );
+
+        assert_eq!(hour.paid_seconds, 3_600.0);
+        assert_eq!(hour.starved_seconds, 0.0);
+        assert!((hour.gross - readout.gross_per_sec * 3_600.0).abs() < 1e-9);
+        assert!((hour.wages - readout.wages_per_sec * 3_600.0).abs() < 1e-9);
+        assert!((hour.net() - readout.net_per_sec * 3_600.0).abs() < 1e-9);
+        assert!(!hour.truncated());
+    }
+
+    #[test]
+    fn a_long_absence_is_paid_only_to_the_cap() {
+        let run = camp(1_000.0, 6, Staff::default());
+        let week = offline_yield(run, 7.0 * 24.0 * 3_600.0).unwrap();
+        let capped = offline_yield(run, OFFLINE_CAP_SECONDS).unwrap();
+
+        assert_eq!(week.paid_seconds, OFFLINE_CAP_SECONDS);
+        assert_eq!(week.gross, capped.gross);
+        // The player is told, because a cap they cannot see reads as a bug.
+        assert!(week.truncated());
+        assert!(!capped.truncated());
+    }
+
+    #[test]
+    fn a_camp_that_runs_out_of_bananas_starves_instead_of_going_negative() {
+        // Three technologists and nobody harvesting: -0.60/s against a balance
+        // that buys exactly one hundred seconds of it. After that they are
+        // unpaid, and with no harvesters there is nothing else to run.
+        let bleeding = camp(60.0, 0, Staff::from_saved(0, 0, 3).unwrap());
+        let overnight = offline_yield(bleeding, OFFLINE_CAP_SECONDS).unwrap();
+
+        assert!((overnight.starved_seconds - (OFFLINE_CAP_SECONDS - 100.0)).abs() < 1e-9);
+        assert!(overnight.starved());
+        // The wage bill stops with the wages: an unpaid monkey does not eat.
+        assert!((overnight.wages - 60.0).abs() < 1e-9);
+        // And the research stops with it, because only a fed one researches.
+        assert!((overnight.research - 3.0 * 100.0).abs() < 1e-9);
+
+        let mut banked = bleeding;
+        banked.credit_offline(overnight);
+        assert_eq!(banked.treasury.bananas(), 0.0);
+    }
+
+    #[test]
+    fn a_research_push_spends_its_surplus_on_wages_rather_than_banking_it() {
+        // The state this fixed point exists for: a mid-game camp running at a
+        // deliberate loss to buy research.
+        //
+        // The tempting model - once the treasury empties, support goes unpaid
+        // and stays unpaid - is wrong, and wrong in the player's favour by
+        // three orders of magnitude. `SupportCycle::advance` parks a hungry
+        // monkey at zero and feeds it again the moment the larder can, so the
+        // harvesters' surplus keeps going out as wages for ever. Banking it as
+        // profit instead paid this camp thousands of bananas it never earned,
+        // and made closing the tab better than playing.
+        let pushing = camp(100.0, 6, Staff::from_saved(1, 1, 2).unwrap());
+        let overnight = offline_yield(pushing, OFFLINE_CAP_SECONDS).unwrap();
+
+        assert!(
+            overnight.starved(),
+            "this camp cannot make payroll all night"
+        );
+        assert!(
+            !overnight.truncated(),
+            "but the whole night is accounted for"
+        );
+
+        let mut banked = pushing;
+        banked.credit_offline(overnight);
+
+        // The surplus left as wages and came back as research. It did not
+        // become a pile of bananas.
+        assert!(
+            banked.treasury.bananas() < 1.0,
+            "a camp that cannot make payroll banks nothing: {}",
+            banked.treasury.bananas()
+        );
+        assert!(
+            banked.research.points() > 10_000.0,
+            "the night bought research instead: {}",
+            banked.research.points()
+        );
+        // And the night is still worth having: the fixed point pays research
+        // long after the treasury that started it is gone.
+        let staffed_only = overnight.paid_seconds - overnight.starved_seconds;
+        assert!(
+            overnight.research > 2.3 * staffed_only * 5.0,
+            "most of the research came from the starved stretch"
+        );
+    }
+
+    /// The figures D33 quotes, measured rather than carried in prose.
+    #[test]
+    fn the_documented_overnight_figures_still_hold() {
+        let pushing = camp(100.0, 6, Staff::from_saved(1, 1, 2).unwrap());
+        let two_hours = offline_yield(pushing, 2.0 * 3_600.0).unwrap();
+        let mut banked = pushing;
+        banked.credit_offline(two_hours);
+
+        // The camp cannot make payroll, so it banks nothing and buys research
+        // with the surplus instead. Both numbers appear in D33; if this test
+        // fails, the doc is what needs changing.
+        assert!(
+            banked.treasury.bananas() < 0.001,
+            "{}",
+            banked.treasury.bananas()
+        );
+        assert_eq!(
+            format!("{:.0}", banked.research.points()),
+            "13026",
+            "research over two hours"
+        );
+        assert_eq!(
+            format!("{:.0}", two_hours.paid_seconds - two_hours.starved_seconds),
+            "1007",
+            "seconds before the camp ran dry"
+        );
+    }
+
+    #[test]
+    fn a_starved_camp_breaks_exactly_even() {
+        // The fixed point's defining property, and the reason it cannot mint
+        // bananas: across the starved stretch the camp earns precisely what it
+        // spends. Checked on a camp whose staff the harvest cannot carry.
+        let pushing = camp(100.0, 6, Staff::from_saved(1, 1, 2).unwrap());
+        let overnight = offline_yield(pushing, OFFLINE_CAP_SECONDS).unwrap();
+        let staffed_seconds = overnight.paid_seconds - overnight.starved_seconds;
+
+        let fed = pushing.all_fed();
+        let staffed = EconomySnapshot::project(
+            6,
+            Carts::default(),
+            pushing.staff,
+            fed,
+            multipliers_for(fed, pushing.research),
+        );
+        // Everything banked during the staffed stretch, and nothing after it.
+        let over_staffed = staffed.net_per_sec * staffed_seconds;
+        assert!(
+            (overnight.net() - over_staffed).abs() < 1e-6,
+            "the starved stretch must be net zero: {} against {}",
+            overnight.net(),
+            over_staffed
+        );
+        // Which is exactly the treasury it started with, spent down to nothing.
+        assert!((overnight.net() + 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_larder_feeds_the_prefix_the_harvest_can_carry() {
+        let staff = Staff::from_saved(2, 3, 4).unwrap();
+        // Unpackers first, then chefs, then technologists - the order
+        // `advance_cycles` actually feeds them in.
+        assert_eq!(fed_prefix(staff, 0), FedStaff::default());
+        assert_eq!(
+            fed_prefix(staff, 2),
+            FedStaff {
+                unpackers: 2,
+                ..FedStaff::default()
+            }
+        );
+        assert_eq!(
+            fed_prefix(staff, 4),
+            FedStaff {
+                unpackers: 3,
+                chefs: 1,
+                ..FedStaff::default()
+            }
+        );
+        assert_eq!(
+            fed_prefix(staff, 99),
+            FedStaff {
+                chefs: 2,
+                unpackers: 3,
+                technologists: 4
+            }
+        );
+    }
+
+    #[test]
+    fn a_solvent_camp_never_starves() {
+        // Six monkeys and one chef pays for itself, so there is no second
+        // stretch and nothing to apologise for on the panel.
+        let solvent = camp(100.0, 6, Staff::from_saved(1, 0, 0).unwrap());
+        let overnight = offline_yield(solvent, OFFLINE_CAP_SECONDS).unwrap();
+
+        assert_eq!(overnight.starved_seconds, 0.0);
+        assert!(!overnight.starved());
+    }
+
+    #[test]
+    fn an_absence_is_banked_into_the_run_it_was_earned_by() {
+        let run = camp(200.0, 8, Staff::from_saved(0, 0, 2).unwrap());
+        let earned = offline_yield(run, 3_600.0).unwrap();
+
+        let mut banked = run;
+        banked.credit_offline(earned);
+
+        assert!((banked.treasury.bananas() - (200.0 + earned.net())).abs() < 1e-6);
+        assert!(earned.research > 0.0, "fed technologists research offline");
+        assert!((banked.research.points() - earned.research).abs() < 1e-9);
+        // Everything that is not a balance is left exactly alone: an absence
+        // pays a run, it does not hire into it.
+        assert_eq!(banked.workforce, run.workforce);
+        assert_eq!(banked.staff, run.staff);
+        assert_eq!(banked.carts, run.carts);
+    }
+
+    #[test]
+    fn a_crewed_cart_earns_while_the_tab_is_shut() {
+        // Nine monkeys walking, against the same nine riding three carts. The
+        // carts have to be worth more, or the absence is punishing the player
+        // for the thing the game just sold them.
+        let walking = camp(500.0, 9, Staff::default());
+        let mut riding = walking;
+        riding.carts = Carts::from_saved(3, 9).unwrap();
+
+        let on_foot = offline_yield(walking, 3_600.0).unwrap();
+        let hauled = offline_yield(riding, 3_600.0).unwrap();
+
+        assert!(
+            hauled.net() > on_foot.net(),
+            "carts out-earn the pool they took: {} against {}",
+            hauled.net(),
+            on_foot.net()
+        );
     }
 
     // ─────────────────────────────────────────── costs and gating

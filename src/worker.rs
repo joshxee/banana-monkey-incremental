@@ -138,10 +138,6 @@ impl RestoreCarts {
             rng: fastrand::Rng::with_seed(seed),
         }
     }
-
-    pub fn clear(&mut self) {
-        self.remaining = 0;
-    }
 }
 
 impl Default for RestoreCarts {
@@ -473,10 +469,6 @@ impl RestoreWorkers {
             remaining: count as usize,
             rng: fastrand::Rng::with_seed(seed),
         }
-    }
-
-    pub fn clear(&mut self) {
-        self.remaining = 0;
     }
 }
 
