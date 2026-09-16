@@ -1420,10 +1420,16 @@ mod tests {
             assert_eq!((w, h), (320, 352));
             assert_eq!((gw, gh), (w, h));
             assert_eq!((sw, sh), (w, h));
+            // `as_chunks` rather than `chunks_exact`: the chunk size is a
+            // constant, and clippy from Rust 1.98 rejects the latter for one.
+            // It also types each pixel as `[u8; 4]` instead of a slice, which
+            // is what these comparisons meant all along.
             for ((original, floor), prop) in full
-                .chunks_exact(4)
-                .zip(ground.chunks_exact(4))
-                .zip(structure.chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(ground.as_chunks::<4>().0)
+                .zip(structure.as_chunks::<4>().0)
             {
                 assert!(floor[3] == 0 || floor[3] == 255);
                 assert!(prop[3] == 0 || prop[3] == 255);
