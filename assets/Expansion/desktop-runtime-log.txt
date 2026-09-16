@@ -1,0 +1,2 @@
+2026-09-16T08:30:05.927447Z  WARN gilrs::gamepad: No mapping found for UUID 00000000-0000-0000-0000-000000000000
+	Default mapping will be used.

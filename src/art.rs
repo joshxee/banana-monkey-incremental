@@ -119,6 +119,8 @@ impl Cell {
 
 /// The plants, all sharing one canvas and one anchor (see `assets/Jungle`).
 pub(crate) const PLANT: Cell = Cell::new((320.0, 352.0), (160.0, 316.0));
+/// Scenery buildings share the vegetation canvas and native worker scale.
+pub(crate) const OUTBUILDING: Cell = PLANT;
 /// The town centre (see `assets/TownCenter`).
 ///
 /// The one asset drawn smaller than its own art direction asks. It is a
@@ -828,7 +830,7 @@ impl CartSheets {
 /// Every drawn asset, loaded once.
 ///
 /// Handles rather than images: `AssetServer::load` is cached by path, so the
-/// seventy-odd jungle plants on the board share three textures between them.
+/// jungle instances on the board share eight textures between them.
 #[derive(Resource, Debug, Clone)]
 pub(crate) struct Art {
     /// The treehouse as it stands: house, deck, stair, tree and bins.
@@ -836,8 +838,11 @@ pub(crate) struct Art {
     /// And the shade it casts on the ground, which is drawn flat, under the
     /// depot glow and the crowd's shadows, rather than with the house (D30).
     pub(crate) town_centre_ground: Handle<Image>,
-    /// The three jungle plants, in the order a scatter picks between them.
-    pub(crate) jungle: [Handle<Image>; 3],
+    /// Eight jungle silhouettes, in the order a deterministic scatter picks them.
+    pub(crate) jungle: [Handle<Image>; 8],
+    pub(crate) deep_jungle_floor: Handle<Image>,
+    pub(crate) outbuildings: [Handle<Image>; 3],
+    pub(crate) outbuilding_floors: [Handle<Image>; 3],
     /// The banana plant with its bunch still on: the node workers walk to.
     pub(crate) banana_fruiting: Handle<Image>,
     /// And with the bunch cut: the home tree, whose bunch is the loose one
@@ -903,10 +908,26 @@ impl Art {
                 assets.load("Jungle/jungle-broad.png"),
                 assets.load("Jungle/jungle-leaning.png"),
                 assets.load("Jungle/jungle-fern.png"),
+                assets.load("Expansion/fan-palm.png"),
+                assets.load("Expansion/buttress-tree.png"),
+                assets.load("Expansion/bamboo.png"),
+                assets.load("Expansion/vine-tree.png"),
+                assets.load("Expansion/fallen-log.png"),
             ],
             banana_fruiting: assets.load("Jungle/banana-fruiting.png"),
             banana_harvested: assets.load("Jungle/banana-harvested.png"),
             ground: assets.load("Ground/ground-atlas.png"),
+            deep_jungle_floor: assets.load("Expansion/deep-jungle-floor.png"),
+            outbuildings: [
+                assets.load("Expansion/research-hut-structure.png"),
+                assets.load("Expansion/distribution-center-structure.png"),
+                assets.load("Expansion/chef-kitchen-structure.png"),
+            ],
+            outbuilding_floors: [
+                assets.load("Expansion/research-hut-ground.png"),
+                assets.load("Expansion/distribution-center-ground.png"),
+                assets.load("Expansion/chef-kitchen-ground.png"),
+            ],
             worker_idle: assets.load("Monkey/Spider Worker/spider_monkey_idle_sheet.png"),
             worker_walk: assets.load("Monkey/Spider Worker/spider_monkey_walk_8dir.png"),
             worker_carry: assets.load("Monkey/Spider Worker/spider_monkey_carry_walk_8dir.png"),
@@ -1391,6 +1412,31 @@ mod tests {
     const CHEF_SHEET: &str = "Monkey/Baboon Chef/v2/baboon-animations.png";
 
     #[test]
+    fn outbuilding_floors_and_structures_reassemble_the_authored_art() {
+        for name in ["research-hut", "distribution-center", "chef-kitchen"] {
+            let (w, h, full) = png(&format!("Expansion/{name}.png"));
+            let (gw, gh, ground) = png(&format!("Expansion/{name}-ground.png"));
+            let (sw, sh, structure) = png(&format!("Expansion/{name}-structure.png"));
+            assert_eq!((w, h), (320, 352));
+            assert_eq!((gw, gh), (w, h));
+            assert_eq!((sw, sh), (w, h));
+            for ((original, floor), prop) in full
+                .chunks_exact(4)
+                .zip(ground.chunks_exact(4))
+                .zip(structure.chunks_exact(4))
+            {
+                assert!(floor[3] == 0 || floor[3] == 255);
+                assert!(prop[3] == 0 || prop[3] == 255);
+                let merged = if prop[3] > 0 { prop } else { floor };
+                assert_eq!(original[3], merged[3], "{name} alpha");
+                if original[3] > 0 {
+                    assert_eq!(original, merged, "{name} split export");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn every_cell_matches_the_file_it_is_drawn_from() {
         // `custom_size` stretches whatever canvas it is given, so a cell that
         // disagrees with its PNG does not fail - it draws a squashed monkey or
@@ -1401,6 +1447,14 @@ mod tests {
             ("Jungle/jungle-broad.png", PLANT, 1, 1),
             ("Jungle/jungle-leaning.png", PLANT, 1, 1),
             ("Jungle/jungle-fern.png", PLANT, 1, 1),
+            ("Expansion/fan-palm.png", PLANT, 1, 1),
+            ("Expansion/buttress-tree.png", PLANT, 1, 1),
+            ("Expansion/bamboo.png", PLANT, 1, 1),
+            ("Expansion/vine-tree.png", PLANT, 1, 1),
+            ("Expansion/fallen-log.png", PLANT, 1, 1),
+            ("Expansion/research-hut.png", OUTBUILDING, 1, 1),
+            ("Expansion/distribution-center.png", OUTBUILDING, 1, 1),
+            ("Expansion/chef-kitchen.png", OUTBUILDING, 1, 1),
             ("TownCenter/town-center.png", TOWN_CENTRE, 1, 1),
             ("TownCenter/town-center-structure.png", TOWN_CENTRE, 1, 1),
             ("TownCenter/town-center-ground.png", TOWN_CENTRE, 1, 1),

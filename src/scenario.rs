@@ -96,6 +96,23 @@ pub fn install(app: &mut App, run: SavedRun, placement: Placement) {
 pub fn all() -> Vec<Scenario> {
     vec![
         Scenario {
+            name: "jungle-village",
+            summary: "watch 30 seconds, pan around the village and along the route: five new \
+                      jungle silhouettes, dark forest floor, research hut, distribution shed \
+                      and open kitchen; workers and hand-harvest targets remain readable",
+            run: Seed {
+                bananas: 100.0,
+                workers: 6,
+                chefs: 3,
+                unpackers: 1,
+                technologists: 1,
+                research: 20.0,
+                ..Seed::default()
+            }
+            .run(),
+            placement: Placement::Restored { seed: Some(11) },
+        },
+        Scenario {
             name: "fresh",
             summary: "a new player's first minute: nothing hired, nothing banked; \
                       four hand-harvests should light the WORKER button",

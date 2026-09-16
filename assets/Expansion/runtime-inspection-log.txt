@@ -1,0 +1,128 @@
+warn: could not canonicalize path C:\Users\jbxcl
+   Compiling banana-monkey-incremental v0.2.0 (C:\Users\jbxcl\.codex\worktrees\0468\banana-monkey-incremental)
+warning: constant `GROUND_TILE` is never used
+   --> src\art.rs:152:18
+    |
+152 | pub(crate) const GROUND_TILE: Vec2 = Vec2::new(128.0, 64.0);
+    |                  ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GROUND_ATLAS` is never used
+   --> src\art.rs:155:7
+    |
+155 | const GROUND_ATLAS: Vec2 = Vec2::new(1024.0, 512.0);
+    |       ^^^^^^^^^^^^
+
+warning: constant `GROUND_COLUMNS` is never used
+   --> src\art.rs:156:7
+    |
+156 | const GROUND_COLUMNS: u32 = 8;
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `GROUND_VARIANTS` is never used
+   --> src\art.rs:157:7
+    |
+157 | const GROUND_VARIANTS: u32 = 4;
+    |       ^^^^^^^^^^^^^^^
+
+warning: field `ground` is never read
+   --> src\art.rs:554:16
+    |
+538 | pub(crate) struct Art {
+    |                   --- field in this struct
+...
+554 |     pub(crate) ground: Handle<Image>,
+    |                ^^^^^^
+    |
+    = note: `Art` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `ground_uv` is never used
+   --> src\art.rs:795:15
+    |
+795 | pub(crate) fn ground_uv(mask: u8, variant: u8) -> (Vec2, Vec2) {
+    |               ^^^^^^^^^
+
+warning: `banana-monkey-incremental` (bin "banana-monkey-incremental") generated 6 warnings
+    Finished `dev` profile [optimized + debuginfo] target(s) in 15.20s
+     Running `target\debug\banana-monkey-incremental.exe --scenario jungle-village --speed 1`
+2026-09-15T11:27:47.583761Z  INFO bevy_diagnostic::system_information_diagnostics_plugin::internal: SystemInfo { os: "Windows 11 Pro", kernel: "26200", cpu: "13th Gen Intel(R) Core(TM) i5-13600KF", core_count: "14", memory: "31.8 GiB" }
+2026-09-15T11:27:47.677822Z DEBUG bevy_render::renderer: Searching for adapter with options: RequestAdapterOptions { power_preference: HighPerformance, force_fallback_adapter: false, compatible_surface: None }
+2026-09-15T11:27:47.828519Z  INFO bevy_render::renderer: AdapterInfo { name: "NVIDIA GeForce RTX 3080", vendor: 4318, device: 8710, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "580.88", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: false }
+2026-09-15T11:27:47.966097Z DEBUG bevy_render::renderer: Configured wgpu adapter Limits: Limits {
+    max_texture_dimension_1d: 32768,
+    max_texture_dimension_2d: 32768,
+    max_texture_dimension_3d: 16384,
+    max_texture_array_layers: 2048,
+    max_bind_groups: 8,
+    max_bindings_per_bind_group: 4294967295,
+    max_dynamic_uniform_buffers_per_pipeline_layout: 15,
+    max_dynamic_storage_buffers_per_pipeline_layout: 16,
+    max_sampled_textures_per_shader_stage: 524288,
+    max_samplers_per_shader_stage: 524288,
+    max_storage_buffers_per_shader_stage: 524288,
+    max_storage_textures_per_shader_stage: 524288,
+    max_uniform_buffers_per_shader_stage: 524288,
+    max_binding_array_elements_per_shader_stage: 1048576,
+    max_binding_array_acceleration_structure_elements_per_shader_stage: 524288,
+    max_binding_array_sampler_elements_per_shader_stage: 1048576,
+    max_uniform_buffer_binding_size: 65536,
+    max_storage_buffer_binding_size: 2147483644,
+    max_vertex_buffers: 16,
+    max_buffer_size: 4292870144,
+    max_vertex_attributes: 32,
+    max_vertex_buffer_array_stride: 2048,
+    max_inter_stage_shader_variables: 31,
+    min_uniform_buffer_offset_alignment: 64,
+    min_storage_buffer_offset_alignment: 32,
+    max_color_attachments: 8,
+    max_color_attachment_bytes_per_sample: 128,
+    max_compute_workgroup_storage_size: 49152,
+    max_compute_invocations_per_workgroup: 1024,
+    max_compute_workgroup_size_x: 1024,
+    max_compute_workgroup_size_y: 1024,
+    max_compute_workgroup_size_z: 64,
+    max_compute_workgroups_per_dimension: 65535,
+    max_immediate_size: 256,
+    max_non_sampler_bindings: 4294967295,
+    max_task_mesh_workgroup_total_count: 4194304,
+    max_task_mesh_workgroups_per_dimension: 65535,
+    max_task_invocations_per_workgroup: 128,
+    max_task_invocations_per_dimension: 128,
+    max_mesh_invocations_per_workgroup: 128,
+    max_mesh_invocations_per_dimension: 128,
+    max_task_payload_size: 16384,
+    max_mesh_output_vertices: 256,
+    max_mesh_output_primitives: 256,
+    max_mesh_output_layers: 2048,
+    max_mesh_multiview_view_count: 4,
+    max_blas_primitive_count: 536870911,
+    max_blas_geometry_count: 16777215,
+    max_tlas_instance_count: 16777215,
+    max_acceleration_structures_per_shader_stage: 524288,
+    max_multiview_view_count: 32,
+}
+2026-09-15T11:27:47.966136Z DEBUG bevy_render::renderer: Configured wgpu adapter Features: Features {
+    features_wgpu: FeaturesWGPU(
+        SHADER_FLOAT32_ATOMIC | TEXTURE_FORMAT_16BIT_NORM | TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | PIPELINE_STATISTICS_QUERY | TIMESTAMP_QUERY_INSIDE_ENCODERS | TIMESTAMP_QUERY_INSIDE_PASSES | TEXTURE_BINDING_ARRAY | BUFFER_BINDING_ARRAY | STORAGE_RESOURCE_BINDING_ARRAY | SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING | STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING | PARTIALLY_BOUND_BINDING_ARRAY | MULTI_DRAW_INDIRECT_COUNT | ADDRESS_MODE_CLAMP_TO_ZERO | ADDRESS_MODE_CLAMP_TO_BORDER | POLYGON_MODE_LINE | POLYGON_MODE_POINT | CONSERVATIVE_RASTERIZATION | VERTEX_WRITABLE_STORAGE | CLEAR_TEXTURE | MULTIVIEW | TEXTURE_ATOMIC | TEXTURE_FORMAT_NV12 | TEXTURE_FORMAT_P010 | EXPERIMENTAL_RAY_QUERY | SHADER_F64 | SHADER_I16 | SHADER_EARLY_DEPTH_TEST | SHADER_INT64 | SUBGROUP | SUBGROUP_VERTEX | SUBGROUP_BARRIER | PIPELINE_CACHE | SHADER_INT64_ATOMIC_MIN_MAX | SHADER_INT64_ATOMIC_ALL_OPS | VULKAN_EXTERNAL_MEMORY_WIN32 | TEXTURE_INT64_ATOMIC | EXPERIMENTAL_MESH_SHADER | EXPERIMENTAL_RAY_HIT_VERTEX_RETURN | EXPERIMENTAL_MESH_SHADER_MULTIVIEW | EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS | PASSTHROUGH_SHADERS | SHADER_BARYCENTRICS | SELECTIVE_MULTIVIEW | EXPERIMENTAL_MESH_SHADER_POINTS | MULTISAMPLE_ARRAY | EXPERIMENTAL_COOPERATIVE_MATRIX | SHADER_PER_VERTEX | SHADER_DRAW_INDEX | ACCELERATION_STRUCTURE_BINDING_ARRAY | MEMORY_DECORATION_COHERENT | MEMORY_DECORATION_VOLATILE,
+    ),
+    features_webgpu: FeaturesWebGPU(
+        DEPTH_CLIP_CONTROL | DEPTH32FLOAT_STENCIL8 | TEXTURE_COMPRESSION_BC | TEXTURE_COMPRESSION_BC_SLICED_3D | TIMESTAMP_QUERY | INDIRECT_FIRST_INSTANCE | SHADER_F16 | RG11B10UFLOAT_RENDERABLE | BGRA8UNORM_STORAGE | FLOAT32_FILTERABLE | FLOAT32_BLENDABLE | DUAL_SOURCE_BLENDING | CLIP_DISTANCES | IMMEDIATES | PRIMITIVE_INDEX,
+    ),
+}
+2026-09-15T11:27:48.070545Z  INFO bevy_pbr::cluster: GPU clustering is supported on this device.
+2026-09-15T11:27:48.070590Z  INFO bevy_render::batching::gpu_preprocessing: GPU preprocessing is fully supported on this device.
+2026-09-15T11:27:48.071132Z  INFO bevy_winit::system: Creating new window Banana Monkey Incremental (66v0)
+2026-09-15T11:27:48.071150Z DEBUG bevy_winit::winit_windows: Display information:  Window physical resolution: 1280x720  Window logical resolution: 1280x720  Monitor name:   Scale factor: 0  Refresh rate (Hz): 0.000
+2026-09-15T11:27:48.115155Z  INFO banana_monkey_incremental::game: launch: simulation running at 1x
+2026-09-15T11:27:48.122246Z  WARN gilrs::gamepad: No mapping found for UUID 00000000-0000-0000-0000-000000000000
+	Default mapping will be used.
+2026-09-15T11:27:48.122772Z  INFO bevy_input::gamepad: Gamepad 767v0 connected.
+2026-09-15T11:29:39.255248Z  INFO bevy_winit::system: Monitor removed 415v0
+2026-09-15T11:29:39.255287Z  INFO bevy_winit::system: Monitor removed 416v0
+2026-09-15T11:29:39.281779Z  WARN bevy_winit::state: Window 66v0 is missing `Window` component, skipping event Moved(PhysicalPosition { x: 0, y: 1353 })
+2026-09-15T11:29:39.281973Z  WARN bevy_winit::state: Window 66v0 is missing `Window` component, skipping event Resized(PhysicalSize { width: 0, height: 0 })
+2026-09-15T11:29:39.308493Z  WARN bevy_winit::state: Window 66v0 is missing `Window` component, skipping event RedrawRequested
+2026-09-15T11:29:39.312953Z  INFO bevy_window::system: No windows are open, exiting
+2026-09-15T11:29:39.312990Z  INFO bevy_winit::system: Closing window 66v0
+2026-09-15T11:29:39.541496Z DEBUG bevy_render::pipelined_rendering: exiting pipelined rendering thread

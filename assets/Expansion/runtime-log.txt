@@ -1,0 +1,52 @@
+warn: could not canonicalize path C:\Users\jbxcl
+    Blocking waiting for file lock on artifact directory
+   Compiling banana-monkey-incremental v0.2.0 (C:\Users\jbxcl\.codex\worktrees\0468\banana-monkey-incremental)
+warning: constant `GROUND_TILE` is never used
+   --> src\art.rs:152:18
+    |
+152 | pub(crate) const GROUND_TILE: Vec2 = Vec2::new(128.0, 64.0);
+    |                  ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GROUND_ATLAS` is never used
+   --> src\art.rs:155:7
+    |
+155 | const GROUND_ATLAS: Vec2 = Vec2::new(1024.0, 512.0);
+    |       ^^^^^^^^^^^^
+
+warning: constant `GROUND_COLUMNS` is never used
+   --> src\art.rs:156:7
+    |
+156 | const GROUND_COLUMNS: u32 = 8;
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `GROUND_VARIANTS` is never used
+   --> src\art.rs:157:7
+    |
+157 | const GROUND_VARIANTS: u32 = 4;
+    |       ^^^^^^^^^^^^^^^
+
+warning: field `ground` is never read
+   --> src\art.rs:554:16
+    |
+538 | pub(crate) struct Art {
+    |                   --- field in this struct
+...
+554 |     pub(crate) ground: Handle<Image>,
+    |                ^^^^^^
+    |
+    = note: `Art` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `ground_uv` is never used
+   --> src\art.rs:795:15
+    |
+795 | pub(crate) fn ground_uv(mask: u8, variant: u8) -> (Vec2, Vec2) {
+    |               ^^^^^^^^^
+
+warning: `banana-monkey-incremental` (bin "banana-monkey-incremental") generated 6 warnings
+    Finished `dev` profile [optimized + debuginfo] target(s) in 57.83s
+     Running `target\debug\banana-monkey-incremental.exe --scenario jungle-village --speed 1`
+2026-09-15T11:23:09.206279Z  WARN gilrs::gamepad: No mapping found for UUID 00000000-0000-0000-0000-000000000000
+	Default mapping will be used.
+error: process didn't exit successfully: `target\debug\banana-monkey-incremental.exe --scenario jungle-village --speed 1` (exit code: 0xffffffff)

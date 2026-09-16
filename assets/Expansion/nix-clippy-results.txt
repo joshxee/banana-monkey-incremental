@@ -1,0 +1,217 @@
+/nix/store/sxx9r2badzg82107kiwwm9jmzlf52mdb-stdenv-linux/setup: line 264: $'\r': command not found
+    Blocking waiting for file lock on build directory
+    Checking bytemuck v1.25.2
+    Checking serde v1.0.229
+    Checking thiserror v2.0.20
+    Checking derive_more v2.1.1
+    Checking encase v0.12.1
+    Checking tracing v0.1.44
+    Checking zerocopy v0.8.56
+    Checking zerofrom v0.1.8
+    Checking bitflags v2.13.1
+    Checking font-types v0.11.3
+    Checking font-types v0.12.3
+    Checking yoke v0.8.3
+    Checking tracing-subscriber v0.3.23
+    Checking rustix v1.1.4
+    Checking wgpu-types v29.0.4
+    Checking smol_str v0.2.2
+    Checking bevy_platform v0.19.1
+    Checking glam v0.32.1
+    Checking petgraph v0.8.3
+    Checking nix v0.31.3
+    Checking bevy_utils v0.19.1
+    Checking bevy_tasks v0.19.1
+    Checking ron v0.12.2
+    Checking png v0.18.1
+    Checking ctrlc v3.5.2
+    Checking ktx2 v0.5.0
+    Checking image v0.25.10
+    Checking zerovec v0.11.7
+    Checking zerotrie v0.2.5
+    Checking spirv v0.4.0+sdk-1.4.341.0
+    Checking read-fonts v0.39.2
+    Checking half v2.7.1
+    Checking tinystr v0.8.4
+    Checking icu_locale_core v2.3.0
+    Checking potential_utf v0.1.6
+    Checking polling v3.11.0
+    Checking icu_collections v2.3.0
+    Checking read-fonts v0.41.0
+    Checking naga v29.0.4
+    Checking async-io v2.6.0
+    Checking gpu-descriptor-types v0.2.0
+    Checking gpu-allocator v0.28.0
+    Checking gpu-descriptor v0.3.2
+    Checking wayland-backend v0.3.17
+    Checking icu_provider v2.3.0
+    Checking rustix v0.38.44
+    Checking tiny-skia-path v0.11.4
+    Checking icu_locale_fallback v2.3.0
+    Checking icu_properties v2.3.0
+    Checking icu_normalizer v2.3.0
+    Checking icu_segmenter v2.3.0
+    Checking wayland-client v0.31.15
+    Checking wayland-csd-frame v0.3.0
+    Checking parley_data v0.9.0
+    Checking phf v0.13.1
+    Checking gltf-json v1.4.1
+    Checking bevy_reflect v0.19.1
+    Checking hexasphere v18.0.0
+    Checking tiny-skia v0.11.4
+    Checking calloop v0.13.0
+    Checking wayland-protocols v0.32.13
+    Checking calloop-wayland-source v0.3.0
+    Checking fontique v0.9.0
+    Checking skrifa v0.42.1
+    Checking harfrust v0.6.2
+    Checking wayland-cursor v0.31.14
+    Checking skrifa v0.44.0
+    Checking gethostname v1.1.0
+    Checking cssparser v0.37.0
+    Checking x11rb v0.13.2
+    Checking wgpu-naga-bridge v29.0.4
+    Checking wgpu-hal v29.0.4
+    Checking naga_oil v0.22.0
+    Checking gltf v1.4.1
+    Checking parley v0.9.0
+    Checking wayland-protocols-wlr v0.3.12
+    Checking swash v0.2.10
+    Checking wayland-protocols-plasma v0.3.12
+    Checking inotify v0.11.5
+    Checking ahash v0.8.12
+    Checking alsa v0.11.0
+    Checking bevy_ecs v0.19.1
+    Checking bevy_math v0.19.1
+    Checking xkbcommon-dl v0.4.2
+    Checking smithay-client-toolkit v0.19.2
+    Checking gilrs-core v0.6.8
+    Checking cpal v0.17.3
+    Checking wgpu-core-deps-windows-linux-android v29.0.4
+    Checking gilrs v0.11.2
+    Checking selectors v0.38.0
+    Checking wgpu-core v29.0.4
+    Checking rodio v0.22.2
+    Checking cssparser-color v0.5.0
+    Checking sctk-adwaita v0.10.1
+    Checking atomic-write-file v0.3.1
+    Checking winit v0.30.13
+    Checking accesskit_winit v0.32.2
+    Checking bevy_color v0.19.1
+    Checking wgpu v29.0.4
+    Checking bevy_app v0.19.1
+    Checking bevy_time v0.19.1
+    Checking bevy_transform v0.19.1
+    Checking bevy_input v0.19.1
+    Checking bevy_log v0.19.1
+    Checking bevy_a11y v0.19.1
+    Checking bevy_state v0.19.1
+    Checking bevy_clipboard v0.19.1
+    Checking bevy_diagnostic v0.19.1
+    Checking bevy_asset v0.19.1
+    Checking bevy_gilrs v0.19.1
+    Checking bevy_mesh v0.19.1
+    Checking bevy_image v0.19.1
+    Checking bevy_shader v0.19.1
+    Checking bevy_scene v0.19.1
+    Checking bevy_audio v0.19.1
+    Checking bevy_window v0.19.1
+    Checking bevy_text v0.19.1
+    Checking bevy_material v0.19.1
+    Checking bevy_animation v0.19.1
+    Checking bevy_camera v0.19.1
+    Checking bevy_picking v0.19.1
+    Checking bevy_gizmos v0.19.1
+    Checking bevy_render v0.19.1
+    Checking bevy_world_serialization v0.19.1
+    Checking bevy_light v0.19.1
+    Checking bevy_sprite v0.19.1
+    Checking bevy_input_focus v0.19.1
+    Checking bevy_winit v0.19.1
+    Checking bevy_gltf v0.19.1
+    Checking bevy_ui v0.19.1
+    Checking bevy_flair_core v0.8.1
+    Checking bevy_ui_widgets v0.19.1
+    Checking bevy_flair_style v0.8.1
+    Checking bevy_flair_css_parser v0.8.1
+    Checking bevy_flair v0.8.1
+    Checking bevy_core_pipeline v0.19.1
+    Checking bevy_sprite_render v0.19.1
+    Checking bevy_pbr v0.19.1
+    Checking bevy_post_process v0.19.1
+    Checking bevy_anti_alias v0.19.1
+    Checking bevy_ui_render v0.19.1
+    Checking bevy_gizmos_render v0.19.1
+    Checking bevy_internal v0.19.1
+    Checking bevy v0.19.1
+    Checking banana-monkey-incremental v0.2.0 (/mnt/c/Users/jbxcl/.codex/worktrees/0468/banana-monkey-incremental)
+error: constant `GROUND_TILE` is never used
+   --> src/art.rs:152:18
+    |
+152 | pub(crate) const GROUND_TILE: Vec2 = Vec2::new(128.0, 64.0);
+    |                  ^^^^^^^^^^^
+    |
+    = note: `-D dead-code` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: constant `GROUND_ATLAS` is never used
+   --> src/art.rs:155:7
+    |
+155 | const GROUND_ATLAS: Vec2 = Vec2::new(1024.0, 512.0);
+    |       ^^^^^^^^^^^^
+
+error: constant `GROUND_COLUMNS` is never used
+   --> src/art.rs:156:7
+    |
+156 | const GROUND_COLUMNS: u32 = 8;
+    |       ^^^^^^^^^^^^^^
+
+error: constant `GROUND_VARIANTS` is never used
+   --> src/art.rs:157:7
+    |
+157 | const GROUND_VARIANTS: u32 = 4;
+    |       ^^^^^^^^^^^^^^^
+
+error: field `ground` is never read
+   --> src/art.rs:555:16
+    |
+538 | pub(crate) struct Art {
+    |                   --- field in this struct
+...
+555 |     pub(crate) ground: Handle<Image>,
+    |                ^^^^^^
+    |
+    = note: `Art` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+error: function `ground_uv` is never used
+   --> src/art.rs:801:15
+    |
+801 | pub(crate) fn ground_uv(mask: u8, variant: u8) -> (Vec2, Vec2) {
+    |               ^^^^^^^^^
+
+error: very complex type used. Consider factoring parts into `type` definitions
+    --> src/game.rs:3251:17
+     |
+3251 |     mut shadow: Single<(&mut Transform, &mut Visibility), (With<BananaShadow>, Without<Banana>)>,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+     = note: `-D clippy::type-complexity` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::type_complexity)]`
+
+error: could not compile `banana-monkey-incremental` (bin "banana-monkey-incremental") due to 7 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: field `ground` is never read
+   --> src/art.rs:555:16
+    |
+538 | pub(crate) struct Art {
+    |                   --- field in this struct
+...
+555 |     pub(crate) ground: Handle<Image>,
+    |                ^^^^^^
+    |
+    = note: `Art` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `-D dead-code` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: could not compile `banana-monkey-incremental` (bin "banana-monkey-incremental" test) due to 2 previous errors

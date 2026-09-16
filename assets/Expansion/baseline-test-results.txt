@@ -1,0 +1,36 @@
+warn: could not canonicalize path C:\Users\jbxcl
+    Blocking waiting for file lock on artifact directory
+warning: field `ground` is never read
+   --> src\art.rs:554:16
+    |
+538 | pub(crate) struct Art {
+    |                   --- field in this struct
+...
+554 |     pub(crate) ground: Handle<Image>,
+    |                ^^^^^^
+    |
+    = note: `Art` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `banana-monkey-incremental` (bin "banana-monkey-incremental" test) generated 1 warning
+    Finished `test` profile [optimized + debuginfo] target(s) in 25.49s
+     Running unittests src\main.rs (target\debug\deps\banana_monkey_incremental-d0425a1be2af0dce.exe)
+
+running 1 test
+test art::tests::the_worker_is_as_tall_as_the_board_was_tuned_against ... FAILED
+
+failures:
+
+---- art::tests::the_worker_is_as_tall_as_the_board_was_tuned_against stdout ----
+
+thread 'art::tests::the_worker_is_as_tall_as_the_board_was_tuned_against' (64300) panicked at src\art.rs:1104:13:
+row 0 frame 0 stands below the ground line at 60
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    art::tests::the_worker_is_as_tall_as_the_board_was_tuned_against
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 181 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--bin banana-monkey-incremental`

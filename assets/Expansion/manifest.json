@@ -1,0 +1,15 @@
+{
+  "art_scale":0.5,
+  "static":true,
+  "assets":[
+    {"name":"fan-palm","canvas":[320,352],"ground_anchor":[160,316],"opaque_bounds":[100,54,264,318],"layers":3},
+    {"name":"buttress-tree","canvas":[320,352],"ground_anchor":[160,316],"opaque_bounds":[34,34,283,327],"layers":3},
+    {"name":"bamboo","canvas":[320,352],"ground_anchor":[160,316],"opaque_bounds":[55,39,267,319],"layers":2},
+    {"name":"vine-tree","canvas":[320,352],"ground_anchor":[160,316],"opaque_bounds":[48,50,271,320],"layers":3},
+    {"name":"fallen-log","canvas":[320,352],"ground_anchor":[160,316],"opaque_bounds":[76,244,234,322],"layers":3},
+    {"name":"deep-jungle-floor","canvas":[128,64],"ground_anchor":[64,32],"opaque_bounds":[1,0,126,63],"layers":2},
+    {"name":"research-hut","canvas":[320,352],"ground_anchor":[160,316],"opaque_bounds":[44,91,276,319],"layers":7},
+    {"name":"distribution-center","canvas":[320,352],"ground_anchor":[160,316],"opaque_bounds":[44,98,276,319],"layers":8},
+    {"name":"chef-kitchen","canvas":[320,352],"ground_anchor":[160,316],"opaque_bounds":[18,231,308,344],"layers":4}
+  ]
+}

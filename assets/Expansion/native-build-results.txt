@@ -1,0 +1,47 @@
+warn: could not canonicalize path C:\Users\jbxcl
+   Compiling banana-monkey-incremental v0.2.0 (C:\Users\jbxcl\.codex\worktrees\0468\banana-monkey-incremental)
+warning: constant `GROUND_TILE` is never used
+   --> src\art.rs:152:18
+    |
+152 | pub(crate) const GROUND_TILE: Vec2 = Vec2::new(128.0, 64.0);
+    |                  ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GROUND_ATLAS` is never used
+   --> src\art.rs:155:7
+    |
+155 | const GROUND_ATLAS: Vec2 = Vec2::new(1024.0, 512.0);
+    |       ^^^^^^^^^^^^
+
+warning: constant `GROUND_COLUMNS` is never used
+   --> src\art.rs:156:7
+    |
+156 | const GROUND_COLUMNS: u32 = 8;
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `GROUND_VARIANTS` is never used
+   --> src\art.rs:157:7
+    |
+157 | const GROUND_VARIANTS: u32 = 4;
+    |       ^^^^^^^^^^^^^^^
+
+warning: field `ground` is never read
+   --> src\art.rs:555:16
+    |
+538 | pub(crate) struct Art {
+    |                   --- field in this struct
+...
+555 |     pub(crate) ground: Handle<Image>,
+    |                ^^^^^^
+    |
+    = note: `Art` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `ground_uv` is never used
+   --> src\art.rs:801:15
+    |
+801 | pub(crate) fn ground_uv(mask: u8, variant: u8) -> (Vec2, Vec2) {
+    |               ^^^^^^^^^
+
+warning: `banana-monkey-incremental` (bin "banana-monkey-incremental") generated 6 warnings
+    Finished `dev` profile [optimized + debuginfo] target(s) in 14.56s

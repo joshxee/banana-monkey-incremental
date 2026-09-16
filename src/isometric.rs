@@ -384,12 +384,38 @@ fn drawn(map: &Map, tile: Tile) -> bool {
     map.terrain(tile).passable() || touches_open(map, tile)
 }
 
+/// A single textured mesh for the deep green jungle floor. Diamond UVs use
+/// the whole authored tile; the existing ground remains underneath its edges.
+fn jungle_floor_mesh(map: &Map) -> Mesh {
+    let mut builder = MeshBuilder::default();
+    let mut uv = Vec::new();
+    for y in 0..map.height() {
+        for x in 0..map.width() {
+            let tile = Tile::new(x, y);
+            if map.terrain(tile) == Terrain::Jungle && !drawn(map, tile) {
+                builder.quad(diamond(tile), Color::WHITE);
+                // One 128-art-pixel tile spans two board tiles, preserving
+                // ART_SCALE just like every standing asset.
+                let u = 0.5 + (x % 2 - y % 2) as f32 * 0.25;
+                let v = (x % 2 + y % 2) as f32 * 0.25;
+                uv.extend([
+                    [u, v],
+                    [u + 0.25, v + 0.25],
+                    [u, v + 0.5],
+                    [u - 0.25, v + 0.25],
+                ]);
+            }
+        }
+    }
+    let mut mesh = builder.build();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+    mesh
+}
+
 /// The jungle tiles that show the player a wall.
 ///
-/// Only the ones touching ground a monkey could stand on. Seen from above, the
-/// jungle *is* its canopy — flat dark green is the honest look for the depths
-/// of it — and what needs height is the edge, where the barrier has to read as
-/// something that cannot be walked through.
+/// Only the ones touching ground a monkey could stand on. This border subset
+/// keeps the barrier legible; `scenery_tiles` adds sparse interior clusters.
 fn wall_tiles(map: &Map) -> Vec<Tile> {
     let mut tiles = Vec::new();
     for y in 0..map.height() {
@@ -635,8 +661,54 @@ fn planting(tile: Tile) -> Option<usize> {
     bits ^= bits >> 16;
     bits = bits.wrapping_mul(0x7FEB_352D);
     bits ^= bits >> 15;
-    // Two in five planted, and an even pick between the three kinds.
-    (bits % 5 < 2).then_some((bits >> 8) as usize % 3)
+    // Two in five planted, and an even pick between eight silhouettes.
+    (bits % 5 < 2).then_some((bits >> 8) as usize % 8)
+}
+
+/// Keep the irregular forest edge and add staggered clusters in its depths.
+/// Only impassable jungle is planted; routes and the town remain unchanged.
+fn scenery_tiles(map: &Map) -> Vec<Tile> {
+    let mut tiles = wall_tiles(map);
+    for y in (0..map.height()).step_by(3) {
+        for x in (y % 6 / 3..map.width()).step_by(3) {
+            let tile = Tile::new(x, y);
+            if map.terrain(tile) == Terrain::Jungle && !tiles.contains(&tile) {
+                tiles.push(tile);
+            }
+        }
+    }
+    tiles
+}
+
+/// Decorative workspaces around the existing compact support stations. Their
+/// footprints stay outside the delivery crowd, home trees and worker route;
+/// no new interaction, obstruction or simulation entity is implied.
+fn outbuilding_stands(map: &Map) -> [Vec2; 3] {
+    [
+        Vec2::new(1.0, -21.0),
+        Vec2::new(17.0, -5.0),
+        // The low, roof-free kitchen frames the existing chefs' station.
+        Vec2::new(-1.75, 9.25),
+    ]
+    .map(|offset| tile_centre(map.town_centre()) + offset)
+}
+
+/// Leave a sightline to each building through foreground foliage. This only
+/// removes drawn scenery; the jungle's terrain and collision stay unchanged.
+fn obscures_outbuilding(map: &Map, at: Vec2) -> bool {
+    let feet = project(at);
+    let foliage = Rect::from_corners(
+        feet + art::PLANT.offset_of(Vec2::ZERO),
+        feet + art::PLANT.offset_of(Vec2::new(320.0, 352.0)),
+    );
+    outbuilding_stands(map).into_iter().any(|building| {
+        let anchor = project(building);
+        let bounds = Rect::from_corners(
+            anchor + Vec2::new(-58.0, -13.0),
+            anchor + Vec2::new(58.0, 114.0),
+        );
+        stand_z(at, 0.0) > stand_z(building, 0.0) && !foliage.intersect(bounds).is_empty()
+    })
 }
 
 pub(crate) fn spawn_world(
@@ -672,6 +744,11 @@ pub(crate) fn spawn_world(
                 })),
                 Transform::from_xyz(0.0, 0.0, GROUND_TILE_Z),
             ));
+            root.spawn((
+                Mesh2d(meshes.add(jungle_floor_mesh(map))),
+                MeshMaterial2d(materials.add(ColorMaterial::from(art.deep_jungle_floor.clone()))),
+                Transform::from_xyz(0.0, 0.0, GROUND_Z + 0.01),
+            ));
 
             // Anything with height is its own entity, anchored at the ground it
             // stands on. That is the whole discipline, and it is why the art
@@ -685,8 +762,11 @@ pub(crate) fn spawn_world(
             // whole one at a corner. Keeping footprints small is what keeps that
             // invisible - and it is why the jungle is planted per *tile* rather
             // than drawn as one wall.
-            let jungle = wall_tiles(map).into_iter().filter_map(|tile| {
-                planting(tile).map(|kind| (tile_centre(tile), &art.jungle[kind], plant))
+            let jungle = scenery_tiles(map).into_iter().filter_map(|tile| {
+                let at = tile_centre(tile);
+                planting(tile)
+                    .filter(|_| !obscures_outbuilding(map, at))
+                    .map(|kind| (at, &art.jungle[kind], plant))
             });
 
             let village = [
@@ -715,13 +795,33 @@ pub(crate) fn spawn_world(
                     .map(|tile| (tile_centre(tile), &art.banana_fruiting, plant)),
             );
 
-            for (at, image, cell) in jungle.chain(village) {
+            let buildings = outbuilding_stands(map)
+                .into_iter()
+                .zip(&art.outbuildings)
+                .map(|(at, image)| (at, image, art::OUTBUILDING));
+            for (at, image, cell, nudge) in jungle
+                .chain(village)
+                .map(|(at, image, cell)| (at, image, cell, 0.0))
+                .chain(buildings.map(|(at, image, cell)| (at, image, cell, NUDGE_STEP)))
+            {
                 let anchor = project(at);
                 let (sprite, pivot) = art.standing(image, cell);
                 root.spawn((
                     sprite,
                     pivot,
-                    Transform::from_xyz(anchor.x, anchor.y, stand_z(at, 0.0)),
+                    Transform::from_xyz(anchor.x, anchor.y, stand_z(at, nudge)),
+                ));
+            }
+            for (at, image) in outbuilding_stands(map)
+                .into_iter()
+                .zip(&art.outbuilding_floors)
+            {
+                let anchor = project(at);
+                let (sprite, pivot) = art.standing(image, art::OUTBUILDING);
+                root.spawn((
+                    sprite,
+                    pivot,
+                    Transform::from_xyz(anchor.x, anchor.y, GROUND_TILE_Z + 0.01),
                 ));
             }
 
@@ -744,6 +844,101 @@ pub(crate) fn spawn_world(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dense_forest_adds_all_silhouettes_without_planting_open_ground() {
+        let map = crate::map::start();
+        let tiles = scenery_tiles(map);
+        assert!(tiles.len() > wall_tiles(map).len());
+        let mut kinds = [false; 8];
+        for tile in tiles {
+            assert_eq!(map.terrain(tile), Terrain::Jungle);
+            if let Some(kind) =
+                planting(tile).filter(|_| !obscures_outbuilding(map, tile_centre(tile)))
+            {
+                kinds[kind] = true;
+            }
+        }
+        assert!(kinds.into_iter().all(|present| present));
+    }
+
+    #[test]
+    fn foreground_crowns_leave_the_distribution_center_readable() {
+        let map = crate::map::start();
+        // A crown rooted beyond the east path reaches back over the shed.
+        // Its ground tile need not touch the building to hide its whole front.
+        let foreground = tile_centre(Tile::new(56, 35));
+        assert_eq!(map.terrain(Tile::new(56, 35)), Terrain::Jungle);
+        assert!(obscures_outbuilding(map, foreground));
+        assert!(!obscures_outbuilding(map, tile_centre(Tile::new(0, 0))));
+    }
+
+    #[test]
+    fn outbuildings_leave_delivery_and_support_silhouettes_open() {
+        let map = crate::map::start();
+        let centre = tile_centre(map.town_centre());
+        let layout = crate::game::SceneLayout::for_viewport(Vec2::new(1280.0, 900.0));
+        assert_eq!(
+            outbuilding_stands(map)[2],
+            layout.support_stand(crate::domain::SupportRole::Chef)
+        );
+        let protected = [
+            Vec2::ZERO,
+            Vec2::new(7.125, 0.875),
+            Vec2::new(-1.75, 9.25),
+            Vec2::new(2.75, -6.25),
+        ];
+        for (index, at) in outbuilding_stands(map).into_iter().enumerate() {
+            assert!(
+                map.terrain(Tile::new((at.x / METRE) as i32, (at.y / METRE) as i32))
+                    .passable()
+            );
+            // Conservative standing-prop bounds; flat floor paint cannot
+            // obscure an actor and is deliberately excluded.
+            let anchor = project(at);
+            let building = if index == 2 {
+                Rect::from_corners(
+                    anchor + Vec2::new(-71.0, -4.0),
+                    anchor + Vec2::new(75.0, 24.0),
+                )
+            } else {
+                Rect::from_corners(
+                    anchor + Vec2::new(-58.0, -2.0),
+                    anchor + Vec2::new(58.0, 114.0),
+                )
+            };
+            for offset in protected {
+                if index == 2 && offset == Vec2::new(-1.75, 9.25) {
+                    continue; // Chefs intentionally stand inside their kitchen.
+                }
+                let feet = project(centre + offset);
+                // Includes the three-avatar fan and full curled tails.
+                let crowd =
+                    Rect::from_corners(feet + Vec2::new(-27.0, -4.0), feet + Vec2::new(27.0, 38.0));
+                assert!(
+                    building.intersect(crowd).is_empty(),
+                    "building at {at:?} covers {offset:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_jungle_floor_only_textures_jungle_and_keeps_uvs_inside_the_tile() {
+        let map = crate::map::start();
+        let mesh = jungle_floor_mesh(map);
+        let jungle = (0..map.height())
+            .flat_map(|y| (0..map.width()).map(move |x| Tile::new(x, y)))
+            .filter(|tile| map.terrain(*tile) == Terrain::Jungle && !drawn(map, *tile))
+            .count();
+        assert_eq!(mesh.count_vertices(), jungle * 4);
+        let bevy::mesh::VertexAttributeValues::Float32x2(uvs) =
+            mesh.attribute(Mesh::ATTRIBUTE_UV_0).unwrap()
+        else {
+            panic!("UVs missing")
+        };
+        assert!(uvs.iter().flatten().all(|v| (0.0..=1.0).contains(v)));
+    }
 
     #[test]
     fn the_projection_folds_the_ground_plane_the_way_an_isometric_view_does() {

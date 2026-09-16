@@ -1,0 +1,1 @@
+/nix/store/sxx9r2badzg82107kiwwm9jmzlf52mdb-stdenv-linux/setup: line 264: $'\r': command not found
