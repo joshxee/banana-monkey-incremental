@@ -236,6 +236,103 @@ pub(crate) fn carried_banana_middles() -> (Vec2, Vec2) {
 /// a third as deep as it is wide, which is the 2:1 ground seen from above.
 pub(crate) const SHADOW_TEXELS: Vec2 = Vec2::new(35.0 * ART_SCALE, 12.5 * ART_SCALE);
 
+/// A two-tone sprite written out as art pixels: `#` fills, `o` outlines, `.`
+/// is nothing.
+///
+/// Two marks in this game are not scenery and have no place in the sprite
+/// sheets: the arrow that points at the loose banana and the hand that mimes
+/// the drag. They are *instructions*, they exist only for a player's first
+/// half-minute, and drawing them in Aseprite would put two files in
+/// `assets/` that the art direction has nothing to say about. Written here
+/// they stay legible as source, they cost no load, and their one colour
+/// decision - the outline that keeps them readable over canopy - is stated
+/// next to the shape it outlines.
+///
+/// One art pixel per texel, like [`shadow_image`], so both sit on the same
+/// grid as the drawn art around them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Bitmap {
+    rows: &'static [&'static str],
+    fill: Color,
+    edge: Color,
+}
+
+impl Bitmap {
+    const fn new(rows: &'static [&'static str], fill: Color, edge: Color) -> Self {
+        Self { rows, fill, edge }
+    }
+
+    fn width(self) -> u32 {
+        self.rows[0].len() as u32
+    }
+
+    fn height(self) -> u32 {
+        self.rows.len() as u32
+    }
+
+    /// The size to draw it at, in art pixels. Scaled by [`ART_SCALE`] at the
+    /// call, exactly as a [`Cell`] is.
+    pub(crate) fn size(self) -> Vec2 {
+        Vec2::new(self.width() as f32, self.height() as f32)
+    }
+}
+
+/// Banana gold, and the ink the whole HUD outlines in.
+const COACH_GOLD: Color = Color::srgb(1.0, 0.749, 0.051);
+const COACH_CREAM: Color = Color::srgb(1.0, 0.941, 0.722);
+const COACH_INK: Color = Color::srgb(0.161, 0.078, 0.059);
+
+/// The arrow that hangs over the loose banana, pointing down at it.
+///
+/// Down, and therefore drawn tip-last: it sits *above* the thing it names, so
+/// nothing about the banana is covered by the mark telling you to pick it up.
+pub(crate) const COACH_ARROW: Bitmap = Bitmap::new(
+    &[
+        "...ooooo...",
+        "...o###o...",
+        "...o###o...",
+        "...o###o...",
+        "...o###o...",
+        "...o###o...",
+        ".ooo###ooo.",
+        ".o#######o.",
+        "..o#####o..",
+        "...o###o...",
+        "....o#o....",
+        ".....o.....",
+    ],
+    COACH_GOLD,
+    COACH_INK,
+);
+
+/// The hand that walks the drag from the tree to the depot.
+///
+/// A pointing hand rather than a finger-and-circle: the gesture being taught
+/// is a *drag*, and a hand that travels reads as one thing moving rather than
+/// as two taps in different places. Its raised finger is centred on the
+/// canvas, so the sprite anchors at its tip with no offset to get wrong.
+pub(crate) const COACH_HAND: Bitmap = Bitmap::new(
+    &[
+        ".....ooo.....",
+        "....o###o....",
+        "....o###o....",
+        "....o###o....",
+        "....o###o....",
+        "....o###ooo..",
+        "....o######o.",
+        "..oo########o",
+        ".o##########o",
+        ".o##########o",
+        ".o##########o",
+        ".o##########o",
+        ".o##########o",
+        "..o########o.",
+        "...oooooooo..",
+    ],
+    COACH_CREAM,
+    COACH_INK,
+);
+
 /// Frames in each walk loop, and in the idle loop.
 const WALK_FRAMES: u32 = 12;
 const IDLE_FRAMES: u32 = 4;
@@ -765,6 +862,10 @@ pub(crate) struct Art {
     squirrel_layouts: [Handle<TextureAtlasLayout>; 2],
     /// A flat ellipse, generated rather than drawn: see [`Art::shadow`].
     shadow: Handle<Image>,
+    /// The two coaching marks, generated rather than drawn: see
+    /// [`COACH_ARROW`] and [`COACH_HAND`].
+    arrow: Handle<Image>,
+    hand: Handle<Image>,
 }
 
 impl Art {
@@ -821,6 +922,8 @@ impl Art {
             squirrel: SquirrelClip::ALL.map(|clip| assets.load(clip.path())),
             squirrel_layouts,
             shadow: images.add(shadow_image()),
+            arrow: images.add(bitmap_image(COACH_ARROW)),
+            hand: images.add(bitmap_image(COACH_HAND)),
         }
     }
 
@@ -1006,6 +1109,37 @@ impl Art {
         }
     }
 
+    /// The arrow that points at the loose banana while nobody has touched it,
+    /// at `alpha`. Sized in world texels like everything else on the board, so
+    /// it grows and shrinks with the thing it is pointing at.
+    pub(crate) fn coach_arrow(&self, alpha: f32) -> Sprite {
+        Sprite {
+            image: self.arrow.clone(),
+            color: Color::WHITE.with_alpha(alpha),
+            custom_size: Some(COACH_ARROW.size() * ART_SCALE),
+            ..default()
+        }
+    }
+
+    /// And the hand that mimes the drag, at `alpha`, anchored at its
+    /// fingertip.
+    ///
+    /// Its fingertip, not its middle. The hand is a pointer: what it is saying
+    /// is "*this* spot", and a hand centred on the banana covers the banana.
+    /// The raised finger is centred on the canvas, so the tip is the
+    /// top-centre of the sprite exactly.
+    pub(crate) fn coach_hand(&self, alpha: f32) -> (Sprite, Anchor) {
+        (
+            Sprite {
+                image: self.hand.clone(),
+                color: Color::WHITE.with_alpha(alpha),
+                custom_size: Some(COACH_HAND.size() * ART_SCALE),
+                ..default()
+            },
+            Anchor::TOP_CENTER,
+        )
+    }
+
     /// A scenery sprite, sized and anchored at its feet.
     pub(crate) fn standing(&self, image: &Handle<Image>, cell: Cell) -> (Sprite, Anchor) {
         (
@@ -1070,6 +1204,57 @@ pub(crate) fn ground_uv(mask: u8, variant: u8) -> (Vec2, Vec2) {
     (at / GROUND_ATLAS, (at + GROUND_TILE) / GROUND_ATLAS)
 }
 
+/// A [`Bitmap`]'s texture: one art pixel per texel, fill and outline baked in.
+///
+/// The colours are baked rather than tinted at the call because these are
+/// two-tone marks, and a sprite carries one tint. That leaves `Sprite::color`
+/// free for the only thing that varies - the fade in and out - which is why
+/// [`Art::coach_arrow`] and [`Art::coach_hand`] take an alpha and nothing else.
+fn bitmap_image(bitmap: Bitmap) -> Image {
+    let (width, height) = (bitmap.width(), bitmap.height());
+    let mut data = Vec::with_capacity((width * height * 4) as usize);
+    for row in bitmap.rows {
+        debug_assert_eq!(
+            row.len() as u32,
+            width,
+            "a bitmap's rows must all be the same width"
+        );
+        for glyph in row.bytes() {
+            let colour = match glyph {
+                b'#' => Some(bitmap.fill),
+                b'o' => Some(bitmap.edge),
+                _ => None,
+            };
+            match colour {
+                // `to_srgba` rather than the linear components: the image is
+                // declared `Rgba8UnormSrgb`, so what goes in the bytes is the
+                // sRGB the colour was written as.
+                Some(colour) => {
+                    let srgba = colour.to_srgba();
+                    data.extend_from_slice(&[
+                        (srgba.red * 255.0).round() as u8,
+                        (srgba.green * 255.0).round() as u8,
+                        (srgba.blue * 255.0).round() as u8,
+                        255,
+                    ]);
+                }
+                None => data.extend_from_slice(&[0, 0, 0, 0]),
+            }
+        }
+    }
+    Image::new(
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
 /// The shadow's texture: a hard-edged ellipse, one art pixel per texel, so it
 /// sits on the same grid as the pixel art around it rather than as a soft blur
 /// from a different renderer.
@@ -1101,6 +1286,56 @@ fn shadow_image() -> Image {
 mod tests {
     use super::*;
     use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
+
+    #[test]
+    fn the_coaching_bitmaps_are_rectangles_of_known_glyphs() {
+        // Written as text, so the two things text lets you get wrong are worth
+        // holding: a short row, and a typo for a glyph that silently becomes a
+        // hole. `bitmap_image` walks these straight into a texture buffer, so
+        // a ragged row would land as a diagonal smear rather than as an error.
+        for (name, bitmap) in [("the arrow", COACH_ARROW), ("the hand", COACH_HAND)] {
+            let width = bitmap.rows[0].len();
+            for (y, row) in bitmap.rows.iter().enumerate() {
+                assert_eq!(row.len(), width, "{name}: row {y} is the wrong width");
+                for glyph in row.bytes() {
+                    assert!(
+                        matches!(glyph, b'#' | b'o' | b'.'),
+                        "{name}: row {y} holds `{}`",
+                        glyph as char
+                    );
+                }
+            }
+            // And every filled pixel is enclosed: these are read over canopy,
+            // over the cream banner and over bare dirt, and the outline is the
+            // only reason they stay legible on all three.
+            assert!(
+                bitmap.rows[0].bytes().all(|glyph| glyph != b'#'),
+                "{name}: the top row fills without an outline above it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hands_fingertip_is_the_top_centre_of_its_canvas() {
+        // `Art::coach_hand` anchors at `Anchor::TOP_CENTER` and says the tip is
+        // exactly there. If the raised finger is ever redrawn off-centre, the
+        // hand stops pointing at the thing it is placed on and the anchor needs
+        // the offset this test exists to make unnecessary.
+        let top = COACH_HAND.rows[0];
+        let filled: Vec<usize> = top
+            .bytes()
+            .enumerate()
+            .filter(|(_, glyph)| *glyph != b'.')
+            .map(|(x, _)| x)
+            .collect();
+        let (first, last) = (filled[0], filled[filled.len() - 1]);
+        let middle = (first + last + 1) as f32 * 0.5;
+        assert!(
+            (middle - COACH_HAND.width() as f32 * 0.5).abs() < 1e-6,
+            "the finger spans {first}..={last} of {}, which is not centred",
+            COACH_HAND.width()
+        );
+    }
 
     /// A shipped PNG, decoded: width, height and RGBA bytes.
     fn png(path: &str) -> (u32, u32, Vec<u8>) {
@@ -1687,9 +1922,13 @@ mod tests {
     #[test]
     fn the_treehouse_fits_the_tightest_safe_area() {
         // The deviation from the shared scale exists for one reason, so hold
-        // it to that reason: its opaque art, at the zoom floor, fits the
-        // 286-pixel square an 844x390 phone leaves. Raise the scale and this
-        // is what says by how much it now covers the village.
+        // it to that reason: its opaque art, at the zoom the board *opens* on,
+        // fits the square an 844x390 phone leaves. That used to be the zoom
+        // floor and a 286-pixel square; since the floor dropped to fit the
+        // whole base and the top bar became an overlay it is neither, but the
+        // constant below is the opening zoom and that is what this is about.
+        // Raise the scale and this is what says by how much it now covers the
+        // village.
         let (width, height, data) = png("TownCenter/town-center.png");
         let (mut min, mut max) = (UVec2::MAX, UVec2::ZERO);
         for y in 0..height {
