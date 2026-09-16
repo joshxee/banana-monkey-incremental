@@ -77,6 +77,16 @@ pub(crate) struct HudRoot;
 #[derive(Component)]
 pub(crate) struct SideCell;
 
+/// A piece of the floating top bar that a pointer must not fall through.
+///
+/// The bar itself is transparent and spans the window, and since D31 the board
+/// runs underneath it: taking the whole strip out of the camera's reach would
+/// hand a hundred pixels of map back to the chrome by another route. So the
+/// *cards* block - the banner and the two side cells - and the sky between
+/// them pans the board like any other open ground.
+#[derive(Component)]
+pub(crate) struct HudBlocker;
+
 /// The store panel along the bottom of the screen.
 #[derive(Component)]
 pub(crate) struct StoreRoot;
@@ -99,6 +109,41 @@ pub(crate) struct CounterText;
 
 #[derive(Component)]
 pub(crate) struct RatePanel;
+
+/// A node of the research strip under the rates: a label, a figure and a bar.
+///
+/// Research used to be legible in exactly one place - the Cart's row in the
+/// shop, on the Monkeys tab, below the fold on a short store panel. A player
+/// who had bought a Technologist and gone back to watching their village had
+/// no way of knowing anything was happening at all, and the first playtest
+/// produced exactly that: people bought the Technologist, saw the rate go
+/// *down*, and sold the idea to themselves as a mistake. It is the one thing
+/// in the game that progresses without the player touching it, so it belongs
+/// where they are looking.
+///
+/// One component for the three nodes, like [`UnitField`] and `LayoutElement`
+/// before it: three markers would mean three `Single`s with a `Without` for
+/// each of the others, which is both unreadable and exactly the sort of
+/// disjointness the ECS should be deriving rather than being told.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResearchPart {
+    /// The strip itself, which is hidden until there is research to report.
+    Panel,
+    /// The bar's groove. Only its height varies, and only with how much room
+    /// the banner has.
+    Track,
+    /// The filled part of the bar. Its width is the whole of the progress.
+    Fill,
+}
+
+/// A word or a figure on the strip.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResearchLine {
+    /// What the strip is working towards: the Cart, or the next level.
+    Label,
+    /// Points into the current level, and what the level needs.
+    Value,
+}
 
 /// The scrolling list of unit cards. The store is always this - a plain list,
 /// never a drawer that grows to cover the board.
@@ -350,6 +395,7 @@ pub(crate) fn setup_hud(commands: &mut Commands, asset_server: &AssetServer) {
                 },
                 Pickable::IGNORE,
                 SideCell,
+                HudBlocker,
             ))
             .with_children(|cell| {
                 cell.spawn((
@@ -404,6 +450,7 @@ pub(crate) fn setup_hud(commands: &mut Commands, asset_server: &AssetServer) {
                         },
                         ClassList::new("banner"),
                         Banner,
+                        HudBlocker,
                     ))
                     .with_children(|banner| {
                         // Label above value, rather than "Bananas: 12.3" on one
@@ -452,6 +499,8 @@ pub(crate) fn setup_hud(commands: &mut Commands, asset_server: &AssetServer) {
                                 spawn_rate_line(panel, RateLine::Net, "GROW AVG", "rate-net");
                                 spawn_rate_line(panel, RateLine::Hungry, "HUNGRY", "rate-hungry");
                             });
+
+                        spawn_research_strip(banner);
                     });
             });
 
@@ -463,6 +512,7 @@ pub(crate) fn setup_hud(commands: &mut Commands, asset_server: &AssetServer) {
                 },
                 Pickable::IGNORE,
                 SideCell,
+                HudBlocker,
             ))
             .with_children(|cell| {
                 cell.spawn((
@@ -666,7 +716,7 @@ fn spawn_store(commands: &mut Commands, asset_server: &AssetServer) {
                 InfoText::Body,
             ));
             panel.spawn((
-                Text::new("Tap the i button again to close"),
+                Text::new("Tap anywhere outside to close"),
                 TextFont::from_font_size(11.0),
                 ClassList::new("info-hint"),
             ));
@@ -890,6 +940,73 @@ fn spawn_info_button(row: &mut ChildSpawnerCommands, unit: Unit) {
         ClassList::new("unit-info-button"),
         children![(Text::new("i"), TextFont::from_font_size(18.0))],
     ));
+}
+
+/// The research strip: one line of words and figures, and a bar under it.
+///
+/// Hidden until there is research to report - see [`sync_research`]. A bar and
+/// not a percentage, because what a player wants off this is "nearly there" or
+/// "not yet", read in the time it takes to glance up from the village.
+fn spawn_research_strip(banner: &mut ChildSpawnerCommands) {
+    banner
+        .spawn((
+            Node {
+                display: Display::None,
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::top(px(6)),
+                row_gap: px(3),
+                ..default()
+            },
+            ClassList::new("research-panel"),
+            ResearchPart::Panel,
+        ))
+        .with_children(|strip| {
+            strip
+                .spawn(Node {
+                    width: percent(100),
+                    justify_content: JustifyContent::SpaceBetween,
+                    align_items: AlignItems::Center,
+                    column_gap: px(6),
+                    ..default()
+                })
+                .with_children(|line| {
+                    line.spawn((
+                        Text::new("RESEARCH"),
+                        TextFont::from_font_size(10.0),
+                        ClassList::new("research-label"),
+                        ResearchLine::Label,
+                    ));
+                    line.spawn((
+                        Text::new(""),
+                        TextFont::from_font_size(10.0),
+                        ClassList::new("research-value"),
+                        ResearchLine::Value,
+                    ));
+                });
+            // Track and fill. The fill is a child sized in percent, so the
+            // whole of "how far along" is one number written once per frame
+            // and nothing here has to know how wide the banner ended up.
+            strip
+                .spawn((
+                    Node {
+                        width: percent(100),
+                        height: px(6),
+                        ..default()
+                    },
+                    ClassList::new("research-track"),
+                    ResearchPart::Track,
+                ))
+                .with_child((
+                    Node {
+                        width: percent(0),
+                        height: percent(100),
+                        ..default()
+                    },
+                    ClassList::new("research-fill"),
+                    ResearchPart::Fill,
+                ));
+        });
 }
 
 fn spawn_rate_line(panel: &mut ChildSpawnerCommands, line: RateLine, label: &str, class: &str) {
@@ -1450,6 +1567,93 @@ pub fn sync_readout(
     }
 }
 
+/// Keep the banner's research strip current: shown once there is research to
+/// report, and reading as progress towards the thing it unlocks.
+///
+/// Hidden before the first Technologist rather than shown at zero. An empty
+/// bar under a counter is a promise the player has not been given the means to
+/// keep yet, and the shop's own row already names what would start it.
+pub fn sync_research(
+    layout: Res<SceneLayout>,
+    research: Res<Research>,
+    staff: Res<Staff>,
+    multipliers: Res<Multipliers>,
+    mut parts: Query<(&ResearchPart, &mut Node)>,
+    mut lines: Query<(&ResearchLine, &mut Text, &mut TextFont)>,
+) {
+    let level = research.level();
+    let technologists = staff.count(SupportRole::Technologist);
+    let working = technologists > 0;
+    let shown = working || level > 0 || research.points() > 0.0;
+
+    let (into_level, level_cost) = research.progress();
+    let progress = if level_cost > 0.0 {
+        (into_level / level_cost).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    // The banner is the tightest surface in the game and this is the newest
+    // thing on it, so it gives way first. On a short landscape phone the whole
+    // strip is eighteen pixels: a word, a figure and a four-pixel bar. That is
+    // still the answer to "is anything happening", which is what it is for.
+    let tight = layout.short_landscape() || layout.viewport.x < TINY_WIDTH;
+
+    for (part, mut node) in &mut parts {
+        match part {
+            ResearchPart::Panel => {
+                set_if_changed(
+                    &mut node.display,
+                    if shown { Display::Flex } else { Display::None },
+                );
+                set_if_changed(
+                    &mut node.padding,
+                    UiRect::top(px(if tight { 3.0 } else { 6.0 })),
+                );
+                set_if_changed(&mut node.row_gap, px(if tight { 2.0 } else { 3.0 }));
+            }
+            ResearchPart::Track => {
+                set_if_changed(&mut node.height, px(if tight { 4.0 } else { 6.0 }));
+            }
+            // Rounded to whole percent: the bar is 244 px at its widest, so a
+            // tenth of a percent is a fifth of a pixel, and writing it every
+            // frame would relayout the banner sixty times a second for nothing.
+            ResearchPart::Fill => {
+                set_if_changed(&mut node.width, percent((progress * 100.0).round()));
+            }
+        }
+    }
+
+    if !shown {
+        return;
+    }
+    for (line, mut text, mut font) in &mut lines {
+        set_if_changed(
+            &mut font.font_size,
+            FontSize::Px(if tight { 9.0 } else { 10.0 }),
+        );
+        let value = match line {
+            // The Cart is the one unlock research has, and until it lands it
+            // is what the strip is *for*: "RESEARCH" alone does not tell a
+            // player why they are paying a monkey to produce it.
+            ResearchLine::Label if level < CART_TECH_REQUIREMENT => "RESEARCH -> CART".to_string(),
+            ResearchLine::Label => format!("RESEARCH  LV {level}"),
+            // The rate, where there is room for it. "12/40" says how far;
+            // without the rate it never says whether the bar is moving at all,
+            // which is the question a player who has just paid for a
+            // Technologist is actually asking. It is the first thing to go on
+            // a phone, where the figures alone still answer "how far".
+            ResearchLine::Value if tight || !working => {
+                format!("{into_level:.0}/{level_cost:.0}")
+            }
+            ResearchLine::Value => {
+                let rate = f64::from(technologists) * technologist_research_per_sec(*multipliers);
+                format!("{into_level:.0}/{level_cost:.0}   +{rate:.1}/s")
+            }
+        };
+        set_if_changed(&mut text.0, value);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn sync_shop_new(
     treasury: Res<Treasury>,
@@ -1714,11 +1918,7 @@ mod tests {
             if layout.short_landscape() {
                 assert_eq!(layout.scene_side() + layout.store_width(), width);
             } else {
-                assert!(
-                    (layout.header_height() + layout.scene_side() + layout.store_height() - height)
-                        .abs()
-                        < 0.01
-                );
+                assert!((layout.scene_side() + layout.store_height() - height).abs() < 0.01);
             }
         }
     }

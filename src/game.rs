@@ -169,6 +169,7 @@ impl Plugin for PresentationPlugin {
             .init_resource::<CameraGesture>()
             .init_resource::<RecentreRequest>()
             .init_resource::<FirstHarvest>()
+            .init_resource::<Coaching>()
             .init_resource::<HarvestController>()
             .init_resource::<PendingSettlement>()
             .init_resource::<Feedback>()
@@ -247,12 +248,16 @@ impl Plugin for PresentationPlugin {
                     support::sync_support_badges,
                     animate_banana,
                     animate_collected,
-                    place_held_banana,
+                    // Chained: the coaching marks hang off where the bunch
+                    // ended up this frame, so they are placed after the thing
+                    // that places it.
+                    (place_held_banana, update_coaching).chain(),
                     sync_recentre_button,
                     // Before the two systems that consume what it produces, so
                     // a delivery pulses and floats on the frame it settled.
                     (present_settlements, update_feedback, update_floaters).chain(),
                     hud::sync_readout,
+                    hud::sync_research,
                     hud::sync_shop_tabs,
                     hud::sync_shop_new,
                     hud::sync_info,
@@ -301,6 +306,110 @@ impl Default for FirstHarvest {
     }
 }
 
+/// How long the board goes untouched before it starts pointing.
+///
+/// Ten seconds, which is long enough that nobody who knows what they are doing
+/// ever sees it and short enough that nobody who does not sits there for a
+/// minute. The first playtest is what put this in: people opened the game, saw
+/// a village, and had no idea the loose bunch by the tree was theirs to pick
+/// up - several waited for something to happen, and something should.
+const COACH_IDLE_SECONDS: f32 = 10.0;
+/// How long the prompt takes to arrive once it is due, in seconds. It fades
+/// rather than appearing, because a mark that pops in reads as an error
+/// message.
+const COACH_FADE_SECONDS: f32 = 0.6;
+/// One full mime of the drag, including the beat of nothing at the end of it.
+/// See [`update_coaching`] for what happens when.
+const COACH_DEMO_SECONDS: f32 = 3.4;
+/// The hand is up and still by here, has started moving by here, has arrived
+/// by here, and is gone by here - all in seconds into the mime.
+const COACH_HAND_UP: f32 = 0.45;
+const COACH_HAND_PRESS: f32 = 0.8;
+const COACH_HAND_ARRIVE: f32 = 2.4;
+const COACH_HAND_GONE: f32 = 2.8;
+/// How many times the hand mimes the drag before it gives up and leaves the
+/// arrow to it. See [`Coaching::miming`].
+const COACH_MIME_LIMIT: u32 = 3;
+/// How far above the bunch the arrow's point hangs, in logical pixels, and how
+/// far it bobs either side of that.
+const COACH_ARROW_GAP: f32 = 18.0;
+const COACH_ARROW_BOB: f32 = 4.0;
+/// How fast it bobs. Faster than the depot's breath, which is an invitation;
+/// this one is a nudge to somebody who has stopped.
+const COACH_BOB_HZ: f32 = 0.9;
+/// How many logical pixels an art pixel of a coaching mark draws at.
+///
+/// Fixed, not the board's zoom. Four puts the arrow at 44 x 48 and the hand at
+/// 52 x 60 logical pixels - a thumb's worth, and bigger than the 48-pixel
+/// bunch they are pointing at, which is what a mark has to be to read as an
+/// instruction rather than as another object in the scene.
+const COACH_MARK_SCALE: f32 = 4.0;
+/// How far above the hand's fingertip the carried bunch is drawn, in logical
+/// pixels: clear of the hand, where a real one would be held.
+const COACH_BUNCH_LIFT: f32 = 30.0;
+/// The gold pool under the loose bunch, in world texels: a little wider than
+/// the bunch, so it reads as light on the ground rather than as an object.
+const BANANA_GLOW_TEXELS: Vec2 = Vec2::new(26.0 * art::ART_SCALE, 13.0 * art::ART_SCALE);
+
+/// Whether the player has been left alone long enough to be shown the drag,
+/// and how far through the demonstration the hand has got.
+///
+/// Presentation state, like [`FirstHarvest`], and deliberately not a timer the
+/// simulation can see: nothing about the economy changes because somebody put
+/// their phone down.
+#[derive(Resource, Debug, Default)]
+struct Coaching {
+    /// Seconds since the player last did anything at all.
+    idle: f32,
+    /// Seconds into the current mime of the drag, once [`COACH_IDLE_SECONDS`]
+    /// has passed. Wraps at [`COACH_DEMO_SECONDS`].
+    demo: f32,
+    /// How many full mimes have played since the player last did anything.
+    /// The hand stops after [`COACH_MIME_LIMIT`] of them.
+    mimes: u32,
+}
+
+impl Coaching {
+    /// How strongly the prompt is showing, 0 to 1: nothing until the board has
+    /// been left alone, then a fade.
+    fn prompt(&self) -> f32 {
+        ((self.idle - COACH_IDLE_SECONDS) / COACH_FADE_SECONDS).clamp(0.0, 1.0)
+    }
+
+    /// Whether the hand is still miming the drag.
+    ///
+    /// Three times through and it stops, leaving the arrow. A demonstration
+    /// that repeats for ever stops being a demonstration and becomes a
+    /// spinner - and a player who has watched it three times is not going to
+    /// be convinced by a fourth. It starts again the moment they do something
+    /// and go quiet again, which is the signal that they are still stuck.
+    fn miming(&self) -> bool {
+        self.mimes < COACH_MIME_LIMIT
+    }
+
+    /// Where the hand is along the drag, and how solid it is, this frame.
+    ///
+    /// Five beats: the hand fades in over the bunch, holds there long enough
+    /// to read as a press, travels, lands on the depot, and goes. The pause
+    /// after it goes is what stops the loop reading as a spinner.
+    fn hand(&self) -> (f32, f32) {
+        let at = self.demo;
+        if at < COACH_HAND_UP {
+            (0.0, at / COACH_HAND_UP)
+        } else if at < COACH_HAND_PRESS {
+            (0.0, 1.0)
+        } else if at < COACH_HAND_ARRIVE {
+            let span = COACH_HAND_ARRIVE - COACH_HAND_PRESS;
+            (ease((at - COACH_HAND_PRESS) / span), 1.0)
+        } else if at < COACH_HAND_GONE {
+            let span = COACH_HAND_GONE - COACH_HAND_ARRIVE;
+            (1.0, 1.0 - (at - COACH_HAND_ARRIVE) / span)
+        } else {
+            (1.0, 0.0)
+        }
+    }
+}
+
 #[derive(Component)]
 struct DepositGlow;
 
@@ -316,6 +425,28 @@ struct DepositLabel;
 /// Workers carry [`worker::CarriedBanana`] instead.
 #[derive(Component)]
 struct Banana;
+
+/// One of the three marks that teach the opening drag: see [`update_coaching`].
+///
+/// One component and one query for all three, because they are one behaviour.
+/// They come and go together, they are driven by the same clock, and splitting
+/// them into three markers would mean three `Single`s that have to agree about
+/// when the lesson is over.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+enum CoachMark {
+    /// Gold on the ground under the loose bunch, breathing. Always on while
+    /// the drag is untaught - it is what makes the banana the brightest thing
+    /// on an unfamiliar screen.
+    Glow,
+    /// An arrow over the bunch, pointing down at it. Only once the board has
+    /// been left alone.
+    Arrow,
+    /// A hand miming the drag from the bunch to the depot, on a loop.
+    Hand,
+    /// And the bunch in it, so the mime shows the banana *moving* rather than
+    /// a hand swiping past one that stays put.
+    Bunch,
+}
 
 /// Which of the bunch's clips the player's banana is playing, and where it has
 /// got to: see [`animate_banana`].
@@ -437,19 +568,23 @@ impl BoardCamera {
     /// The closest the board comes.
     const MAX_ZOOM: f32 = 6.0;
 
-    /// The furthest the board goes, bounded by **how big a monkey is**, never
-    /// by how much of the map fits.
+    /// The furthest the board *ever* goes, whatever the window.
     ///
-    /// A monkey is 29 texels tall, so this renders one 58 logical pixels — about
-    /// a thumbnail, and the point below which the cast stops reading as animals
-    /// and starts reading as confetti. Clamping to "fit the 69x69 map" instead
-    /// would put a phone near zoom 0.3 and a monkey at six pixels: the whole
-    /// board visible and nothing on it worth looking at. The map is explored by
-    /// panning (D24), not by zooming out far enough to see it all at once.
-    const MIN_ZOOM: f32 = 2.0;
+    /// The real floor is the window's, not this one: [`SceneLayout::zoom_floor`]
+    /// is whatever fits the whole base on screen, and every gesture is clamped
+    /// to that. This is only the backstop the arithmetic is written against,
+    /// and it sits below the tightest floor any supported viewport produces.
+    ///
+    /// It used to be 2.0, bounded by how big a monkey is rather than by how
+    /// much of the map fits — a monkey at 58 logical pixels, and the map
+    /// explored by panning (D24). The first playtest said otherwise, and said
+    /// it unprompted and repeatedly: the first thing people wanted was to see
+    /// the whole of the place they were building. A village you cannot take in
+    /// at a glance does not read as a village.
+    const MIN_ZOOM: f32 = ABSOLUTE_MIN_ZOOM;
 
-    /// Where the board opens: at the floor, so the board opens at its widest
-    /// and the player only ever zooms *in*.
+    /// Where the board opens: close enough that a monkey reads as a monkey,
+    /// and the player may zoom either way from here.
     ///
     /// Two things have to be true of the opening frame and they pull the same
     /// way. The player's first action is a hand-harvest drag from the home tree
@@ -464,13 +599,14 @@ impl BoardCamera {
     /// that phone the home tree and part of the crew open just off the board;
     /// a higher zoom would lose the depot as well.
     ///
-    /// So this sits on `MIN_ZOOM` rather than above it, and pinching outwards
-    /// from a fresh board does nothing. That is a real cost, and it is the
-    /// cheaper one: the alternative is opening below the zoom at which a monkey
-    /// reads as a monkey. `the_board_opens_framed_on_the_first_drag` and
+    /// This used to sit *on* `MIN_ZOOM`, so a fresh board could only be zoomed
+    /// in; the floor has since dropped to fit the whole map, and the opening
+    /// value stayed where it was. It is the zoom at which the game is played,
+    /// and it is pinned by what has to be on screen at it:
+    /// `the_board_opens_framed_on_the_first_drag` and
     /// `every_support_avatar_is_on_screen_when_the_game_opens` are what keep
     /// both halves honest if someone raises it.
-    const DEFAULT_ZOOM: f32 = Self::MIN_ZOOM;
+    const DEFAULT_ZOOM: f32 = 2.0;
 
     /// How fast a settling zoom closes on its whole step, per second.
     ///
@@ -529,20 +665,45 @@ impl BoardCamera {
     }
 
     /// Take the zoom to `wanted`, holding the ground under `screen` in place.
-    fn zoom_to(&mut self, scene_center: Vec2, screen: Vec2, wanted: f32) {
+    ///
+    /// `floor` is the window's own limit (see [`SceneLayout::zoom_floor`]), and
+    /// it is applied *here* rather than by a later clamp on purpose: a pinch
+    /// that pushes past the floor must come to a stop with the ground still
+    /// under the fingers. Clamping afterwards changes the zoom without
+    /// re-holding, so the board slides out from between them every frame the
+    /// player keeps pushing.
+    fn zoom_to(&mut self, scene_center: Vec2, screen: Vec2, floor: f32, wanted: f32) {
         let held = self.ground_at(scene_center, screen);
-        self.zoom = wanted.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+        self.zoom = wanted.clamp(floor.max(Self::MIN_ZOOM), Self::MAX_ZOOM);
         self.hold(scene_center, held, screen);
     }
 
     /// End a pinch: the zoom settles onto the nearest whole step, so the scene
     /// comes to rest with every sprite back on the texel grid.
-    fn settle(&mut self) {
-        self.resting_zoom = self.zoom.round().clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+    /// Whole steps, and the floor, whichever is nearer.
+    ///
+    /// The floor is rarely a whole number - it is whatever fits the base on
+    /// *this* window, 0.68 on a desktop - so it has to be a resting place in
+    /// its own right or a fully pinched-out board springs back off the view
+    /// the player just asked for.
+    ///
+    /// "Whichever is nearer", not "the floor only when you are below it": on a
+    /// desktop the latter left everything in `(0.68, 1.0)` - half the range
+    /// below the opening zoom - snapping up to 1, so the map view could be
+    /// reached only by pushing past it and could never be *settled* onto from
+    /// above.
+    fn settle(&mut self, floor: f32) {
+        let floor = floor.max(Self::MIN_ZOOM);
+        let whole = self.zoom.round().clamp(floor, Self::MAX_ZOOM);
+        self.resting_zoom = if (self.zoom - floor).abs() < (self.zoom - whole).abs() {
+            floor
+        } else {
+            whole
+        };
     }
 
     /// Ease a settling zoom towards its whole step, holding `screen`.
-    fn ease(&mut self, scene_center: Vec2, screen: Vec2, delta_seconds: f32) {
+    fn ease(&mut self, scene_center: Vec2, screen: Vec2, floor: f32, delta_seconds: f32) {
         if self.zoom == self.resting_zoom {
             return;
         }
@@ -555,7 +716,7 @@ impl BoardCamera {
         } else {
             next
         };
-        self.zoom_to(scene_center, screen, wanted);
+        self.zoom_to(scene_center, screen, floor, wanted);
     }
 
     /// Hold the camera over ground the player has a reason to look at.
@@ -573,15 +734,16 @@ impl BoardCamera {
     /// across, so a focus legally parked on a corner shows five screens of
     /// nothing — which is exactly what ten drags on a phone produced: a corner
     /// of canopy, a screenful of sky, and no landmark to steer back by.
-    fn clamped(self, field: Field, view: Vec2) -> Self {
+    fn clamped(self, field: Field, view: Vec2, floor: f32) -> Self {
+        let floor = floor.max(Self::MIN_ZOOM);
         Self {
             focus: isometric::unproject(field.hold(
                 isometric::project(self.focus),
                 view,
                 self.zoom,
             )),
-            zoom: self.zoom.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM),
-            resting_zoom: self.resting_zoom.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM),
+            zoom: self.zoom.clamp(floor, Self::MAX_ZOOM),
+            resting_zoom: self.resting_zoom.clamp(floor, Self::MAX_ZOOM),
         }
     }
 }
@@ -622,6 +784,9 @@ pub(crate) struct SceneLayout {
     town_centre: Vec2,
     grove: Vec2,
     home_tree: Vec2,
+    /// The lowest zoom this window allows: whatever fits the whole base into
+    /// the safe area. See [`Self::zoom_floor`].
+    zoom_floor: f32,
 }
 
 impl Default for SceneLayout {
@@ -672,6 +837,82 @@ const HELD_LIFT_MIN_PX: f32 = 44.0;
 /// as in view, in logical pixels: half a thumb.
 const DRAG_VIEW_MARGIN: f32 = 22.0;
 
+/// The share of the opening zoom below which HOME offers the way back, however
+/// much of the board is in view. Three quarters: far enough out that the
+/// player is surveying rather than playing. See `sync_recentre_button`.
+const RECENTRE_ZOOM_SHARE: f32 = 0.75;
+
+/// The zoom below which the board is not worth drawing at all, whatever the
+/// window: a monkey is 58 art texels, so this renders one about 7 pixels tall
+/// — a coloured dot in a legible map.
+///
+/// A backstop, not a working value. The tightest floor a supported viewport
+/// actually produces is 0.135, on the narrowest short-landscape window the
+/// layout admits (432x320, whose safe area is 207 px wide); `VIEWPORTS`
+/// samples down to 0.208. If this ever binds, the base has quietly stopped
+/// fitting and no test would say so, which is why the margin is stated here
+/// rather than left to be rediscovered.
+const ABSOLUTE_MIN_ZOOM: f32 = 0.12;
+/// And the highest a zoom *floor* may be: the view the board opens on. A floor
+/// above it would mean a fresh board opened already zoomed past its own limit.
+const ZOOM_FLOOR_CAP: f32 = BoardCamera::DEFAULT_ZOOM;
+/// How much of the safe area the base leaves spare at the zoom floor.
+///
+/// Without it the fit is *exactly* tight on a 320-wide phone — the base's
+/// projected span lands on the safe area's width to the pixel — and
+/// `SceneLayout::for_map` then rounds the origin to a whole pixel, which is
+/// enough on its own to push a corner of the base off the screen the floor
+/// exists to fit it onto. Two per cent is a few pixels and buys the rounding
+/// somewhere to go.
+const ZOOM_FIT_SLACK: f32 = 0.98;
+
+/// The base, projected: the smallest rectangle on the isometric plane holding
+/// every tile of `map` that is not outer jungle.
+///
+/// The *ground*, not the whole file: `start.txt` frames its village in thirteen
+/// tiles of impassable canopy on every side, and fitting those too would cost a
+/// third of the scale for scenery nobody can walk on.
+///
+/// The tiles' outer corners, not their centres, so the rectangle holds the
+/// tiles as they are *drawn*. `project` is linear, so the extremes over the
+/// tile rect are attained at its four corners and this bounding box is exact.
+pub(crate) fn projected_base(map: &Map) -> Rect {
+    let (min, max) = map.ground_bounds();
+    let metres = map::TILE_METRES as f32;
+    let corners = [
+        Vec2::new(min.x as f32, min.y as f32),
+        Vec2::new((max.x + 1) as f32, min.y as f32),
+        Vec2::new(min.x as f32, (max.y + 1) as f32),
+        Vec2::new((max.x + 1) as f32, (max.y + 1) as f32),
+    ]
+    .map(|tile| isometric::project(tile * metres));
+    let low = corners
+        .iter()
+        .copied()
+        .reduce(Vec2::min)
+        .unwrap_or(Vec2::ZERO);
+    let high = corners
+        .iter()
+        .copied()
+        .reduce(Vec2::max)
+        .unwrap_or(Vec2::ZERO);
+    Rect::from_corners(low, high.max(low + Vec2::ONE))
+}
+
+/// The largest zoom at which the whole of `base` fits inside `view`, in logical
+/// pixels, with [`ZOOM_FIT_SLACK`] to spare.
+fn zoom_that_fits(base: Rect, view: Vec2) -> f32 {
+    let span = base.size().max(Vec2::splat(1.0));
+    (view.x / span.x).min(view.y / span.y) * ZOOM_FIT_SLACK
+}
+
+/// How tall the floating top bar is.
+///
+/// It is an overlay, not a band: the board runs underneath it to the top of
+/// the window, and only the banner card and the two side buttons block a
+/// pointer (see `UiRegions`). See [`SceneLayout::for_map`].
+const HEADER_HEIGHT: f32 = 104.0;
+
 /// How far past the ground they work the player may pan, in metres.
 ///
 /// Six tiles: enough that the village is never pinned against the edge of the
@@ -695,6 +936,18 @@ pub(crate) struct Field {
     walk: [Vec2; 3],
     /// How far off the walk the camera may stray, in projected pixels.
     margin: f32,
+    /// How far the middle of the base is off the walk, in projected pixels,
+    /// and how big the base is, projected.
+    ///
+    /// The leash is measured from the walk, and the middle of the base is not
+    /// on it: the home tree is the nearest point and the base's centre is 144
+    /// projected pixels west of it, against a margin of 96. So a player who
+    /// pinched all the way out got a view that fitted the base and a focus
+    /// that could not be moved to the middle of it — the whole base fitted on
+    /// screen and could not be *put* there, which is the same as the feature
+    /// not existing. See [`Self::hold`].
+    survey_reach: f32,
+    base_span: Vec2,
 }
 
 impl Field {
@@ -722,7 +975,15 @@ impl Field {
     /// covers less ground: it is capped at whatever keeps the nearest point of
     /// the walk inside the *short* side of the safe area, so the guarantee
     /// holds in portrait and landscape alike. Zoomed out, the margin is what
-    /// binds instead.
+    /// binds — until the screenful is big enough to hold the whole base, at
+    /// which point the leash lengthens to let the player centre on it.
+    ///
+    /// That last clause is the survey, and it is not a loophole in the
+    /// guarantee: the guarantee is that some of the ground the player works is
+    /// always on screen, and a view holding the *entire* base satisfies it
+    /// however it is aimed. It is scaled by how much of the base fits rather
+    /// than switched on at a threshold, so the leash lengthens smoothly as the
+    /// player pinches out instead of snapping at one zoom.
     fn hold(self, at: Vec2, view: Vec2, zoom: f32) -> Vec2 {
         // Nine tenths of the half-extent, not all of it. At exactly half, the
         // nearest point of the walk lands *on* the edge of the safe area, where
@@ -730,7 +991,13 @@ impl Field {
         // screen or a pixel outside it. The tenth is what makes the guarantee
         // survive being asserted.
         let reach = view.min_element() * 0.45 / zoom;
-        let slack = self.margin.min(reach);
+        // How much of the base a screenful covers, 0 to 1. At the zoom floor
+        // this is 1 by construction - that is what the floor *is* - so the
+        // survey is exactly as long as it needs to be and no longer.
+        let surveying = (view / (self.base_span * zoom).max(Vec2::splat(1.0)))
+            .min_element()
+            .clamp(0.0, 1.0);
+        let slack = self.margin.min(reach).max(self.survey_reach * surveying);
         let near = self.nearest(at);
         near + (at - near).clamp_length_max(slack)
     }
@@ -769,26 +1036,39 @@ impl SceneLayout {
         let height = viewport.y.max(320.0);
         let stage = view == View::Stage;
         let short_landscape = !stage && width > height * 1.35 && height < 560.0;
-        let header_height = if stage { 0.0 } else { 104.0 };
+        // The bar's own height, and nothing else's. Since the first playtest
+        // the banner and MENU *float over* the board rather than standing on a
+        // strip of their own: the board runs to the top of the window, and the
+        // hundred pixels the strip used to own go to the map. The bar is still
+        // this tall - `apply_responsive_hud` sizes its node from here - it just
+        // no longer takes a bite out of the safe area.
+        let header_height = if stage { 0.0 } else { HEADER_HEIGHT };
         let scene_side = if stage {
             width.min(height)
         } else if short_landscape {
-            (height - header_height).min(width * 0.48)
+            height.min(width * 0.48)
         } else {
-            width.min(height * 0.58)
+            // The freed header, added back to the board's band rather than to
+            // the store's: the store is the surface that was already short.
+            (width.min(height * 0.58) + header_height).min(height)
         };
         let store_height = if stage {
             0.0
         } else if short_landscape {
-            height - header_height
+            height
         } else {
-            (height - header_height - scene_side).max(0.0)
+            (height - scene_side).max(0.0)
         };
 
         // What is left of the window once the chrome has taken its reserve.
         // Framing against the viewport instead is what put the hut under the
         // store panel and the grove behind the banner: dead centre of the
         // window is dead centre of *nothing the player can see*.
+        //
+        // The store still takes its reserve, because it is opaque and sits on
+        // the one edge a village is built towards. The bar does not: it is two
+        // small cards over open sky, and reserving a strip for them cost the
+        // board a hundred pixels of the scarcest thing on a phone.
         let half = Vec2::new(width, height) * 0.5;
         let safe = if stage {
             Rect::from_corners(-half, half)
@@ -796,12 +1076,12 @@ impl SceneLayout {
             let store_width = width - scene_side;
             Rect::from_corners(
                 Vec2::new(-half.x, -half.y),
-                Vec2::new(half.x - store_width, half.y - header_height),
+                Vec2::new(half.x - store_width, half.y),
             )
         } else {
             Rect::from_corners(
                 Vec2::new(-half.x, -half.y + store_height),
-                Vec2::new(half.x, half.y - header_height),
+                Vec2::new(half.x, half.y),
             )
         };
 
@@ -823,10 +1103,30 @@ impl SceneLayout {
         // fold ever stretches a metre, so twelve metres of slack is at least
         // twelve metres in every direction rather than twelve along one axis
         // and six along the other.
-        let field = Field {
-            walk: [home_tree, town_centre, grove].map(isometric::project),
+        let base = projected_base(map);
+        let walk = [home_tree, town_centre, grove].map(isometric::project);
+        let mut field = Field {
+            walk,
             margin: FIELD_MARGIN * isometric::TILE_HALF.x / map::TILE_METRES as f32,
+            // Filled in below: `nearest` needs the walk, which needs the field.
+            survey_reach: 0.0,
+            base_span: base.size(),
         };
+        field.survey_reach = base.center().distance(field.nearest(base.center()));
+
+        // How far out the player may pinch: exactly far enough to hold the
+        // whole base — the town, its ring path and both clearings — inside the
+        // safe area.
+        //
+        // Derived from the window rather than fixed, because the two ends of
+        // the range want opposite things. A 320 px phone needs 0.21 to take
+        // the base in; a 1280x720 desktop needs 0.68 and a 1920x1080 one 0.95,
+        // and handing the desktop the phone's floor would let it pinch out to
+        // four screens of empty canopy round a village the size of a postage
+        // stamp. And it is
+        // capped at the opening zoom, so on a window large enough to show the
+        // base at a playable scale the floor simply *is* the opening view.
+        let ground = zoom_that_fits(base, safe.size()).clamp(ABSOLUTE_MIN_ZOOM, ZOOM_FLOOR_CAP);
 
         // Rounded to whole pixels, because this is the corner the texel grid is
         // measured from (see `board_snapped`). A board sitting on half a pixel
@@ -847,6 +1147,7 @@ impl SceneLayout {
             town_centre,
             grove,
             home_tree,
+            zoom_floor: ground,
         }
     }
 
@@ -859,6 +1160,17 @@ impl SceneLayout {
     /// The ground the camera's focus is held near, projected.
     pub(crate) fn field(self) -> Field {
         self.field
+    }
+
+    /// The lowest zoom this window allows, and the whole of "zoom out to see
+    /// the base": at it, every tile that is not outer jungle is on screen.
+    ///
+    /// Never above [`BoardCamera::DEFAULT_ZOOM`] and never below
+    /// [`ABSOLUTE_MIN_ZOOM`], so a very small window cannot drive the board to
+    /// a scale at which the art is gone and a very large one cannot end up
+    /// with a floor above the view it opens on.
+    pub(crate) fn zoom_floor(self) -> f32 {
+        self.zoom_floor
     }
 
     /// Screen position of a ground position, in metres.
@@ -1029,7 +1341,18 @@ impl SceneLayout {
         // Half a thumb inside the edge, not merely inside it: a home tree
         // whose centre is a pixel inside the safe area has most of its target
         // under the store panel, and the drag is as good as gone.
-        let inner = self.safe.inflate(-DRAG_VIEW_MARGIN);
+        //
+        // And the overlay's band comes off the top. The safe area runs to the
+        // top of the window now, because that is where the *board* should be
+        // drawn - but the banner is opaque, it blocks a pointer (see
+        // `hud::HudBlocker`), and ground behind it is not ground the player
+        // can start a drag on. Framing and reachability were the same question
+        // while the bar had a strip of its own; they are not any more, and
+        // this is the half that is about reaching.
+        let inner = Rect::from_corners(
+            self.safe.min + Vec2::splat(DRAG_VIEW_MARGIN),
+            self.safe.max - Vec2::new(DRAG_VIEW_MARGIN, DRAG_VIEW_MARGIN + self.header_height),
+        );
         [self.home_tree, self.town_centre]
             .into_iter()
             .all(|at| contains_inclusive(inner, self.board(at)))
@@ -1326,7 +1649,9 @@ type UiRegions<'w, 's> = Query<
     's,
     (&'static ComputedNode, &'static UiGlobalTransform),
     Or<(
-        With<hud::HudRoot>,
+        // The bar's *cards*, not the bar: it is a transparent overlay now, and
+        // the board beneath it is the player's to drag. See `hud::HudBlocker`.
+        With<hud::HudBlocker>,
         With<hud::StoreRoot>,
         With<hud::InfoPanel>,
     )>,
@@ -1392,6 +1717,11 @@ fn ui_node_contains(node: &ComputedNode, transform: &UiGlobalTransform, position
 }
 
 const HIRE_DEBOUNCE_SECONDS: f32 = 0.25;
+
+/// How long the board ignores the mouse after a press dismissed a panel: long
+/// enough to outlive the press, short enough that nobody notices. See the
+/// dismissal block in [`handle_menu`].
+const DISMISS_GUARD_SECONDS: f32 = 0.06;
 
 #[derive(Resource, Debug, Default)]
 struct DiagnosticPointerTrace {
@@ -1502,6 +1832,32 @@ fn setup(
         BananaShadow,
         LayoutElement::BananaShadow,
     ));
+
+    // The coaching marks, all dark until `update_coaching` has a reason to
+    // show them. Placed by that system rather than by `apply_layout`: three of
+    // the four are somewhere *between* two places on most frames, and the
+    // clock deciding where is the same one deciding whether.
+    //
+    // Only in the full view. The stage view is the board with nothing in front
+    // of it, for looking at one thing; a scenario left running there for ten
+    // seconds would start miming a tutorial over it, and any screenshot taken
+    // past that point would depend on how long the capture took.
+    if launch.view == View::Full {
+        commands.spawn((
+            art.shadow(BANANA_GLOW_TEXELS, GLOW.with_alpha(0.0)),
+            Transform::default(),
+            CoachMark::Glow,
+        ));
+        commands.spawn((art.coach_arrow(0.0), Transform::default(), CoachMark::Arrow));
+        let (hand, fingertip) = art.coach_hand(0.0);
+        commands.spawn((hand, fingertip, Transform::default(), CoachMark::Hand));
+        commands.spawn((
+            art.bunch(art::Bunch::Idle, 0),
+            art::BUNCH.anchor(),
+            Transform::default(),
+            CoachMark::Bunch,
+        ));
+    }
 
     spawn_place_label(
         &mut commands,
@@ -2208,6 +2564,100 @@ fn spawn_floater(commands: &mut Commands, layout: &SceneLayout, delivery: Delive
 
 // ─────────────────────────────────────────────────────────────── input
 
+/// The four things that have to move together when a drag is called off: the
+/// controller holding it, the settlement it would have banked, the banana in
+/// the player's hand and the delivery pulse. Opening a panel cancels a drag,
+/// and so does resetting the run.
+#[derive(bevy::ecs::system::SystemParam)]
+struct HarvestReset<'w, 's> {
+    controller: ResMut<'w, HarvestController>,
+    pending: ResMut<'w, PendingSettlement>,
+    feedback: ResMut<'w, Feedback>,
+    banana: Single<'w, 's, &'static mut Transform, With<Banana>>,
+}
+
+impl HarvestReset<'_, '_> {
+    /// Drop whatever the player was carrying, and put the bunch back under the
+    /// home tree where they will look for it.
+    fn drop_everything(&mut self, layout: &SceneLayout) {
+        cancel_harvest(&mut self.controller, &mut self.pending);
+        self.banana.translation = layout.banana_home().extend(isometric::OVERLAY_Z);
+    }
+}
+
+/// The press that dismisses an open panel, and the panels it is tested
+/// against.
+///
+/// Every modal in the game closes when a press lands outside it, which is what
+/// a stranger tries first and what four of five playtesters tried before
+/// looking for a button. Gathered into one `SystemParam` because
+/// [`handle_menu`] already declares more inputs than a signature reads well
+/// with, and these three only ever travel together.
+#[derive(bevy::ecs::system::SystemParam)]
+struct Dismissal<'w, 's> {
+    mouse: Res<'w, ButtonInput<MouseButton>>,
+    window: Single<'w, 's, &'static Window, With<PrimaryWindow>>,
+    /// The scrim and the two panels under it. The scrim carries a `MenuView`
+    /// too and is deliberately not a panel: a press on it is exactly the press
+    /// this closes on.
+    panels: Query<
+        'w,
+        's,
+        (
+            &'static hud::MenuView,
+            &'static ComputedNode,
+            &'static UiGlobalTransform,
+        ),
+    >,
+    info: Query<'w, 's, (&'static ComputedNode, &'static UiGlobalTransform), With<hud::InfoPanel>>,
+}
+
+impl Dismissal<'_, '_> {
+    /// Where a press landed this frame, if one did and it could dismiss.
+    ///
+    /// A *tap* on touch, not a release: a drag that happens to end outside a
+    /// panel is a scroll or a pan that started inside it, and closing on that
+    /// takes the panel away mid-gesture. On mouse it is the press rather than
+    /// the release, so the panel goes on the way down like every other button
+    /// in the game.
+    ///
+    /// `guard` is not optional. A touch tap is followed by a *compatibility
+    /// mouse event* a frame or two later, by which point `is_touch_frame` has
+    /// already gone false - so without the same suppression window every other
+    /// mouse path observes, tapping MENU on a phone opened the menu on release
+    /// and the synthetic `mousedown` closed it again on the next frame, from a
+    /// position over the MENU button, which is outside the panel. The menu
+    /// simply could not be opened by touch on the web build.
+    fn press(&self, touch: &UiTouchGesture, guard: &PointerGuard) -> Option<Vec2> {
+        if touch.is_touch_frame() {
+            (touch.just_released && !touch.consumed).then_some(touch.position)
+        } else if guard.suppress_mouse_for > 0.0 {
+            None
+        } else if self.mouse.just_pressed(MouseButton::Left) {
+            self.window.cursor_position()
+        } else {
+            None
+        }
+    }
+
+    /// Whether `at` is off the panel `view` names. A panel that is not drawn
+    /// has no rect worth testing, so a missing one reads as "outside".
+    fn outside_panel(&self, view: hud::MenuView, at: Vec2) -> bool {
+        !self
+            .panels
+            .iter()
+            .filter(|(which, ..)| **which == view)
+            .any(|(_, node, transform)| ui_node_contains(node, transform, at))
+    }
+
+    fn outside_info(&self, at: Vec2) -> bool {
+        !self
+            .info
+            .iter()
+            .any(|(node, transform)| ui_node_contains(node, transform, at))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_menu(
     keys: Res<ButtonInput<KeyCode>>,
@@ -2215,17 +2665,15 @@ fn handle_menu(
     buttons: Query<(&ButtonAction, &ComputedNode, &UiGlobalTransform)>,
     mut ui_touch: ResMut<UiTouchGesture>,
     mut menu: ResMut<MenuState>,
-    mut controller: ResMut<HarvestController>,
-    mut pending: ResMut<PendingSettlement>,
     mut restart: ResMut<RestartRequest>,
     mut hire_requests: ResMut<HireRequests>,
     mut panels: MenuPanels,
     mut pointer_guard: ResMut<PointerGuard>,
-    mut feedback: ResMut<Feedback>,
+    mut harvest: HarvestReset,
     time: Res<Time>,
     layout: Res<SceneLayout>,
-    mut banana: Single<&mut Transform, With<Banana>>,
     mut recentre: ResMut<RecentreRequest>,
+    dismissal: Dismissal,
 ) {
     pointer_guard.suppress_hire_for =
         (pointer_guard.suppress_hire_for - time.delta_secs()).max(0.0);
@@ -2287,7 +2735,25 @@ fn handle_menu(
         ui_touch.candidate_action = None;
     }
 
+    // A press that worked a button is not a press "outside" anything, even
+    // when the button it worked sits outside the panel - MENU itself does.
+    // Without this the same press that opens the menu closes it again.
+    //
+    // Whether the button *did* something, not merely whether one was under the
+    // finger: every arm below is guarded, and a press that fell through its
+    // guard changed nothing. The case that matters is a hire button tapped
+    // while a unit's info is open - the hire is refused there, so if that
+    // counted as acting, the one panel the player is most likely to tap past
+    // would be the one panel that would not close.
+    //
+    // Accumulated across the frame, never overwritten: a frame can carry two
+    // actions - an arrow key and a mouse press, say - and if the *last* one
+    // fell through its guard, overwriting would report "nothing happened" and
+    // let the dismissal close a panel the other action had just opened.
+    let mut acted = false;
+
     for action in pressed_actions {
+        let mut handled = true;
         match action {
             ButtonAction::OpenMenu if *menu == MenuState::Closed => {
                 requested = Some(MenuState::Open);
@@ -2332,23 +2798,59 @@ fn handle_menu(
                 requested = Some(MenuState::ConfirmRestart);
             }
             ButtonAction::ConfirmRestart if *menu == MenuState::ConfirmRestart => {
-                cancel_harvest(&mut controller, &mut pending);
+                harvest.drop_everything(&layout);
+                harvest.feedback.success = None;
                 restart.0 = true;
-                feedback.success = None;
-                banana.translation = layout.banana_home().extend(isometric::OVERLAY_Z);
                 requested = Some(MenuState::Closed);
             }
             ButtonAction::CancelRestart if *menu == MenuState::ConfirmRestart => {
                 requested = Some(MenuState::Open);
             }
-            _ => {}
+            _ => handled = false,
+        }
+        acted |= handled;
+    }
+
+    // Every panel closes on a press outside it. The confirm sheet steps back
+    // to the menu it was opened from rather than all the way out, which is
+    // what CANCEL and Escape both already do: a stray tap must not be able to
+    // leave a player wondering whether they just reset their run.
+    if !acted
+        && requested.is_none()
+        && let Some(at) = dismissal.press(&ui_touch, &pointer_guard)
+    {
+        let dismissed = match *menu {
+            MenuState::Open if dismissal.outside_panel(hud::MenuView::Main, at) => {
+                requested = Some(MenuState::Closed);
+                true
+            }
+            MenuState::ConfirmRestart if dismissal.outside_panel(hud::MenuView::Restart, at) => {
+                requested = Some(MenuState::Open);
+                true
+            }
+            MenuState::Closed if panels.info_open.0.is_some() && dismissal.outside_info(at) => {
+                panels.info_open.0 = None;
+                true
+            }
+            _ => false,
+        };
+        // The press that closed a panel is spent. On mouse it lands on the way
+        // *down*, and `handle_harvest_input` runs later in the same chain and
+        // only checks whether the menu is open - which by then it is not - so
+        // without this, clicking just outside the pause menu near the home
+        // tree closed the menu *and* picked up a banana with the same click.
+        //
+        // A few frames, not the half-second a touch gets: that window also
+        // gates `Interaction`-driven buttons, so borrowing it here would leave
+        // the whole HUD dead for half a second after every dismissal.
+        if dismissed {
+            pointer_guard.suppress_mouse_for = DISMISS_GUARD_SECONDS;
         }
     }
 
     if let Some(next) = requested {
         if next != MenuState::Closed {
-            cancel_harvest(&mut controller, &mut pending);
-            banana.translation = layout.banana_home().extend(isometric::OVERLAY_Z);
+            harvest.drop_everything(&layout);
         }
         *menu = next;
     }
@@ -2766,11 +3268,12 @@ fn handle_camera_input(
     mut recentre: ResMut<RecentreRequest>,
 ) {
     let centre = layout.scene_center();
+    let floor = layout.zoom_floor();
     let mut next = *board;
 
     // Whatever else happens this frame, a settling zoom keeps settling: the
     // fingers that started it have already left the glass.
-    next.ease(centre, centre, time.delta_secs());
+    next.ease(centre, centre, floor, time.delta_secs());
 
     let blocked = *menu != MenuState::Closed || web_diagnostics_panel_open();
     if blocked {
@@ -2836,13 +3339,13 @@ fn handle_camera_input(
                             // the ground between them: a pinch that only
                             // multiplies the zoom slides the world out from
                             // between the two fingers pinching it.
-                            next.zoom_to(centre, middle, next.zoom * span / before);
+                            next.zoom_to(centre, middle, floor, next.zoom * span / before);
                             next.resting_zoom = next.zoom;
                         }
                         CameraMotion::Pinch { a, b, span }
                     }
                     _ => {
-                        next.settle();
+                        next.settle(floor);
                         CameraMotion::Idle
                     }
                 }
@@ -2857,7 +3360,7 @@ fn handle_camera_input(
                         // Includes the frame a pinch drops back to one finger:
                         // the survivor re-grabs from where it is rather than
                         // from where the pinch's midpoint was.
-                        _ => next.settle(),
+                        _ => next.settle(floor),
                     }
                     CameraMotion::Pan { pointer, last: now }
                 }
@@ -2865,7 +3368,7 @@ fn handle_camera_input(
             },
             ([], _) => {
                 if matches!(gesture.motion, CameraMotion::Pinch { .. }) {
-                    next.settle();
+                    next.settle(floor);
                 }
                 mouse_motion(
                     &mut next,
@@ -2907,11 +3410,26 @@ fn handle_camera_input(
             }
         }
         if notches != 0.0 {
-            let wanted = (next.resting_zoom + notches * WHEEL_ZOOM_STEP)
-                .round()
-                .clamp(BoardCamera::MIN_ZOOM, BoardCamera::MAX_ZOOM);
+            // The ladder the wheel walks: whole steps, and the window's own
+            // floor at the bottom. The floor is rarely a whole number - it is
+            // whatever fits the base on *this* screen - so rounding to whole
+            // steps alone would leave the map view one notch out of reach on
+            // a desktop, which is the view the wheel exists to get to.
+            let mut wanted = next.resting_zoom.clamp(floor, BoardCamera::MAX_ZOOM);
+            for _ in 0..notches.abs().round() as u32 {
+                wanted = if notches < 0.0 {
+                    let below = (wanted - WHEEL_ZOOM_STEP).round();
+                    if below <= floor { floor } else { below }
+                } else if wanted < floor.ceil() {
+                    floor.ceil().min(BoardCamera::MAX_ZOOM)
+                } else {
+                    (wanted + WHEEL_ZOOM_STEP)
+                        .round()
+                        .min(BoardCamera::MAX_ZOOM)
+                };
+            }
             next.resting_zoom = wanted;
-            next.zoom_to(centre, cursor.unwrap_or(centre), wanted);
+            next.zoom_to(centre, cursor.unwrap_or(centre), floor, wanted);
         }
 
         // WASD, not the arrows: `handle_menu` already binds ArrowLeft and
@@ -2959,7 +3477,7 @@ fn handle_camera_input(
         }
     }
 
-    let next = next.clamped(layout.field(), layout.safe_area().size());
+    let next = next.clamped(layout.field(), layout.safe_area().size(), floor);
     if next != *board {
         *board = next;
     }
@@ -3218,9 +3736,20 @@ fn persist_changes(
 /// the drag leaves the screen makes it the feedback as well as the fix.
 fn sync_recentre_button(
     layout: Res<SceneLayout>,
+    camera: Res<BoardCamera>,
     mut buttons: Query<&mut Node, With<hud::RecentreButton>>,
 ) {
-    let display = if layout.drag_in_view() {
+    // Two reasons to offer the way back, not one.
+    //
+    // The original: the player has panned until the hand-harvest drag is off
+    // the screen. The second: they have pinched *out*. At the zoom floor the
+    // whole base is in view - so `drag_in_view` is perfectly happy - while a
+    // monkey is seven pixels tall and the harvest target is a diamond too
+    // small to hit. That is a fine map and a hopeless village, and it used to
+    // be the one state with no marked way out of it, because HOME restores
+    // the zoom as well as the aim and HOME was hidden exactly there.
+    let surveying = camera.zoom() < BoardCamera::DEFAULT_ZOOM * RECENTRE_ZOOM_SHARE;
+    let display = if layout.drag_in_view() && !surveying {
         Display::None
     } else {
         Display::Flex
@@ -3415,6 +3944,149 @@ fn update_feedback(
 /// How fast the untaught depot breathes: slow enough to read as an invitation
 /// rather than an alarm.
 const HINT_BREATH_HZ: f32 = 0.5;
+
+/// Teach the opening drag: glow on the bunch, and — once the board has been
+/// left alone — an arrow over it and a hand walking the drag to the depot.
+///
+/// Three marks and one clock. The glow runs the whole time the drag is
+/// untaught, because the thing a stranger needs first is to know which object
+/// on the screen is theirs. The arrow and the hand wait for
+/// [`COACH_IDLE_SECONDS`], because a game that mimes its controls at somebody
+/// who is already playing is a game that thinks they are stupid.
+///
+/// Every one of them stops the instant the player does anything - a key, a
+/// press, a finger, a drag - and the wait starts again from nothing. That is
+/// the whole contract: this appears only when somebody is stuck.
+#[allow(clippy::too_many_arguments)]
+fn update_coaching(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    touches: Res<Touches>,
+    menu: Res<MenuState>,
+    first: Res<FirstHarvest>,
+    workforce: Res<Workforce>,
+    controller: Res<HarvestController>,
+    gesture: Res<CameraGesture>,
+    layout: Res<SceneLayout>,
+    mut coaching: ResMut<Coaching>,
+    mut marks: Query<(&CoachMark, &mut Sprite, &mut Transform)>,
+) {
+    // The same test `update_feedback` teaches on, plus the menu: a lesson
+    // drawn under a scrim is a lesson nobody can follow. Once a single worker
+    // is hired the player has either learned the drag or chosen to skip it,
+    // and either way they are done being taught.
+    let resting = matches!(controller.interaction, HarvestInteraction::Idle);
+    let teaching = first.pending && workforce.count() == 0 && *menu == MenuState::Closed;
+
+    // What counts as "doing something" is *making progress*, not touching the
+    // glass. The player this exists for is not the one sitting still - it is
+    // the one tapping the banana instead of dragging it, and a clock that any
+    // tap resets is a clock that never fires for them. So a press only counts
+    // while it is live, and a press that ends without a delivery leaves the
+    // wait exactly where it was.
+    //
+    // A held mouse and a live camera gesture count too: a drag pressed ten
+    // seconds ago is not `just_pressed`, and panning leaves the harvest
+    // controller idle, so without them the hand would fade in on top of a
+    // gesture in progress - which is the one thing this promises never to do.
+    let busy = !resting
+        || keys.get_just_pressed().next().is_some()
+        || mouse.get_pressed().next().is_some()
+        || touches.iter().next().is_some()
+        || !matches!(gesture.motion, CameraMotion::Idle);
+    if !teaching {
+        *coaching = Coaching::default();
+    } else if busy {
+        // Held, not reset: the wait resumes from where the player interrupted
+        // it. Resetting here is what let one idle tap every nine seconds keep
+        // the prompt away for ever. The mime count *does* clear - somebody who
+        // tried something and stopped again is asking for it a second time.
+        coaching.demo = 0.0;
+        coaching.mimes = 0;
+    } else {
+        coaching.idle += time.delta_secs();
+        if coaching.idle >= COACH_IDLE_SECONDS {
+            let next = coaching.demo + time.delta_secs();
+            if next >= COACH_DEMO_SECONDS {
+                coaching.mimes += 1;
+            }
+            coaching.demo = next % COACH_DEMO_SECONDS;
+        }
+    }
+
+    let breath = time.elapsed_secs() * std::f32::consts::TAU * HINT_BREATH_HZ;
+    let glow_alpha = if teaching && resting {
+        // Brighter than the depot's breath and on the same clock, so the two
+        // ends of the drag pulse together and read as one gesture rather than
+        // as two things asking for attention.
+        0.16 + 0.18 * (0.5 + 0.5 * breath.sin())
+    } else {
+        0.0
+    };
+
+    let prompt = if resting { coaching.prompt() } else { 0.0 };
+    let (along, hand_alpha) = coaching.hand();
+    let miming = if coaching.miming() { 1.0 } else { 0.0 };
+    let from = layout.banana_home();
+    let to = layout.board(layout.town_centre());
+
+    // Whole pixels per art pixel, in *logical* pixels, and pointedly not the
+    // board's scale. These are instructions, not scenery: an arrow that shrank
+    // with the board would be eleven pixels tall at the zoom the player is
+    // most likely to be lost at, and one that grew with it would swallow the
+    // village at zoom 6. A thumb is the same size at every zoom, so the mark
+    // telling you where to put it is too.
+    let scale = COACH_MARK_SCALE;
+    let bob = (time.elapsed_secs() * std::f32::consts::TAU * COACH_BOB_HZ).sin();
+
+    for (mark, mut sprite, mut transform) in &mut marks {
+        let (at, alpha, z) = match mark {
+            CoachMark::Glow => (
+                layout.banana_home(),
+                glow_alpha,
+                // On the ground, with the cast shadows: under the bunch it
+                // lights and under any monkey that walks across it.
+                isometric::MARK_Z,
+            ),
+            CoachMark::Arrow => {
+                let half = art::COACH_ARROW.size().y * art::ART_SCALE * scale * 0.5;
+                let lift = COACH_ARROW_GAP + half + COACH_ARROW_BOB * bob;
+                (from + Vec2::new(0.0, lift), prompt, isometric::OVERLAY_Z)
+            }
+            CoachMark::Hand => (
+                from.lerp(to, along),
+                prompt * hand_alpha * miming,
+                isometric::OVERLAY_Z,
+            ),
+            // Carried at the hand's tip, and only while it is travelling. The
+            // mime without it teaches a swipe: a hand crossing the screen while
+            // the bunch stays sitting under the tree never shows the one thing
+            // the gesture is for, which is that the banana comes with you.
+            CoachMark::Bunch => (
+                from.lerp(to, along) + Vec2::new(0.0, COACH_BUNCH_LIFT),
+                prompt * hand_alpha * miming,
+                isometric::OVERLAY_Z,
+            ),
+        };
+        transform.translation = at.round().extend(z);
+        transform.scale = match mark {
+            // The pool is sized in world texels like the shadow it is built
+            // from, so it takes the board's own scale and no more.
+            CoachMark::Glow => Vec3::new(layout.world_scale(), layout.world_scale(), 1.0),
+            CoachMark::Arrow | CoachMark::Hand | CoachMark::Bunch => Vec3::new(scale, scale, 1.0),
+        };
+        let colour = match mark {
+            CoachMark::Glow => GLOW.with_alpha(alpha),
+            // The drawn marks carry their own colours in their texels, so
+            // white-with-alpha tints them to nothing but a fade.
+            CoachMark::Arrow | CoachMark::Hand | CoachMark::Bunch => Color::WHITE.with_alpha(alpha),
+        };
+        if sprite.color != colour {
+            sprite.color = colour;
+        }
+    }
+}
 
 /// Set a material's colour, reading it first. `get_mut` marks a material
 /// changed, and a changed material is re-uploaded - every frame, for glows that
@@ -4023,7 +4695,7 @@ mod tests {
 
         assert_ne!(full, stage);
         assert_eq!(stage.scene_side(), 720.0, "the largest square that fits");
-        assert!(stage.scene_side() > full.scene_side() * 1.5);
+        assert!(stage.scene_side() > full.scene_side());
         assert_eq!(stage.scene_center(), Vec2::ZERO, "centred, with no header");
         assert_eq!(stage.header_height(), 0.0);
         assert!(
@@ -4212,26 +4884,123 @@ mod tests {
         ] {
             let opening = BoardCamera::opening(map);
             let home = SceneLayout::for_map(viewport, View::Full, map, opening);
-            // Portrait phones and desktops open with the whole drag in view.
-            // The short landscape phone opens centred on the treehouse, which
-            // fills its board, with the home tree nearer the edge than a thumb
-            // - so there HOME shows from the first frame (D30).
-            let landscape = home.short_landscape();
-            assert_eq!(
+            // Every phone now opens with the whole drag in view. The short
+            // landscape one did not until the top bar became an overlay (D31):
+            // its safe area was 286 px tall, and the hundred the banner took
+            // was what pushed the home tree past the edge. Handing that back
+            // to the board is what buys it.
+            assert!(
                 home.drag_in_view(),
-                !landscape,
-                "{viewport:?}: HOME is wrong on a fresh board"
+                "{viewport:?}: HOME shows on a fresh board"
             );
 
             let wandered = BoardCamera {
                 focus: home.grove(),
                 ..opening
             }
-            .clamped(home.field(), home.safe_area().size());
+            .clamped(home.field(), home.safe_area().size(), home.zoom_floor());
             let away = SceneLayout::for_map(viewport, View::Full, map, wandered);
             assert!(
                 !away.drag_in_view(),
                 "{viewport:?}: panned to the grove, the drag still counts as in view"
+            );
+        }
+    }
+
+    #[test]
+    fn the_prompt_waits_out_the_idle_and_then_fades_in() {
+        // Nothing for ten seconds, then a fade rather than a pop. The waiting
+        // is the point: a player who is already dragging must never be shown
+        // a hand miming the drag they are in the middle of.
+        let mut coaching = Coaching::default();
+        assert_eq!(coaching.prompt(), 0.0, "a fresh board prompts nothing");
+
+        coaching.idle = COACH_IDLE_SECONDS - 0.1;
+        assert_eq!(coaching.prompt(), 0.0, "a tenth of a second short");
+
+        coaching.idle = COACH_IDLE_SECONDS + COACH_FADE_SECONDS * 0.5;
+        assert!(
+            (coaching.prompt() - 0.5).abs() < 1e-6,
+            "half way through the fade"
+        );
+
+        coaching.idle = COACH_IDLE_SECONDS + COACH_FADE_SECONDS * 4.0;
+        assert_eq!(coaching.prompt(), 1.0, "and it stops at solid");
+    }
+
+    #[test]
+    fn the_mimed_drag_runs_from_the_bunch_to_the_depot_and_lets_go() {
+        // The hand is the gesture spelled out: it arrives over the bunch,
+        // holds there, crosses to the depot and leaves. What this pins is the
+        // two ends - a mime that stops short of the depot teaches the player
+        // to drop the banana on open ground, which does nothing.
+        let mut coaching = Coaching {
+            idle: COACH_IDLE_SECONDS,
+            demo: 0.0,
+            mimes: 0,
+        };
+        assert_eq!(
+            coaching.hand(),
+            (0.0, 0.0),
+            "starts invisible, on the bunch"
+        );
+
+        coaching.demo = COACH_HAND_UP;
+        assert_eq!(coaching.hand(), (0.0, 1.0), "solid, and still on the bunch");
+
+        coaching.demo = COACH_HAND_PRESS;
+        assert_eq!(coaching.hand(), (0.0, 1.0), "the press, before the travel");
+
+        coaching.demo = (COACH_HAND_PRESS + COACH_HAND_ARRIVE) * 0.5;
+        let (along, alpha) = coaching.hand();
+        assert!((0.0..1.0).contains(&along), "half way across: {along}");
+        assert_eq!(alpha, 1.0, "and solid the whole way");
+
+        coaching.demo = COACH_HAND_ARRIVE;
+        assert_eq!(coaching.hand(), (1.0, 1.0), "lands on the depot");
+
+        coaching.demo = COACH_HAND_GONE;
+        assert_eq!(coaching.hand(), (1.0, 0.0), "and lets go there");
+
+        // The beat of nothing before it starts over, so the loop reads as a
+        // demonstration repeating rather than as a spinner.
+        coaching.demo = COACH_DEMO_SECONDS - 0.01;
+        assert_eq!(coaching.hand().1, 0.0);
+        const { assert!(COACH_HAND_GONE < COACH_DEMO_SECONDS) };
+    }
+
+    #[test]
+    fn the_hand_gives_up_after_three_mimes_and_the_arrow_does_not() {
+        // A demonstration that repeats for ever is a spinner. The arrow stays,
+        // because "the thing you want is here" remains true however long the
+        // player looks at it; the pantomime stops.
+        let mut coaching = Coaching {
+            idle: COACH_IDLE_SECONDS + COACH_FADE_SECONDS,
+            demo: 0.0,
+            mimes: 0,
+        };
+        assert!(coaching.miming());
+        assert_eq!(coaching.prompt(), 1.0);
+
+        coaching.mimes = COACH_MIME_LIMIT;
+        assert!(!coaching.miming(), "the hand stops");
+        assert_eq!(coaching.prompt(), 1.0, "the arrow stays");
+    }
+
+    #[test]
+    fn the_mimed_drag_ends_where_a_real_one_would() {
+        // The two ends the mime interpolates between are the two the harvest
+        // hit tests use, on every viewport. If they ever drift apart, the game
+        // would be teaching a gesture it does not itself accept.
+        for viewport in VIEWPORTS {
+            let layout = SceneLayout::for_viewport(viewport);
+            assert!(
+                layout.on_harvest(layout.banana_home()),
+                "{viewport:?}: the mime starts off the harvest target"
+            );
+            assert!(
+                layout.on_deposit(layout.board(layout.town_centre())),
+                "{viewport:?}: the mime ends off the depot"
             );
         }
     }
@@ -4296,11 +5065,13 @@ mod tests {
                 safe.min.y >= -half.y && safe.max.y <= half.y,
                 "{viewport:?}"
             );
-            // The banner's strip is reserved at the top, and the store's panel
-            // on whichever side it took.
-            assert!(
-                half.y - safe.max.y >= layout.header_height(),
-                "{viewport:?}: the safe area reaches into the banner"
+            // Nothing is reserved at the top: since D31 the banner and MENU
+            // float over the board, and the board runs to the top of the
+            // window. Only the store, which is opaque and full-width, still
+            // takes a bite - on whichever side it took.
+            assert_eq!(
+                safe.max.y, half.y,
+                "{viewport:?}: the board stops short of the top of the window"
             );
             let reserved = if layout.short_landscape() {
                 half.x - safe.max.x
@@ -4417,7 +5188,7 @@ mod tests {
         for anchor in [centre, centre + Vec2::new(180.0, -90.0)] {
             for wanted in [2.0, 4.5, 6.0, 3.0] {
                 let held = camera.ground_at(centre, anchor);
-                camera.zoom_to(centre, anchor, wanted);
+                camera.zoom_to(centre, anchor, layout.zoom_floor(), wanted);
                 assert_eq!(camera.zoom(), wanted);
                 let still = camera.ground_at(centre, anchor);
                 assert!(
@@ -4430,23 +5201,92 @@ mod tests {
     }
 
     #[test]
-    fn the_zoom_is_bounded_by_how_big_a_monkey_is() {
-        // Not by how much of the map fits. A monkey is 58 art pixels tall,
-        // and the floor keeps it a readable 44 logical pixels or more.
-        const MONKEY_TEXELS: f32 = 58.0 * art::ART_SCALE;
-        const { assert!(MONKEY_TEXELS * BoardCamera::MIN_ZOOM >= 44.0) };
-        // The counter-case, stated so nobody "fixes" the floor by fitting the
-        // map: the whole 69-tile board on a phone needs a zoom that renders a
-        // monkey unreadable.
-        let across = map::start().width() as f32 * isometric::TILE_HALF.x * 2.0;
-        let to_fit = 390.0 / across;
-        assert!(
-            to_fit < 0.5 && MONKEY_TEXELS * to_fit < 12.0,
-            "fitting the map would draw a monkey {} pixels tall",
-            MONKEY_TEXELS * to_fit
-        );
+    fn the_whole_base_fits_at_the_zoom_floor() {
+        // The floor is the map view, and it is the window's rather than a
+        // constant: every tile that is not outer jungle is on screen at it, on
+        // every viewport the game supports. This replaced a floor bounded by
+        // how big a monkey is - readable, and the single most common note from
+        // the first playtest was that you could not see your own village.
+        let (min, max) = map::start().ground_bounds();
+        for viewport in VIEWPORTS {
+            let layout = SceneLayout::for_viewport(viewport);
+            let floor = layout.zoom_floor();
+            // Through the clamp the game itself applies every frame, not at a
+            // focus handed straight to the layout. The first version of this
+            // test asserted the fit at the middle of the base and passed, while
+            // `Field::hold` was in fact pinning the focus 96 projected pixels
+            // from the walk - 48 px short of the middle - so the view the test
+            // proved was one the player could not reach. A contract that skips
+            // the clamp is a contract about nothing.
+            let aimed = BoardCamera {
+                focus: isometric::unproject(projected_base(map::start()).center()),
+                zoom: floor,
+                resting_zoom: floor,
+            }
+            .clamped(layout.field(), layout.safe_area().size(), floor);
+            let seen = SceneLayout::for_map(viewport, View::Full, map::start(), aimed);
+            // Stated on its own, because the corner checks below would also
+            // pass on a window big enough to hold the base from a focus the
+            // clamp happened to allow. What the survey buys is the ability to
+            // *aim* at the middle of the base, and that is what this says.
+            let middle = isometric::unproject(projected_base(map::start()).center());
+            assert!(
+                aimed.focus().distance(middle) < 0.5,
+                "{viewport:?}: the pan clamp holds the camera {} m off the middle of the base",
+                aimed.focus().distance(middle)
+            );
+            let safe = seen.safe_area();
+            // The tiles' *outer* corners - the ground as it is drawn, which is
+            // what "on screen" has to mean. Sampling the lattice points
+            // instead lets a fit that is a whole tile short still pass, which
+            // is exactly the convention `projected_base` exists to get right.
+            for corner in [
+                Vec2::new(min.x as f32, min.y as f32),
+                Vec2::new((max.x + 1) as f32, min.y as f32),
+                Vec2::new(min.x as f32, (max.y + 1) as f32),
+                Vec2::new((max.x + 1) as f32, (max.y + 1) as f32),
+            ] {
+                let at = seen.board(corner * map::TILE_METRES as f32);
+                // A pixel of tolerance, for the origin's rounding and nothing
+                // else: `ZOOM_FIT_SLACK` is what actually buys the room, and a
+                // generous epsilon here would hide its absence.
+                assert!(
+                    contains_inclusive(safe.inflate(1.0), at),
+                    "{viewport:?}: the base's corner {corner:?} sits at {at:?}, outside {safe:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_zoom_floor_is_never_above_the_view_the_board_opens_on() {
+        // Otherwise a fresh board opens already past its own limit, and the
+        // first thing the clamp does is move a camera the player has not
+        // touched. A window large enough to show the base at the opening zoom
+        // simply has the opening zoom as its floor.
+        const { assert!(ABSOLUTE_MIN_ZOOM <= ZOOM_FLOOR_CAP) };
         const { assert!(BoardCamera::MIN_ZOOM <= BoardCamera::DEFAULT_ZOOM) };
         const { assert!(BoardCamera::DEFAULT_ZOOM < BoardCamera::MAX_ZOOM) };
+        // `handle_camera_input` clamps the wheel's target into `floor..=MAX`,
+        // and `f32::clamp` panics if the bounds cross. Nothing else pins this.
+        const { assert!(ZOOM_FLOOR_CAP <= BoardCamera::MAX_ZOOM) };
+        for viewport in VIEWPORTS {
+            let layout = SceneLayout::for_viewport(viewport);
+            assert!(
+                (ABSOLUTE_MIN_ZOOM..=BoardCamera::DEFAULT_ZOOM).contains(&layout.zoom_floor()),
+                "{viewport:?}: floor {} is outside the range the board is played in",
+                layout.zoom_floor()
+            );
+            // And it is a real zoom *out*: on every phone the game ships to,
+            // the map view is well below the view it opens on.
+            if viewport.x.min(viewport.y) < 560.0 {
+                assert!(
+                    layout.zoom_floor() < BoardCamera::DEFAULT_ZOOM * 0.5,
+                    "{viewport:?}: floor {} barely moves",
+                    layout.zoom_floor()
+                );
+            }
+        }
     }
 
     #[test]
@@ -4458,10 +5298,10 @@ mod tests {
         let centre = layout.scene_center();
         for landed_on in [2.4, 3.7, 5.5, 1.2, 9.0] {
             let mut camera = BoardCamera::default();
-            camera.zoom_to(centre, centre, landed_on);
-            camera.settle();
+            camera.zoom_to(centre, centre, layout.zoom_floor(), landed_on);
+            camera.settle(layout.zoom_floor());
             for _ in 0..600 {
-                camera.ease(centre, centre, 1.0 / 60.0);
+                camera.ease(centre, centre, layout.zoom_floor(), 1.0 / 60.0);
             }
             assert_eq!(
                 camera.zoom(),
@@ -4492,13 +5332,19 @@ mod tests {
                     let radians = angle as f32 * std::f32::consts::TAU / 16.0;
                     let mut camera = BoardCamera::default();
                     let seed = SceneLayout::for_map(viewport, View::Full, map::start(), camera);
-                    camera.zoom_to(seed.scene_center(), seed.scene_center(), zoom);
+                    camera.zoom_to(
+                        seed.scene_center(),
+                        seed.scene_center(),
+                        seed.zoom_floor(),
+                        zoom,
+                    );
                     drag(
                         &mut camera,
                         seed.scene_center(),
                         Vec2::from_angle(radians) * 100_000.0,
                     );
-                    let camera = camera.clamped(seed.field(), seed.safe_area().size());
+                    let camera =
+                        camera.clamped(seed.field(), seed.safe_area().size(), seed.zoom_floor());
 
                     let layout = SceneLayout::for_map(viewport, View::Full, map::start(), camera);
                     let safe = layout.safe_area();
@@ -4549,9 +5395,18 @@ mod tests {
         .into_iter()
         .map(|zoom| {
             let mut camera = BoardCamera::default();
-            camera.zoom_to(layout.scene_center(), layout.scene_center(), zoom);
+            camera.zoom_to(
+                layout.scene_center(),
+                layout.scene_center(),
+                layout.zoom_floor(),
+                zoom,
+            );
             drag(&mut camera, layout.scene_center(), Vec2::splat(100_000.0));
-            let held = isometric::project(camera.clamped(field, layout.safe_area().size()).focus());
+            let held = isometric::project(
+                camera
+                    .clamped(field, layout.safe_area().size(), layout.zoom_floor())
+                    .focus(),
+            );
             held.distance(field.nearest(held))
         })
         .collect();

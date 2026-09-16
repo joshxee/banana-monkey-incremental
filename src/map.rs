@@ -277,6 +277,14 @@ pub struct Map {
     /// Nearest first. See [`Map::parse`].
     groves: Vec<Grove>,
     home_trees: Vec<Tile>,
+    /// The smallest and largest tile that is not outer jungle, inclusive.
+    ///
+    /// This is "the base" as a player means it: the town, its ring path, the
+    /// clearings and the nodes in them - everything but the impassable green
+    /// the map is framed in. The camera's zoom floor is whatever fits it (see
+    /// `game::SceneLayout`), so zooming all the way out shows the whole of the
+    /// place rather than thirteen tiles of decorative canopy on every side.
+    ground: (Tile, Tile),
 }
 
 /// The map, as a resource.
@@ -353,12 +361,22 @@ impl Map {
         let mut town_centre = None;
         let mut nodes = Vec::new();
         let mut home_trees = Vec::new();
+        let mut ground: Option<(Tile, Tile)> = None;
         for (y, row) in rows.iter().enumerate() {
             if row.chars().count() != width {
                 return Err(MapError::Ragged { row: y as i32 });
             }
             for (x, glyph) in row.chars().enumerate() {
                 let tile = Tile::new(x as i32, y as i32);
+                if glyph != '#' {
+                    ground = Some(match ground {
+                        None => (tile, tile),
+                        Some((min, max)) => (
+                            Tile::new(min.x.min(tile.x), min.y.min(tile.y)),
+                            Tile::new(max.x.max(tile.x), max.y.max(tile.y)),
+                        ),
+                    });
+                }
                 terrain.push(match glyph {
                     '#' => Terrain::Jungle,
                     '+' => Terrain::Path,
@@ -399,6 +417,15 @@ impl Map {
             town_centre: town_centre.ok_or(MapError::NoTownCentre)?,
             groves: Vec::new(),
             home_trees,
+            // A map with no walkable tile cannot hold a town centre, and the
+            // `?` below rejects it - but the bounds are computed before that
+            // runs, so they fall back to the whole map rather than panicking.
+            ground: ground.unwrap_or_else(|| {
+                (
+                    Tile::new(0, 0),
+                    Tile::new(width as i32 - 1, rows.len() as i32 - 1),
+                )
+            }),
         };
 
         // Nearest first, so "the node the workforce works" is a lookup rather
@@ -428,6 +455,12 @@ impl Map {
 
     pub fn height(&self) -> i32 {
         self.height
+    }
+
+    /// The smallest and largest tile that is not outer jungle, inclusive:
+    /// everything a player would call their base. See [`Self::ground`].
+    pub fn ground_bounds(&self) -> (Tile, Tile) {
+        self.ground
     }
 
     /// Off-map reads as jungle, which is what it is: the barrier does not stop
