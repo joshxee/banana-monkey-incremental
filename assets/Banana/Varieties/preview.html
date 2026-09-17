@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Banana art · shapes and peeling</title>
+<style>
+  :root { color-scheme: dark; font: 15px/1.5 system-ui,sans-serif; --ground:#a4c5af; --size:192px }
+  body { margin:24px; background:#202832; color:#f1f6f0 }
+  h1 { font-size:24px; margin:0 0 6px }
+  p { color:#bbc3d0; margin:4px 0 18px; max-width:900px }
+  .controls { display:flex; gap:16px; align-items:center; flex-wrap:wrap; padding:14px 0; position:sticky; top:0; background:#202832; z-index:1 }
+  button,select,input { font:inherit; accent-color:#fdd179 }
+  button,select { border:1px solid #6c81a1; border-radius:5px; padding:6px 12px; background:#303843; color:#f1f6f0 }
+  button { cursor:pointer }
+  label { display:flex; align-items:center; gap:7px }
+  .scroll { overflow:auto }
+  table { border-spacing:5px; text-align:left }
+  th { font-size:12px; letter-spacing:.07em; text-transform:uppercase; padding:5px 8px }
+  tbody th { min-width:80px }
+  td { background:var(--ground); padding:0; width:var(--size); height:var(--size) }
+  canvas { display:block; width:var(--size); height:var(--size); image-rendering:pixelated }
+  output { font-variant-numeric:tabular-nums; min-width:100px }
+  a { color:#80d6f3 }
+</style>
+<h1>Banana shapes & peeling</h1>
+<p>All five varieties gently lift in each idle state. Only shiny bananas have a travelling light pass. Each peeling action opens into the half-peeled pose. Replays reset after a hold; gameplay plays the action once.</p>
+<div class="controls">
+  <button id="play" type="button">Pause</button>
+  <button id="restart" type="button">Replay</button>
+  <label>Frame <input id="frame" aria-label="Animation frame" type="range" min="0" max="11" value="0"><output id="counter">1 / 12</output></label>
+  <label>Speed <select id="speed"><option value="0.5">½×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label>
+  <label>Pixels <select id="scale"><option value="1">1× native</option><option value="2" selected>2×</option><option value="4">4×</option></select></label>
+  <label>Ground <select id="ground"><option value="#a4c5af">Mint</option><option value="#303843">Dark</option><option value="#546756">Jungle</option></select></label>
+  <label><input id="repeat" type="checkbox" checked>Repeat preview</label>
+</div>
+<p id="status" role="status">Loading local assets…</p>
+<div class="scroll"><table><thead><tr><th>Variety</th><th>Skin on</th><th>Bunch</th><th>Half peeled</th><th>Peeling</th><th>Worker scale</th></tr></thead><tbody id="rows"></tbody></table></div>
+<p><a href="README.md">Asset and placement notes</a> · <a href="banana-varieties.json">Atlas and animation metadata</a></p>
+<script src="banana-varieties-data.js"></script>
+<script src="banana-idle-data.js"></script>
+<script>
+  'use strict';
+  const meta=window.BANANA_ASSETS;
+  const ids=['yellow','blue','red','huge','shiny'];
+  const names=['Original','Blue','Red','Huge','Shiny'];
+  const controls=Object.fromEntries(['play','restart','frame','counter','speed','scale','ground','repeat','status','rows'].map(id=>[id,document.getElementById(id)]));
+  const images=new Map(), animated=[], idling=[];
+  let idleElapsed=0;
+  const idleMeta=window.BANANA_IDLE;
+  let playing=true, current=0, elapsed=0, previous=0, ready=false;
+  function load(src) { return new Promise((resolve,reject)=>{ const img=new Image();img.onload=()=>{images.set(src,img);resolve(img)};img.onerror=()=>reject(new Error('Could not load '+src));img.src=src }) }
+  function canvas(row) { const td=row.insertCell();const c=document.createElement('canvas');c.width=96;c.height=96;td.append(c);return c }
+  function draw(c,img,rect) { const ctx=c.getContext('2d');ctx.clearRect(0,0,96,96);ctx.imageSmoothingEnabled=false;if(rect)ctx.drawImage(img,rect.x,rect.y,rect.w,rect.h,0,0,96,96);else ctx.drawImage(img,16,24) }
+  function paint(index) { current=index;controls.frame.value=index;controls.counter.value=(index+1)+' / 12';for(const entry of animated)draw(entry.canvas,entry.image,entry.clip.frames[index]) }
+  function paintIdle(time) { for(const e of idling) { let t=time%e.clip.durationMs;let f=0;while(f<e.clip.frames.length-1 && t>=e.clip.frames[f].durationMs){t-=e.clip.frames[f].durationMs;f++}draw(e.canvas,e.image,e.clip.frames[f]) } }
+  function state() { controls.play.textContent=playing?'Pause':'Play' }
+  function duration(index) { const clip=meta.animations.yellow;return clip.frames[index].durationMs+(index===0?470:0)+(index===11?780:0) }
+  controls.play.onclick=()=>{if(!ready)return;playing=!playing;state()};
+  controls.restart.onclick=()=>{if(!ready)return;elapsed=0;idleElapsed=0;paintIdle(0);paint(0);playing=true;state()};
+  controls.frame.oninput=()=>{if(!ready)return;playing=false;elapsed=0;paint(Number(controls.frame.value));idleElapsed=idleMeta.animations["yellow-single"].frames.slice(0,Number(controls.frame.value)).reduce((sum,f)=>sum+f.durationMs,0);paintIdle(idleElapsed);state()};
+  controls.scale.onchange=()=>document.documentElement.style.setProperty('--size',(96*Number(controls.scale.value))+'px');
+  controls.ground.onchange=()=>document.documentElement.style.setProperty('--ground',controls.ground.value);
+  const worker='../../Monkey/Spider Worker/spider_monkey_idle.png';
+  Promise.all([load(meta.image),load(worker),...ids.map(id=>load(meta.animations[id].image)),...Object.values(idleMeta.animations).map(clip=>load(clip.image))]).then(()=>{
+    ids.forEach((id,i)=>{
+      const row=document.createElement('tr');const heading=document.createElement('th');heading.scope='row';heading.textContent=names[i];row.append(heading);controls.rows.append(row);
+      for(const form of ['single','bunch','half-peeled']) { const rect=meta.sprites.find(s=>s.variety===id&&s.form===form);const c=canvas(row);draw(c,images.get(meta.image),rect);{const clip=idleMeta.animations[id+"-"+form];idling.push({canvas:c,image:images.get(clip.image),clip})} }
+      const clip=meta.animations[id];animated.push({canvas:canvas(row),image:images.get(clip.image),clip});draw(canvas(row),images.get(worker));
+    });
+    ready=true;paint(0);paintIdle(0);controls.status.textContent='15 static sprites · five peeling actions · 15 moving idles; shine only on shiny (1.6 s) · 96 × 96 cells';
+    requestAnimationFrame(tick);
+  }).catch(error=>{controls.status.textContent=error.message;playing=false;state()});
+  function tick(time) {
+    const dt=previous?Math.min(time-previous,100):0;previous=time;
+    if(playing) { idleElapsed+=dt*Number(controls.speed.value);paintIdle(idleElapsed);elapsed+=dt*Number(controls.speed.value);while(elapsed>=duration(current)) {elapsed-=duration(current);if(current===11) {if(controls.repeat.checked)paint(0);else {playing=false;elapsed=0;state();break}} else paint(current+1)} }
+    requestAnimationFrame(tick);
+  }
+</script>
+</html>
